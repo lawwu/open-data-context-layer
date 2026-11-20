@@ -21,6 +21,10 @@ def flag(entry) -> str:
     return "  (changed since)" if entry.get("changed_since") else ""
 
 
+def _count(n: int, word: str) -> str:
+    return f"{n:,} {word}{'' if n == 1 else 's'}"
+
+
 def _defined(defined: dict) -> str:
     return f"{defined['file']} at commit {defined['commit']}" if defined.get("commit") else f"{defined['file']} (no git commit)"
 
@@ -57,7 +61,7 @@ def lines(command: str, result) -> list[str]:
                    else f"artifact checked by {result['artifact_verified']}")
         return [f"{result['model']} {result['version']}  {result['change']}  ({result['inputs']} input(s), {checked})"]
     if command == "record":
-        return [f"{result['reference']}  {result['change']}  ({result['objects']} objects, {result['fields']} fields)"] + (
+        return [f"{result['reference']}  {result['change']}  ({_count(result['objects'], 'object')}, {_count(result['fields'], 'field')})"] + (
             [f"fields not known: {result['schema']}"] if result["schema"] != "read" else []) + (
             [f"exported by {', '.join(result['exported_by'])}"] if result.get("exported_by") else [])
     if command == "explain" and "model" in result and result["read"].get("kind") == "gcs_files":
@@ -65,7 +69,7 @@ def lines(command: str, result) -> list[str]:
         out = [f"{result['model']} / {result['version']}",
                f"  produced by   {produced['pipeline_run']} / task {produced['task']}",
                f"  artifact      {artifact['uri']}#{artifact['generation']}  sha256 {artifact['sha256'][:12]}…",
-               f"  read          {read['uri']}  ({read['objects']} objects, generations pinned)",
+               f"  read          {read['uri']}  ({_count(read['objects'], 'object')}, generations pinned)",
                "  written by    " + (f"{read['produced_by']['pipeline_run']} / task {read['produced_by']['task']}" if read["produced_by"] else "unknown"),
                "  exported from " + (f"{read['exported_from']['table']}" + ("  (changed since)" if read["exported_from"]["changed_since"] else "")
                                      if read["exported_from"] else "not recorded")]
@@ -100,7 +104,7 @@ def lines(command: str, result) -> list[str]:
         return [f"{result['reference']}  {result['change']}"]
     if command == "explain" and result.get("kind") == "gcs_files":
         produced, exported = result["produced_by"], result["exported_from"]
-        out = [result["reference"], f"  files         {result['uri']}  ({len(result['objects'])} objects, generations pinned)",
+        out = [result["reference"], f"  files         {result['uri']}  ({_count(len(result['objects']), 'object')}, generations pinned)",
                "  written by    " + (f"{produced['pipeline_run']} / task {produced['task']}  {produced['state']}" if produced else "unknown"),
                "  exported from " + (f"{exported['table']}" + ("  (changed since)" if exported["changed_since"] else "") if exported else "not recorded")]
         for j in result.get("exported_by") or []:
