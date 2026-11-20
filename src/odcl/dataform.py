@@ -206,7 +206,7 @@ def import_invocation(catalog: Catalog, name: str, *, client) -> dict:
     compilation = client.get(compilation_name)
     compiled = client.query(compilation_name, "compilationResultActions")
     compiled_at = _time(compilation.get("createTime"))
-    commit = compilation.get("resolvedGitCommitSha") or (compilation.get("gitCommitish") if compilation.get("gitCommitish") else None)
+    commit = compilation.get("resolvedGitCommitSha")  # a branch name in gitCommitish is not a commit, so it is not reported as one
     location = (compilation.get("codeCompilationConfig") or {}).get("defaultLocation")
     files = {fqn(a.get("target")): a.get("filePath") for a in compiled}
     db = catalog.db
@@ -241,8 +241,7 @@ def import_invocation(catalog: Catalog, name: str, *, client) -> dict:
                 "job_project": project if job else None, "job_location": location if job else None, "job_id": job,
                 "evidence": Jsonb({"target": target, "canonical_target": fqn(action.get("canonicalTarget")), "file": files.get(target),
                                    "commit": commit, "compilation_result": compilation_name, "repository": repository,
-                                   **({"columns": pinned["columns"]} if pinned else {}),
-                                   **({"failure_reason": "reported"} if action.get("failureReason") else {})})})
+                                   **({"columns": pinned["columns"]} if pinned else {})})})
             recorded.append({"target": target, "state": action.get("state"), "job_id": job})
     return {"invocation": name, "compilation_result": compilation_name, "commit": commit, "entries": counts,
             "definitions": "applied" if current else "kept newer", "actions": recorded}
