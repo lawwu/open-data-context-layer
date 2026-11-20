@@ -1,0 +1,62 @@
+{
+  "eventType": "COMPLETE",
+  "eventTime": "2026-09-03T04:10:00.000Z",
+  "producer": "https://github.com/apache/airflow/tree/providers-openlineage/2.3.0",
+  "schemaURL": "https://openlineage.io/spec/2-0-2/OpenLineage.json#/definitions/RunEvent",
+  "run": {
+    "runId": "0190f1a2-7c3b-7d4e-9f00-1a2b3c4d5e6f",
+    "facets": {
+      "parent": {
+        "_producer": "https://github.com/apache/airflow/tree/providers-openlineage/2.3.0",
+        "_schemaURL": "https://openlineage.io/spec/facets/1-1-0/ParentRunFacet.json#/$defs/ParentRunFacet",
+        "run": {"runId": "0190f1a2-0000-7000-8000-000000000001"},
+        "job": {"namespace": "airflow-prod", "name": "staffing_daily"}
+      }
+    }
+  },
+  "job": {
+    "namespace": "airflow-prod",
+    "name": "staffing_daily.build_weekly_hours",
+    "facets": {
+      "jobType": {"processingType": "BATCH", "integration": "AIRFLOW", "jobType": "TASK"},
+      "sql": {"query": "CREATE OR REPLACE TABLE `workforce-demo.features.weekly_hours` AS SELECT employee_id, SUM(worked_minutes_asof) / 60 AS hours FROM `workforce-demo.raw.shift_totals` WHERE pay_period_start >= '2026-08-01' GROUP BY employee_id"}
+    }
+  },
+  "inputs": [
+    {
+      "namespace": "bigquery",
+      "name": "workforce-demo.raw.shift_totals",
+      "facets": {
+        "schema": {"fields": [
+          {"name": "employee_id", "type": "STRING", "description": "Employee identifier"},
+          {"name": "pay_period_start", "type": "DATE"},
+          {"name": "worked_minutes_asof", "type": "INTEGER"}
+        ]}
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "namespace": "bigquery",
+      "name": "workforce-demo.features.weekly_hours",
+      "facets": {
+        "schema": {"fields": [
+          {"name": "employee_id", "type": "STRING"},
+          {"name": "hours", "type": "FLOAT", "description": "Hours worked since August"}
+        ]},
+        "columnLineage": {"fields": {
+          "employee_id": {"inputFields": [
+            {"namespace": "bigquery", "name": "workforce-demo.raw.shift_totals", "field": "employee_id",
+             "transformations": [{"type": "DIRECT", "subtype": "IDENTITY"}]}
+          ]},
+          "hours": {"inputFields": [
+            {"namespace": "bigquery", "name": "workforce-demo.raw.shift_totals", "field": "worked_minutes_asof",
+             "transformations": [{"type": "DIRECT", "subtype": "AGGREGATION", "description": "SUM(worked_minutes_asof) / 60"}]},
+            {"namespace": "bigquery", "name": "workforce-demo.raw.shift_totals", "field": "pay_period_start",
+             "transformations": [{"type": "INDIRECT", "subtype": "FILTER"}]}
+          ]}
+        }}
+      }
+    }
+  ]
+}

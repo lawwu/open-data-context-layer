@@ -39,6 +39,7 @@ uv run odcl find plan
 uv run odcl used-by churn.bronze.accounts.plan
 uv run odcl uses churn-model --upstream
 uv run odcl lineage churn.main_gold.account_features.tenure_months
+uv run odcl serve   # then open http://127.0.0.1:8080/
 ```
 
 `used-by` on the bronze `plan` column reports `churn-model`, because the gold column the project uses is built from it:
@@ -73,6 +74,8 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 | `odcl overview` | Counts, and data that changed after a project used it |
 | `odcl migrate` | Create or update the catalog's tables |
 | `odcl import-sqlite PATH` | Bring an old Fathom SQLite file across, once |
+| `odcl import --openlineage FILE` | Read OpenLineage events: runs and the lineage they establish |
+| `odcl serve [--accept-lineage]` | Serve the catalog over HTTP, with a web page to browse it |
 | `odcl mcp [--allow-writes]` | Serve all of this to an assistant |
 
 Add `--json` before the command for the full result. A bare path such as `churn.bronze.accounts` works wherever a key does, when only one entry has it.
@@ -205,6 +208,56 @@ staffing-forecast / v17
 
 Redefining the feature and training a later version leaves this answer unchanged. `odcl` reads Google with your Application Default Credentials, which bill each request to their quota project. If that project has no billing, Google refuses with a billing error; set `GOOGLE_CLOUD_QUOTA_PROJECT` to one that does.
 
+## OpenLineage
+
+Any tool with an [OpenLineage](https://openlineage.io) integration (Airflow, Spark, dbt, Dagster, Flink, …) can report its runs to the catalog. Point its HTTP transport at a server started with `odcl serve --accept-lineage`. Events are posted to `/api/v1/lineage`, the same path Marquez uses, so the usual configuration works:
+
+```sh
+ODCL_LINEAGE_TOKEN=choose-a-secret uv run odcl serve --accept-lineage
+export OPENLINEAGE_URL=http://localhost:8080 OPENLINEAGE_API_KEY=choose-a-secret   # in the reporting tool
+```
+
+Or read events saved to a file: one JSON event, a JSON list, or JSON Lines.
+
+```sh
+uv run odcl import --openlineage events.jsonl
+```
+
+How an event becomes catalog entries:
+
+- **Datasets** become table entries, and the fields of their schema facet become column entries, nested fields by dotted path. A warehouse dataset keeps its name as its key (`bigquery` / `my-project.features.shift_inputs` is `table:my-project.features.shift_inputs`), so it is the same entry the BigQuery and Dataform importers write. Each importer adds what it knows and keeps what the others said. Other datasets, such as files in a bucket, get a key built from their namespace and name, which are kept under `source.openlineage`.
+- **Lineage** comes only from a run that completed, or from a job event that declares it. A failed run built nothing, so it adds no lineage. An output table is derived from the run's inputs. An output column is derived from the input fields its `columnLineage` facet marks `DIRECT`. An `INDIRECT` field, such as a filter or a join key, decides which rows count but not the value, so it is not lineage. A transformation's description becomes the column's definition.
+- **Runs** are recorded with their job, state, times, inputs, outputs and parent run. Events for one run may arrive in any order, and a run that has finished is not reopened by a late `START`.
+- **What is kept.** Each event is stored once, so a replay changes nothing. As with BigQuery jobs, SQL is kept only as its shape, with every literal replaced by `?`, and error messages are dropped.
+
+Sending the catalog's own runs out as OpenLineage events is not built yet.
+
+## Serving over HTTP, and the web page
+
+```sh
+uv run odcl serve            # http://127.0.0.1:8080/
+```
+
+The web page searches the catalog and shows each entry with its lineage graph, columns, the projects that use it and its history. It also traces each model version and dataset version back to the raw columns, and lists recent runs from Dataform, Vertex AI and OpenLineage. The same server answers a JSON API, and every read returns exactly what the Python operation of the same name returns:
+
+| Route | Answers |
+|---|---|
+| `GET /v1/search?q=&kind=&layer=` | `find` |
+| `GET /v1/entries/{key}` | `get` |
+| `GET /v1/entries/{key}/lineage?direction=up\|down\|both` | `lineage` |
+| `GET /v1/entries/{key}/used-by` | `used_by` |
+| `GET /v1/projects/{name}/uses?upstream=true` | `uses` |
+| `GET /v1/query-history?table=&since=7d&patterns=true` | `table_history` |
+| `GET /v1/datasets/{reference}/trace` | `explain_dataset` |
+| `GET /v1/models`, `GET /v1/models/{name}/versions/{version}/trace` | `models`, `explain_model` |
+| `GET /v1/runs?system=` | `runs` |
+| `GET /v1/overview` | `overview` |
+| `POST /api/v1/lineage` | an OpenLineage event, only with `--accept-lineage` |
+
+URL-encode keys and references in the path. Errors come back as `{"error": {"code", "message"}}`, with 404 for something not registered and 400 for a request the catalog refuses.
+
+There is no sign-in: anyone who can reach the server can read the whole catalog. That is why it listens on 127.0.0.1 unless `--host` says otherwise. It writes nothing unless started with `--accept-lineage`. With `ODCL_LINEAGE_TOKEN` set, a sender must also present that token as `Authorization: Bearer TOKEN`. The page runs only its own script, under a content security policy, and displays catalog text as text.
+
 ## For agents
 
 ```sh
@@ -224,7 +277,7 @@ with Catalog() as catalog:
     catalog.used_by("churn.bronze.accounts.plan")
 ```
 
-`Catalog` is the whole interface: `put`, `apply`, `use`, `find`, `get`, `lineage`, `used_by`, `uses`, `table_history`, `query_jobs`, `overview`. `apply` registers a batch in one transaction: all of it, or none. With `merge=True`, fields a payload leaves out keep what the entry already says. Builds are read and written through `odcl.dataform.import_invocation`, `odcl.builds.record_handoff` and `odcl.builds.explain_dataset`; model versions through `odcl.vertex.import_build` and `Catalog.explain_model`.
+`Catalog` is the whole interface: `put`, `apply`, `use`, `find`, `get`, `lineage`, `used_by`, `uses`, `table_history`, `query_jobs`, `runs`, `models`, `overview`. `apply` registers a batch in one transaction: all of it, or none. With `merge=True`, fields a payload leaves out keep what the entry already says. Builds are read and written through `odcl.dataform.import_invocation`, `odcl.builds.record_handoff` and `odcl.builds.explain_dataset`; model versions through `odcl.vertex.import_build` and `Catalog.explain_model`; OpenLineage events through `odcl.openlineage.ingest`. `odcl.server.make_server` returns the HTTP server.
 
 ## Developing
 
@@ -241,9 +294,8 @@ Without `ODCL_TEST_DATABASE_URL` the database tests are skipped locally and fail
 
 - The machine-learning shape on top: training and serving features, labels, training datasets and model cards.
 - Discovering Vertex AI pipeline runs; a model version is imported from its manifest for now.
-- OpenLineage events as another source of runs and lineage.
+- Sending the catalog's runs and lineage out as OpenLineage events.
 - Discovering Dataform invocations, and Dataform runs started from the CLI rather than the managed service.
-- A web page.
 - Sign-in and permissions. Today anyone who can reach the database can read and write the catalog.
 
 The distribution is `open-data-context-layer`, the Python package is `odcl`, and the command is `odcl`. The repository is [lawwu/open-data-context-layer](https://github.com/lawwu/open-data-context-layer); it was `lawwu/fathom`, and GitHub redirects the old address.
