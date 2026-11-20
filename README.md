@@ -62,6 +62,9 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 | `odcl use PROJECT KEY... [--for TEXT]` | Record that a project used data |
 | `odcl add table\|column\|project ...` | Register by hand |
 | `odcl import --dbt PATH [--select MODEL...]` | Read a dbt project |
+| `odcl import --bigquery TABLE...` | Read tables and their columns from BigQuery |
+| `odcl sync bigquery-jobs --project PROJECT` | Read the query jobs a project ran since the last sync |
+| `odcl history table KEY [--since 7d] [--patterns]` | Which query jobs read or wrote this table? |
 | `odcl overview` | Counts, and data that changed after a project used it |
 | `odcl migrate` | Create or update the catalog's tables |
 | `odcl import-sqlite PATH` | Bring an old Fathom SQLite file across, once |
@@ -94,6 +97,34 @@ Python code that imports `fathom_data` keeps working: `Fathom` is now `odcl.Cata
 - Importing again changes nothing unless something changed. Redefining a table does not create new revisions of everything built from it; those entries report that their input changed.
 - A column that sqlglot cannot trace fully (a row count, for example) is tagged `lineage:partial`.
 
+## Importing from BigQuery
+
+The BigQuery commands need the `bigquery` extra and Python 3.14 or later, because they read through [Sounding](https://github.com/lawwu/sounding). Sign in once with `gcloud auth application-default login`. Every call is free: `tables.get` for schemas and `jobs.list` for jobs. No query is run.
+
+```sh
+uv sync --all-extras --python 3.14
+uv run odcl import --bigquery my-project.features.shift_inputs my-project.raw.shift_totals
+uv run odcl sync bigquery-jobs --project my-job-project
+uv run odcl history table my-project.features.shift_inputs --since 7d --patterns
+```
+
+**Schemas.** Each table becomes a table entry and each field a column, nested fields by dotted path (`shift.hours_at_cutoff`). A snapshot records its base table and snapshot time. Row counts and sizes are left out, so importing again changes nothing unless the definition changed.
+
+**Job history.** `sync bigquery-jobs` reads the query jobs created in one project, the project the jobs ran in, which may differ from where the tables live. Reading other people's jobs needs `bigquery.jobs.listAll` on that project.
+
+- The first sync goes back 7 days (`--backfill`, up to the 180 days BigQuery keeps). Each later sync starts 6 hours before the last finished window ended, or at the oldest job still running, and keeps every job once.
+- A sync that is interrupted keeps the pages it read but does not record the window as finished, so the next sync reads it again.
+- A job that finished is never replaced by an older reading that says it is still running.
+- Jobs labelled as a metadata collector's own (`sounding_action`, `odcl_action`) are left out.
+
+**What a job tells you.** A `read` is a table the job reported referencing. A `write` is recorded only for a statement that succeeded and named a lasting destination; a query's temporary result table is not one. Cache hits and failed jobs often report no tables, and are kept with a `no_table_references` gap. A script and its statements are both kept; totals count the statements, not the script as well.
+
+A job shows that a table was queried. It does not show which fields a model was trained on.
+
+**SQL.** By default each query is kept only as its shape: comments removed and every literal and parameter replaced by `?`, so two lookups for different employees are one example. The original SQL is not stored. A script, or SQL that cannot be read for certain, is kept without a shape (`template_unavailable`). `--sql none` does not ask BigQuery for SQL at all. Error messages and user emails are never read.
+
+Grouping uses the catalog's own digest of the shape. BigQuery's normalized query hash is only in `INFORMATION_SCHEMA`, which costs a query to read.
+
 ## For agents
 
 ```sh
@@ -113,7 +144,7 @@ with Catalog() as catalog:
     catalog.used_by("churn.bronze.accounts.plan")
 ```
 
-`Catalog` is the whole interface: `put`, `apply`, `use`, `find`, `get`, `lineage`, `used_by`, `uses`, `overview`. `apply` registers a batch in one transaction: all of it, or none.
+`Catalog` is the whole interface: `put`, `apply`, `use`, `find`, `get`, `lineage`, `used_by`, `uses`, `table_history`, `query_jobs`, `overview`. `apply` registers a batch in one transaction: all of it, or none.
 
 ## Developing
 
@@ -129,7 +160,7 @@ Without `ODCL_TEST_DATABASE_URL` the database tests are skipped locally and fail
 ## Not built yet
 
 - The machine-learning shape on top: training and serving features, labels, training datasets and model cards.
-- Importers for BigQuery, Dataform and Vertex AI Pipelines, and the model trace they feed. `tests/fixtures/staffing_trace/` holds the example the first trace must reproduce.
+- Importers for Dataform and Vertex AI Pipelines, and the model trace they and the BigQuery importer feed. `tests/fixtures/staffing_trace/` holds the example the first trace must reproduce.
 - A web page.
 - Sign-in and permissions. Today anyone who can reach the database can read and write the catalog.
 
