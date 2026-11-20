@@ -12,7 +12,7 @@ The project was called Fathom. The [implementation plan](docs/implementation-pla
 |---|---|---|
 | table | A table, view or file in some system | `table:<database>.<schema>.<name>` |
 | column | One column of a registered table | `column:<table path>.<name>` |
-| project | Anything that uses data: an analysis, a model | `project:<name>` |
+| project | Anything that uses data: an analysis, a dashboard, a model | `project:<name>` |
 
 Data is registered once and shared. It does not belong to a project. Two links connect entries:
 
@@ -22,6 +22,14 @@ Data is registered once and shared. It does not belong to a project. Two links c
 A `uses` link remembers the revision of the data the project saw. If the data is redefined later, the catalog says so until the project records use again.
 
 Every change is a new revision with who made it and when.
+
+Around these entries the catalog also keeps what ran and what it made:
+
+- **Runs**: Dataform actions, Vertex AI training tasks, runs reported over OpenLineage, and the BigQuery jobs behind them. Runs are only ever added.
+- **Dataset versions**: a snapshot one build handed on, with each field pinned to the column definition that build used.
+- **Model versions**: one trained version of a model, written once. A model is a project. Each version belongs to its project and reads one dataset version.
+
+A model version's pins reach its project's `uses` links. Importing the newest version of a model records that its project uses the columns that version was trained on, at the definitions it used, so `used-by` on a raw column reaches the model. If someone redefines a feature after training, the project is flagged until a version trained on the new definition is imported.
 
 ## Try it
 
@@ -193,6 +201,8 @@ The manifest is the trainer's claim, so the import checks it before writing anyt
 - The dataset version is recorded (by `odcl handoff`), and each field is a column of it. A missing one is named, and nothing is written until it is there.
 - Importing the same manifest again changes nothing. A different manifest for a version already recorded is refused: a model version is written once.
 
+The model's project is registered at its first version if it is not already. If the version is the project's most recently trained one, its project's `uses` links then point at the columns it was trained on, pinned to the definitions it used and noted with each field's role (`feature in v17`). Links a person recorded with `odcl use` are kept. A version imported late, after a newer one, does not move them back. Replaying the manifest of a version recorded by an earlier release fills its links in.
+
 `explain model` follows the pins all the way down:
 
 ```text
@@ -238,7 +248,7 @@ Sending the catalog's own runs out as OpenLineage events is not built yet.
 uv run odcl serve            # http://127.0.0.1:8080/
 ```
 
-The web page searches the catalog and shows each entry with its lineage graph, columns, the projects that use it and its history. It also traces each model version and dataset version back to the raw columns, and lists recent runs from Dataform, Vertex AI and OpenLineage. The same server answers a JSON API, and every read returns exactly what the Python operation of the same name returns:
+The web page has a page each for Tables (filtered by layer and system), Projects, Model versions and Runs. Each entry has its own page with its lineage graph, columns, the projects that use it and its history. A project's page lists its model versions, and each model version and dataset version is traced back to the raw columns. Columns are found by search or from their table. The same server answers a JSON API, and every read returns exactly what the Python operation of the same name returns:
 
 | Route | Answers |
 |---|---|
@@ -246,10 +256,12 @@ The web page searches the catalog and shows each entry with its lineage graph, c
 | `GET /v1/entries/{key}` | `get` |
 | `GET /v1/entries/{key}/lineage?direction=up\|down\|both` | `lineage` |
 | `GET /v1/entries/{key}/used-by` | `used_by` |
+| `GET /v1/tables?layer=&system=` | `tables` |
+| `GET /v1/projects` | `projects` |
 | `GET /v1/projects/{name}/uses?upstream=true` | `uses` |
 | `GET /v1/query-history?table=&since=7d&patterns=true` | `table_history` |
 | `GET /v1/datasets/{reference}/trace` | `explain_dataset` |
-| `GET /v1/models`, `GET /v1/models/{name}/versions/{version}/trace` | `models`, `explain_model` |
+| `GET /v1/models?project=`, `GET /v1/models/{name}/versions/{version}/trace` | `models`, `explain_model` |
 | `GET /v1/runs?system=` | `runs` |
 | `GET /v1/overview` | `overview` |
 | `POST /api/v1/lineage` | an OpenLineage event, only with `--accept-lineage` |
@@ -277,7 +289,7 @@ with Catalog() as catalog:
     catalog.used_by("churn.bronze.accounts.plan")
 ```
 
-`Catalog` is the whole interface: `put`, `apply`, `use`, `find`, `get`, `lineage`, `used_by`, `uses`, `table_history`, `query_jobs`, `runs`, `models`, `overview`. `apply` registers a batch in one transaction: all of it, or none. With `merge=True`, fields a payload leaves out keep what the entry already says. Builds are read and written through `odcl.dataform.import_invocation`, `odcl.builds.record_handoff` and `odcl.builds.explain_dataset`; model versions through `odcl.vertex.import_build` and `Catalog.explain_model`; OpenLineage events through `odcl.openlineage.ingest`. `odcl.server.make_server` returns the HTTP server.
+`Catalog` is the whole interface: `put`, `apply`, `use`, `find`, `get`, `lineage`, `used_by`, `uses`, `table_history`, `query_jobs`, `tables`, `projects`, `runs`, `models`, `overview`. `apply` registers a batch in one transaction: all of it, or none. With `merge=True`, fields a payload leaves out keep what the entry already says. Builds are read and written through `odcl.dataform.import_invocation`, `odcl.builds.record_handoff` and `odcl.builds.explain_dataset`; model versions through `odcl.vertex.import_build` and `Catalog.explain_model`; OpenLineage events through `odcl.openlineage.ingest`. `odcl.server.make_server` returns the HTTP server.
 
 ## Developing
 

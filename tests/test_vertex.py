@@ -55,7 +55,8 @@ def test_a_model_version_explains_itself_back_to_the_raw_column(catalog):
     recorded = vertex.import_build(catalog, load("training_manifest.json"), client=FakeVertex())
     assert recorded == {"model": "staffing-forecast", "version": "v17", "change": "added", "inputs": 1, "artifact_verified": "sha256"}
     assert catalog.explain_model("staffing-forecast", "v17") == EXPECTED
-    assert catalog.get("project:staffing-forecast")["kind"] == "project"  # the model family is a project that uses data
+    project = catalog.get("project:staffing-forecast")
+    assert project["kind"] == "project" and "vertex" in project["source"]  # the model family is a project that uses data
 
 
 def test_an_identical_replay_changes_nothing_and_a_different_artifact_for_the_same_version_is_refused(catalog):
@@ -111,12 +112,11 @@ def test_a_task_that_did_not_succeed_or_is_not_in_the_run_cannot_have_produced_t
     assert error.value.code == "execution_mismatch"
 
 
-def test_a_later_version_trained_on_a_changed_definition_leaves_the_earlier_trace_alone(catalog):
-    sync_history(catalog)
-    build(catalog)
-    vertex.import_build(catalog, load("training_manifest.json"), client=FakeVertex())
+SECOND = INVOCATION.replace("build-042", "build-049")
 
-    # the feature is redefined, rebuilt, snapshotted again, and a new version is trained on it
+
+def redefine_and_rebuild(catalog):
+    """The feature is redefined, rebuilt and snapshotted again, ready for a new version to be trained on it."""
     compilation = load("dataform_compilation_result.json")
     compilation["compilationResult"] |= {"name": compilation["compilationResult"]["name"] + "-next", "createTime": "2026-09-09T00:00:00Z"}
     compilation["compilationResultActions"][1]["relation"]["selectQuery"] = (
@@ -124,18 +124,69 @@ def test_a_later_version_trained_on_a_changed_definition_leaves_the_earlier_trac
     rebuilt = json.loads(json.dumps(load("dataform_workflow_invocation.json")).replace("build-042", "build-049").replace("job-042", "job-049")
                          .replace("2026-09-02T01:5", "2026-09-09T01:5"))
     rebuilt["workflowInvocation"]["resolvedCompilationResult"] = compilation["compilationResult"]["name"]
-    second = INVOCATION.replace("build-042", "build-049")
-    dataform.import_invocation(catalog, second, client=FakeDataform(invocation=rebuilt, compilation=compilation))
-    builds.record_handoff(catalog, second, TARGET, snapshot_facts(time="2026-09-09T02:00:00Z") | {"table": "workforce-demo.frozen.shift_inputs_b049"})
+    dataform.import_invocation(catalog, SECOND, client=FakeDataform(invocation=rebuilt, compilation=compilation))
+    builds.record_handoff(catalog, SECOND, TARGET, snapshot_facts(time="2026-09-09T02:00:00Z") | {"table": "workforce-demo.frozen.shift_inputs_b049"})
+
+
+def train_v18(catalog):
     v18 = json.loads(json.dumps(load("training_manifest.json")).replace("v17", "v18").replace("train-042", "train-049")
-                     .replace("shift_inputs_b042@2026-09-02", "shift_inputs_b049@2026-09-09"))
-    job = json.loads(json.dumps(load("vertex_pipeline_job.json")).replace("train-042", "train-049"))
-    vertex.import_build(catalog, v18, client=FakeVertex(job=job, objects={"gs://demo-models/staffing/v18/model.bin": (MODEL, "1788318000000000")}))
+                     .replace("shift_inputs_b042@2026-09-02", "shift_inputs_b049@2026-09-09").replace("executions/481", "executions/489"))
+    job = json.loads(json.dumps(load("vertex_pipeline_job.json")).replace("train-042", "train-049").replace("2026-09-02T0", "2026-09-09T0")
+                     .replace("executions/481", "executions/489"))
+    return vertex.import_build(catalog, v18, client=FakeVertex(job=job, objects={"gs://demo-models/staffing/v18/model.bin": (MODEL, "1788318000000000")}))
+
+
+def test_a_later_version_trained_on_a_changed_definition_leaves_the_earlier_trace_alone(catalog):
+    sync_history(catalog)
+    build(catalog)
+    vertex.import_build(catalog, load("training_manifest.json"), client=FakeVertex())
+    redefine_and_rebuild(catalog)
+    train_v18(catalog)
 
     assert catalog.explain_model("staffing-forecast", "v17") == EXPECTED  # unchanged by everything that came after
     newer = catalog.explain_model("staffing-forecast", "v18")["inputs"][0]
-    assert newer["expression"] == "ROUND(worked_minutes_asof / 60, 2)" and newer["produced_by"]["dataform_invocation"] == second
+    assert newer["expression"] == "ROUND(worked_minutes_asof / 60, 2)" and newer["produced_by"]["dataform_invocation"] == SECOND
     assert "job job-049 is not in the synced query history of workforce-demo" in catalog.explain_model("staffing-forecast", "v18")["missing"]
+
+
+FEATURE = f"column:{TARGET}.hours_at_cutoff"
+RAW_MINUTES = "workforce-demo.raw.shift_totals.worked_minutes_asof"
+
+
+def test_a_model_version_records_what_its_project_uses_pinned_as_it_was_trained(catalog):
+    build(catalog)
+    vertex.import_build(catalog, load("training_manifest.json"), client=FakeVertex())
+    [used] = catalog.uses("staffing-forecast")["uses"]
+    pinned = catalog.db.execute("SELECT column_revision FROM version_columns WHERE column_key = %s", (FEATURE,)).fetchone()["column_revision"]
+    assert used["key"] == FEATURE and used["purpose"] == "feature in v17" and used["linked_revision"] == pinned and not used["changed_since"]
+    # so the question "who depends on this raw column?" now reaches the model
+    assert {"project": "project:staffing-forecast", "how": "downstream"}.items() <= catalog.used_by(RAW_MINUTES)["projects"][0].items()
+
+    redefine_and_rebuild(catalog)  # the feature changed after v17 was trained on it
+    assert catalog.uses("staffing-forecast")["uses"][0]["changed_since"]
+    assert {"project": "project:staffing-forecast", "key": FEATURE} in catalog.overview()["changed_since_used"]
+
+    train_v18(catalog)  # retraining on the new definition clears it
+    [used] = catalog.uses("staffing-forecast")["uses"]
+    assert used["purpose"] == "feature in v18" and not used["changed_since"] and catalog.overview()["changed_since_used"] == []
+
+
+def test_importing_an_older_version_late_does_not_move_the_project_back(catalog):
+    build(catalog)
+    redefine_and_rebuild(catalog)
+    train_v18(catalog)
+    vertex.import_build(catalog, load("training_manifest.json"), client=FakeVertex())  # v17, trained earlier, imported after
+    assert catalog.uses("staffing-forecast")["uses"][0]["purpose"] == "feature in v18"
+
+
+def test_what_a_person_recorded_a_project_using_is_kept(catalog):
+    build(catalog)
+    catalog.put("project", {"name": "staffing-forecast", "description": "Weekly staffing forecast"})
+    catalog.use("staffing-forecast", ["workforce-demo.raw.shift_totals"], "EDA of shift totals")
+    vertex.import_build(catalog, load("training_manifest.json"), client=FakeVertex())
+    used = {u["key"]: u["purpose"] for u in catalog.uses("staffing-forecast")["uses"]}
+    assert used == {"table:workforce-demo.raw.shift_totals": "EDA of shift totals", FEATURE: "feature in v17"}
+    assert [m["version"] for m in catalog.models("staffing-forecast")] == ["v17"] and catalog.models("other-model") == []
 
 
 def test_explaining_what_is_not_there(catalog):
@@ -205,3 +256,23 @@ def test_a_refusal_says_why_google_refused():
     with pytest.raises(CatalogError) as error:
         vertex.Client(session, "us-central1").object("gs://bucket/model.bin")
     assert "(403)" in str(error.value)
+
+
+def test_a_project_lists_its_model_versions_and_the_project_list_says_which_are_models(catalog):
+    build(catalog)
+    catalog.put("project", {"name": "churn-eda", "description": "An analysis", "owner": "ana"})
+    vertex.import_build(catalog, load("training_manifest.json"), client=FakeVertex())
+    assert [m["version"] for m in catalog.get("staffing-forecast")["model_versions"]] == ["v17"]
+    assert catalog.get("churn-eda")["model_versions"] == []
+    projects = {p["key"]: p for p in catalog.projects()}
+    assert projects["project:staffing-forecast"].items() >= {"uses": 1, "latest_version": "v17", "changed_since_used": 0}.items()
+    assert projects["project:churn-eda"].items() >= {"uses": 0, "latest_version": None, "owner": "ana"}.items()
+
+
+def test_replaying_a_version_recorded_before_projects_kept_their_uses_fills_them_in(catalog):
+    build(catalog)
+    vertex.import_build(catalog, load("training_manifest.json"), client=FakeVertex())
+    catalog._use_from_model("project:staffing-forecast", [])  # as a version imported by an earlier release left it
+    assert catalog.uses("staffing-forecast")["uses"] == []
+    assert vertex.import_build(catalog, load("training_manifest.json"), client=FakeVertex())["change"] == "unchanged"
+    assert [u["purpose"] for u in catalog.uses("staffing-forecast")["uses"]] == ["feature in v17"]

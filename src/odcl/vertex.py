@@ -103,9 +103,11 @@ def import_build(catalog: Catalog, manifest: dict, *, client) -> dict:
     canonical = json.dumps(manifest, sort_keys=True)
     said = hashlib.sha256(canonical.encode()).hexdigest()
     project = f"project:{model.lower()}"
-    recorded = catalog.db.execute("SELECT manifest_sha256 FROM model_builds WHERE project_key = %s AND version = %s", (project, version)).fetchone()
+    recorded = catalog.db.execute("SELECT id, manifest_sha256 FROM model_builds WHERE project_key = %s AND version = %s", (project, version)).fetchone()
     if recorded:  # a version is built once: a replay needs no checking, and anything else is refused before reading Google
         require(recorded["manifest_sha256"] == said, "conflict", f"{model} {version} is already recorded from a different manifest; a version is built once")
+        with catalog.db.transaction():
+            _record_use(catalog, recorded["id"])  # versions recorded before projects kept their uses get them on replay
         return {"model": model, "version": version, "change": "unchanged", "inputs": len(manifest["inputs"]), "artifact_verified": "recorded"}
 
     # the run and the task that claims to have produced the model
@@ -143,7 +145,8 @@ def import_build(catalog: Catalog, manifest: dict, *, client) -> dict:
             require(existing["manifest_sha256"] == said, "conflict", f"{model} {version} is already recorded from a different manifest; a version is built once")
             return {"model": model, "version": version, "change": "unchanged", "inputs": len(manifest["inputs"]), "artifact_verified": verified}
         if not catalog._head(project):
-            catalog.put("project", {"name": model, "description": f"Model {model}, trained in Vertex AI Pipelines"})
+            catalog.put("project", {"name": model, "description": f"Model {model}, trained in Vertex AI Pipelines",
+                                    "source": {"vertex": {"created_by": "the import of its first model version"}}})
         timing = lambda r, k: _time(r.get(k))  # noqa: E731
         run = _execution(db, {"native_key": manifest["pipeline_run"], "kind": "pipeline_run", "parent_id": None, "state": job.get("state") or "UNKNOWN",
                               "started_at": timing(job, "startTime"), "ended_at": timing(job, "endTime"),
@@ -160,7 +163,25 @@ def import_build(catalog: Catalog, manifest: dict, *, client) -> dict:
         with db.cursor() as cursor:
             cursor.executemany("INSERT INTO build_inputs (build_id, role, field, position, dataset_version_id, field_path) VALUES (%s, %s, %s, %s, %s, %s)",
                                [(build, i["role"], i["field"], i.get("position"), data["id"], i["field"].lower()) for i in manifest["inputs"]])
+        _record_use(catalog, build)
     return {"model": model, "version": version, "change": "added", "inputs": len(manifest["inputs"]), "artifact_verified": verified}
+
+
+def _record_use(catalog: Catalog, build: int) -> None:
+    """If `build` is its project's most recently trained version, point the project's `uses` at the columns it
+    was trained on, pinned to the definitions that version used, so `used_by` and changed-since reach the model."""
+    db = catalog.db
+    row = db.execute("""SELECT b.project_key, b.version, t.ended_at FROM model_builds b JOIN executions t ON t.id = b.producing_execution
+                        WHERE b.id = %s""", (build,)).fetchone()
+    later = db.execute("""SELECT 1 FROM model_builds b JOIN executions t ON t.id = b.producing_execution
+                          WHERE b.project_key = %s AND b.id <> %s AND t.ended_at > %s""", (row["project_key"], build, row["ended_at"])).fetchone() \
+        if row["ended_at"] else None
+    if later:
+        return
+    pinned = db.execute("""SELECT i.role, c.column_key, c.column_revision FROM build_inputs i
+                           JOIN version_columns c ON (c.dataset_version_id, c.field_path) = (i.dataset_version_id, i.field_path)
+                           WHERE i.build_id = %s ORDER BY c.column_key, i.role""", (build,)).fetchall()
+    catalog._use_from_model(row["project_key"], [(r["column_key"], r["column_revision"], f"{r['role']} in {row['version']}") for r in pinned])
 
 
 def explain_model(catalog: Catalog, name: str, version: str) -> dict:

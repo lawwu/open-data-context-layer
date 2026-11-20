@@ -64,6 +64,8 @@ def test_reads_answer_what_the_catalog_answers(catalog, serve):
     assert get(f"{api}/entries/{quote(GOLD + '.tenure_months', safe='')}/lineage?direction=up") == catalog.lineage(GOLD + ".tenure_months", "up")
     assert get(f"{api}/entries/{quote('churn.bronze.accounts', safe='')}/used-by") == catalog.used_by("churn.bronze.accounts")
     assert get(f"{api}/overview")["counts"] == catalog.overview()["counts"]
+    assert get(f"{api}/tables?layer=gold") == catalog.tables(layer="gold")
+    assert get(f"{api}/projects") == catalog.projects()
 
 
 def test_the_model_trace_is_the_same_over_http(database, serve):
@@ -75,6 +77,7 @@ def test_the_model_trace_is_the_same_over_http(database, serve):
     assert get(f"{api}/models/staffing-forecast/versions/v17/trace") == EXPECTED
     assert get(f"{api}/models") == [{"model": "staffing-forecast", "version": "v17", "dataset_version": EXPECTED["read"]["dataset_version"],
                                      "artifact": EXPECTED["artifact"]["uri"], "recorded_by": "ana", "recorded_at": get(f"{api}/models")[0]["recorded_at"]}]
+    assert get(f"{api}/models?project=staffing-forecast") == get(f"{api}/models") and get(f"{api}/models?project=other") == []
     trace = get(f"{api}/datasets/{quote(SNAPSHOT, safe='')}/trace")
     assert trace["produced_by"]["dataform_invocation"] == EXPECTED["inputs"][0]["produced_by"]["dataform_invocation"]
     assert [r["system"] for r in get(f"{api}/runs")] == ["vertex", "vertex", "dataform", "dataform"]

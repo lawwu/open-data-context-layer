@@ -251,6 +251,19 @@ class Catalog:
             body["links"] = [kept[k] for k in sorted(kept)]
             return self._write(body)
 
+    def _use_from_model(self, project: str, pins: list[tuple[str, str, str]]) -> dict:
+        """Point a project's model-derived `uses` at what a model version was trained on: (key, revision the build
+        pinned, note). Links a person recorded stay; the previous version's links are replaced."""
+        with self.db.transaction():
+            self._lock(project)
+            body = self._head(project)["body"]
+            kept = {link["to"]: link for link in body["links"] if link.get("via") != "model"}
+            for key, revision, note in pins:
+                notes = [kept[key]["note"]] if kept.get(key, {}).get("via") == "model" else []
+                kept[key] = {"relation": "uses", "to": key, "revision": revision, "note": ", ".join([*notes, note]), "via": "model"}
+            body["links"] = [kept[k] for k in sorted(kept)]
+            return self._write(body)
+
     def _write(self, body: dict) -> dict:
         """Store a revision unless it says what the head says. A lineage link's pinned revision is not part of what
         an entry says, so re-registering a table does not ripple down everything built from it; a `uses` link's is,
@@ -345,6 +358,8 @@ class Catalog:
             reach.append((node["key"], "downstream"))
             if node["kind"] == "column":
                 reach.append((self._head(node["key"])["body"]["table"], "downstream"))
+            else:  # a project that uses a column of a table built from this one depends on it too
+                reach += [(column, "downstream") for column in self._columns(node["key"])]
         using: dict[str, list[dict]] = {}
         for r in self.db.execute("SELECT source_key, target_key, target_revision, purpose, target_head FROM current_links "
                                  "WHERE relation = 'uses' AND target_key = ANY(%s) ORDER BY source_key", (sorted({through for through, _ in reach}),)):
@@ -386,6 +401,7 @@ class Catalog:
             "SELECT id, actor, recorded_at FROM revisions WHERE entry_key = %s ORDER BY recorded_at DESC, seq DESC", (key,))]
         if out["kind"] == "project":
             out["uses"] = self._linked(key, "uses", "up")
+            out["model_versions"] = self.models(key)
             return out
         out.update(derived_from=self._linked(key, "derived_from", "up"), feeds=self._linked(key, "derived_from", "down"), used_by=self._users(key))
         if out["kind"] == "table":
@@ -513,12 +529,40 @@ class Catalog:
                         "bigquery_job": {"project": r["job_project"], "location": r["job_location"], "job_id": r["job_id"]} if r["job_id"] else None})
         return out
 
-    def models(self) -> list[dict]:
-        """Every recorded model version, newest first, with the dataset version it read."""
+    def models(self, project: str | None = None) -> list[dict]:
+        """Recorded model versions, newest first, with the dataset version each read; with `project`, only its own."""
+        key = f"project:{project.strip().lower().removeprefix('project:')}" if project else None
         return [{"model": r["project_key"].removeprefix("project:"), "version": r["version"], "dataset_version": r["reference"],
                  "artifact": r["artifact_uri"], "recorded_by": r["recorded_by"], "recorded_at": stamp(r["recorded_at"])}
                 for r in self.db.execute("SELECT b.*, d.reference FROM model_builds b JOIN dataset_versions d ON d.id = b.dataset_version_id "
-                                         "ORDER BY b.recorded_at DESC, b.id DESC")]
+                                         "WHERE %(key)s::text IS NULL OR b.project_key = %(key)s ORDER BY b.recorded_at DESC, b.id DESC", {"key": key})]
+
+    # ---- lists -----------------------------------------------------------------------------------------------
+    def tables(self, layer: str | None = None, system: str | None = None) -> list[dict]:
+        """Every table, by key: its layer and system, how many columns it has, how many projects depend on it, and
+        when it last changed."""
+        rows = self.db.execute("""
+            SELECT e.key, r.recorded_at,
+                   (SELECT count(*) FROM entries c JOIN revisions cr ON cr.id = c.head_revision
+                    WHERE c.kind = 'column' AND cr.body ->> 'table' = e.key) AS columns
+            FROM entries e JOIN revisions r ON r.id = e.head_revision
+            WHERE e.kind = 'table' AND (%(layer)s::text IS NULL OR r.body ->> 'layer' = %(layer)s)
+              AND (%(system)s::text IS NULL OR r.body ->> 'system' = %(system)s) ORDER BY e.key""", {"layer": layer, "system": system}).fetchall()
+        return [{**self._summary(r["key"], users=True), "columns": r["columns"], "changed": stamp(r["recorded_at"])} for r in rows]
+
+    def projects(self) -> list[dict]:
+        """Every project: how much data it uses, how much of that changed after it was used, and its latest model version."""
+        out = []
+        for r in self.db.execute("""
+                SELECT e.key, r.recorded_at,
+                       (SELECT count(*) FROM current_links l WHERE l.source_key = e.key AND l.relation = 'uses') AS uses,
+                       (SELECT count(*) FROM current_links l WHERE l.source_key = e.key AND l.relation = 'uses' AND l.target_revision <> l.target_head) AS stale,
+                       (SELECT b.version FROM model_builds b WHERE b.project_key = e.key ORDER BY b.recorded_at DESC, b.id DESC LIMIT 1) AS latest,
+                       (SELECT count(*) FROM model_builds b WHERE b.project_key = e.key) AS versions
+                FROM entries e JOIN revisions r ON r.id = e.head_revision WHERE e.kind = 'project' ORDER BY e.key"""):
+            out.append({**self._summary(r["key"]), "uses": r["uses"], "changed_since_used": r["stale"], "model_versions": r["versions"],
+                        "latest_version": r["latest"], "changed": stamp(r["recorded_at"])})
+        return out
 
     def overview(self) -> dict:
         counts = {kind: 0 for kind in KINDS}

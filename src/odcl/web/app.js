@@ -192,13 +192,13 @@ async function overviewPage() {
     h("h1", {}, "Overview"),
     h("p", { class: "sub" }, "What data exists, how it connects, and which projects and models use it."),
     h("div", { class: "grid" },
-      tile(overview.counts.table, "tables", "#/search?kind=table"), tile(overview.counts.column, "columns", "#/search?kind=column"),
-      tile(overview.counts.project, "projects", "#/search?kind=project"), tile(models.length, "model versions", "#/models")),
+      tile(overview.counts.table, "tables", "#/tables"), tile(overview.counts.column, "columns", "#/search?kind=column"),
+      tile(overview.counts.project, "projects", "#/projects"), tile(models.length, "model versions", "#/models")),
     h("h2", {}, "Changed after a project used it"),
     table(["Project", "Uses", ""], overview.changed_since_used.map((c) => [entryLink(c.project), entryLink(c.key), changedBadge()]),
       "Every project uses data as it is defined now."),
     h("h2", {}, "Recent model versions"),
-    table(["Model", "Version", "Trained on", "Recorded"], models.slice(0, 8).map((m) => [m.model,
+    table(["Model", "Version", "Trained on", "Recorded"], models.slice(0, 8).map((m) => [entryLink(`project:${m.model}`, m.model),
       h("a", { href: `#/model/${enc(m.model)}/${enc(m.version)}` }, m.version),
       h("a", { href: `#/dataset/${enc(m.dataset_version)}` }, m.dataset_version), when(m.recorded_at)]), "No model version is recorded yet."),
     h("h2", {}, "Recent runs"), runsTable(runs),
@@ -223,8 +223,9 @@ async function searchPage(params) {
 
 async function entryPage(key) {
   const entry = await api(`/v1/entries/${enc(key)}`);
+  const isModel = entry.kind === "project" && entry.model_versions.length > 0;
   const parts = [
-    h("div", {}, kindBadge(entry.kind)),
+    h("div", {}, kindBadge(entry.kind), isModel ? [" ", h("span", { class: "badge" }, "model")] : null),
     h("h1", {}, entry.title),
     entry.description ? h("p", { class: "sub" }, entry.description) : h("p", { class: "sub muted" }, "No description yet."),
     h("div", { class: "card" }, facts([
@@ -239,7 +240,11 @@ async function entryPage(key) {
     ])),
   ];
   if (entry.kind === "project") {
+    if (isModel) {
+      parts.push(h("h2", {}, `Model versions (${entry.model_versions.length})`), modelVersionsTable(entry.model_versions, false));
+    }
     parts.push(h("h2", {}, "Uses"),
+      isModel ? h("p", { class: "muted" }, "What its newest model version was trained on is recorded here at import, pinned to the definitions that version used.") : null,
       table(["Entry", "Kind", "For", ""], entry.uses.map((u) => [entryLink(u.key, u.title), kindBadge(u.kind), u.purpose || "", u.changed_since ? changedBadge() : ""]),
         "This project has recorded no use of data yet."));
   } else {
@@ -344,12 +349,65 @@ async function datasetPage(reference) {
     ...missingList(d.missing));
 }
 
+function modelVersionsTable(models, withModel = true) {
+  return table([...(withModel ? ["Model"] : []), "Version", "Trained on", "Artifact", "Recorded"], models.map((m) => [
+    ...(withModel ? [entryLink(`project:${m.model}`, m.model)] : []),
+    h("a", { href: `#/model/${enc(m.model)}/${enc(m.version)}` }, m.version),
+    h("a", { href: `#/dataset/${enc(m.dataset_version)}` }, m.dataset_version), h("code", {}, m.artifact), [when(m.recorded_at), ` by ${m.recorded_by}`]]),
+  "No model version is recorded yet. Import one with odcl import --vertex-manifest.");
+}
+
 async function modelsPage() {
   const models = await api("/v1/models");
-  render(h("h1", {}, "Model versions"), h("p", { class: "sub" }, "Each was recorded from its training manifest after the catalog checked it against Vertex AI and Cloud Storage."),
-    table(["Model", "Version", "Trained on", "Artifact", "Recorded"], models.map((m) => [m.model, h("a", { href: `#/model/${enc(m.model)}/${enc(m.version)}` }, m.version),
-      h("a", { href: `#/dataset/${enc(m.dataset_version)}` }, m.dataset_version), h("code", {}, m.artifact), [when(m.recorded_at), ` by ${m.recorded_by}`]]),
-    "No model version is recorded yet. Import one with odcl import --vertex-manifest."));
+  render(h("h1", {}, "Model versions"),
+    h("p", { class: "sub" }, "Each trained version of a model, recorded from its training manifest after the catalog checked it against Vertex AI and Cloud Storage. A model is a project; its page lists its versions."),
+    modelVersionsTable(models));
+}
+
+function select(label, value, options, go) {
+  return h("label", { class: "muted" }, `${label} `, h("select", { "aria-label": label, onchange: (e) => go(e.target.value) },
+    options.map(([v, t]) => h("option", { value: v, selected: v === value }, t))));
+}
+
+async function tablesPage(params) {
+  const layer = params.get("layer") || "", system = params.get("system") || "";
+  const all = await api("/v1/tables");
+  const shown = all.filter((t) => (!layer || t.layer === layer) && (!system || t.system === system));
+  const choices = (field) => [["", "all"], ...[...new Set(all.map((t) => t[field]).filter(Boolean))].sort().map((v) => [v, v])];
+  const go = (next) => {
+    const q = new URLSearchParams({ layer, system, ...next });
+    for (const [k, v] of [...q]) if (!v) q.delete(k);
+    location.hash = `#/tables${q.toString() ? `?${q}` : ""}`;
+  };
+  render(h("h1", {}, "Tables"),
+    h("p", { class: "sub" }, "Every table the importers and people have registered. Find a column by searching, or from its table."),
+    h("div", { class: "controls" }, select("Layer", layer, choices("layer"), (v) => go({ layer: v })),
+      select("System", system, choices("system"), (v) => go({ system: v })), h("span", { class: "muted" }, plural(shown.length, "table"))),
+    shown.length ? h("table", {},
+      h("thead", {}, h("tr", {}, ["Table", "Layer", "System", "Columns", "Used by", "Changed"].map((x, i) => h("th", { scope: "col", class: i === 3 || i === 4 ? "num" : null }, x)))),
+      h("tbody", {}, shown.map((t) => h("tr", {},
+        h("td", {}, entryLink(t.key, t.title), t.description ? h("div", { class: "muted" }, t.description.length > 140 ? `${t.description.slice(0, 140)}…` : t.description) : null),
+        h("td", {}, t.layer || ""), h("td", {}, t.system || ""), h("td", { class: "num" }, String(t.columns)),
+        h("td", { class: "num" }, t.used_by ? plural(t.used_by, "project") : "—"), h("td", {}, when(t.changed))))))
+      : h("p", { class: "muted" }, all.length ? "No table matches these filters." : "No table is registered yet."));
+}
+
+async function projectsPage() {
+  const projects = await api("/v1/projects");
+  render(h("h1", {}, "Projects"),
+    h("p", { class: "sub" }, "Anything that uses data: a model, an analysis, a dashboard. A project with trained versions is a model."),
+    h("div", { class: "controls" }, h("span", { class: "muted" }, plural(projects.length, "project"))),
+    projects.length ? h("table", {},
+      h("thead", {}, h("tr", {}, ["Project", "Owner", "Uses", "Latest model version", "Changed"].map((x, i) => h("th", { scope: "col", class: i === 2 ? "num" : null }, x)))),
+      h("tbody", {}, projects.map((p) => h("tr", {},
+        h("td", {}, entryLink(p.key, p.title), p.model_versions ? [" ", h("span", { class: "badge" }, "model")] : null,
+          p.description ? h("div", { class: "muted" }, p.description) : null),
+        h("td", {}, p.owner || ""),
+        h("td", { class: "num" }, plural(p.uses, "entry", "entries"), p.changed_since_used ? h("div", {}, h("span", { class: "status warning", title: "Redefined after the project used it" }, `△ ${p.changed_since_used} changed since`)) : null),
+        h("td", {}, p.latest_version ? [h("a", { href: `#/model/${enc(p.title)}/${enc(p.latest_version)}` }, p.latest_version),
+          p.model_versions > 1 ? h("span", { class: "muted" }, ` of ${p.model_versions}`) : null] : h("span", { class: "muted" }, "—")),
+        h("td", {}, when(p.changed))))))
+      : h("p", { class: "muted" }, "No project is registered yet. Register one with odcl add project, or import a model version."));
 }
 
 function runsTable(runs) {
@@ -379,8 +437,15 @@ async function route() {
     model: () => modelPage(parts[1], parts[2]),
     dataset: () => datasetPage(parts.slice(1).join("/")),
     models: () => modelsPage(),
+    tables: () => tablesPage(params),
+    projects: () => projectsPage(),
     runs: () => runsPage(params),
   };
+  const section = { "": "#/", models: "#/models", model: "#/models", tables: "#/tables", projects: "#/projects", runs: "#/runs" }[parts[0] || ""];
+  for (const link of document.querySelectorAll(".top nav a")) {
+    if (link.getAttribute("href") === section) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
   const page = pages[parts[0] || ""];
   main.setAttribute("aria-busy", "true");
   try {
