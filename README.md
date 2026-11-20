@@ -65,6 +65,9 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 | `odcl import --bigquery TABLE...` | Read tables and their columns from BigQuery |
 | `odcl sync bigquery-jobs --project PROJECT` | Read the query jobs a project ran since the last sync |
 | `odcl history table KEY [--since 7d] [--patterns]` | Which query jobs read or wrote this table? |
+| `odcl import --dataform INVOCATION` | Read what a Dataform run compiled and how each action ran |
+| `odcl handoff --invocation INVOCATION --target TABLE --snapshot SNAPSHOT` | Record that a build handed on a snapshot of its output |
+| `odcl explain dataset SNAPSHOT[@TIME]` | Which build, job, file and inputs a dataset version came from |
 | `odcl overview` | Counts, and data that changed after a project used it |
 | `odcl migrate` | Create or update the catalog's tables |
 | `odcl import-sqlite PATH` | Bring an old Fathom SQLite file across, once |
@@ -125,6 +128,47 @@ A job shows that a table was queried. It does not show which fields a model was 
 
 Grouping uses the catalog's own digest of the shape. BigQuery's normalized query hash is only in `INFORMATION_SCHEMA`, which costs a query to read.
 
+## Importing from Dataform
+
+```sh
+uv sync --extra dataform
+uv run odcl import --dataform projects/P/locations/L/repositories/R/workflowInvocations/I
+```
+
+This reads one workflow invocation and the compilation result it ran, with free Dataform calls. A definition and a run are kept apart:
+
+- **Definitions.** Every table the compilation declares or builds becomes a table entry, with its file and the tables it reads. Every column the compiled query selects becomes a column entry with its expression and the columns it is computed from, traced by [sqlglot](https://github.com/tobymao/sqlglot). A column it cannot trace fully is tagged `lineage:partial`; SQL it cannot read marks the table's columns partial and drops their old definitions.
+- **Runs.** The invocation and each action are recorded as executions: state, times, and the BigQuery job ID. The job itself is looked up in synced query history when a trace is read, so `odcl sync bigquery-jobs` may run before or after the import.
+- **Shared entries.** BigQuery and Dataform describe the same physical tables and columns, so they share keys. Each import adds what it knows (BigQuery the types, Dataform the expressions) and keeps what the other said. Each keeps its own details under its name in `source`.
+- **Order.** An invocation's definitions are applied only if its compilation is at least as new as the newest already imported from that repository. An older invocation imported late still has its runs recorded, without a pinned definition, and its trace says so.
+
+Import an invocation by name for now. Discovering invocations is not built yet.
+
+## Binding data to the build that made it
+
+A table name and its latest successful job do not say which run produced the rows a model read. In the pilot a build hands on a snapshot instead: after the action that writes a table succeeds, and before the next write, it creates a uniquely named [table snapshot](https://docs.cloud.google.com/bigquery/docs/table-snapshots-intro) and records the handoff:
+
+```sh
+uv run odcl handoff --invocation projects/P/locations/L/repositories/R/workflowInvocations/I \
+  --target my-project.features.shift_inputs --snapshot my-project.frozen.shift_inputs_b042
+uv run odcl explain dataset my-project.frozen.shift_inputs_b042
+```
+
+`handoff` reads the snapshot from BigQuery (it needs the `bigquery` extra) and refuses it unless the action succeeded, the snapshot copies the action's target, it was taken after the action ended, and synced history shows no other write to the target in between. It stores the snapshot as a dataset version, with each field pinned to the column definition the build used. Recording the same handoff again changes nothing; claiming the snapshot for another run is refused.
+
+`explain dataset` answers from those pins, not from today's definitions:
+
+```text
+workforce-demo.frozen.shift_inputs_b042@2026-09-02T02:00:00Z
+  snapshot of   workforce-demo.features.shift_inputs
+  produced by   projects/workforce-demo/.../workflowInvocations/build-042 / workforce-demo.features.shift_inputs  SUCCEEDED
+  executed as   BigQuery job (workforce-demo, us-central1, job-042)  CREATE_TABLE_AS_SELECT
+  defined in    definitions/shift_inputs.sqlx at commit 91fa3c5be2d04a6c8f7e1b0d9a2c4e6f8a1b3c5d
+  hours_at_cutoff = worked_minutes_asof / 60  from workforce-demo.raw.shift_totals.worked_minutes_asof
+```
+
+Anything it could not establish is listed under `missing`: a job not yet in synced history, a field traced only in part, history that does not reach the snapshot time. This traces the definition of each field back to its raw columns; it does not keep the raw rows.
+
 ## For agents
 
 ```sh
@@ -144,7 +188,7 @@ with Catalog() as catalog:
     catalog.used_by("churn.bronze.accounts.plan")
 ```
 
-`Catalog` is the whole interface: `put`, `apply`, `use`, `find`, `get`, `lineage`, `used_by`, `uses`, `table_history`, `query_jobs`, `overview`. `apply` registers a batch in one transaction: all of it, or none.
+`Catalog` is the whole interface: `put`, `apply`, `use`, `find`, `get`, `lineage`, `used_by`, `uses`, `table_history`, `query_jobs`, `overview`. `apply` registers a batch in one transaction: all of it, or none. With `merge=True`, fields a payload leaves out keep what the entry already says. Builds are read and written through `odcl.dataform.import_invocation`, `odcl.builds.record_handoff` and `odcl.builds.explain_dataset`.
 
 ## Developing
 
@@ -160,7 +204,9 @@ Without `ODCL_TEST_DATABASE_URL` the database tests are skipped locally and fail
 ## Not built yet
 
 - The machine-learning shape on top: training and serving features, labels, training datasets and model cards.
-- Importers for Dataform and Vertex AI Pipelines, and the model trace they and the BigQuery importer feed. `tests/fixtures/staffing_trace/` holds the example the first trace must reproduce.
+- The Vertex AI Pipelines importer and the model trace (`odcl explain model`). `tests/fixtures/staffing_trace/` holds the example it must reproduce; the dataset half already does.
+- OpenLineage events as another source of runs and lineage.
+- Discovering Dataform invocations, and Dataform runs started from the CLI rather than the managed service.
 - A web page.
 - Sign-in and permissions. Today anyone who can reach the database can read and write the catalog.
 

@@ -93,6 +93,29 @@ def test_finding_data_by_words_kind_and_layer(fathom):
     assert len(fathom.find(limit=3)) == 3
 
 
+def test_an_importer_adds_what_it_knows_without_erasing_what_another_said(fathom):
+    """BigQuery knows a column's type; Dataform knows how it is computed. Each import keeps the other's fields."""
+    bigquery = [("table", {"path": "p.d.t", "description": "Shift inputs", "system": "bigquery", "source": {"bigquery": {"location": "US"}}}),
+                ("column", {"table": "p.d.t", "name": "x", "dtype": "FLOAT", "source": {"bigquery": {"mode": "NULLABLE"}}})]
+    assert fathom.apply(bigquery, merge=True) == {"added": 2, "changed": 0, "unchanged": 0}
+    fathom.apply([("table", {"path": "p.d.raw"}), ("column", {"table": "p.d.raw", "name": "m"})], merge=True)
+    dataform = [("column", {"table": "p.d.t", "name": "x", "definition": "m / 60", "derived_from": ["column:p.d.raw.m"], "tags": ["lineage:partial"],
+                            "source": {"dataform": {"file": "definitions/t.sqlx"}}})]
+    assert fathom.apply(dataform, merge=True) == {"added": 0, "changed": 1, "unchanged": 0}
+
+    column = fathom.get("column:p.d.t.x")
+    assert (column["dtype"], column["definition"], column["tags"]) == ("FLOAT", "m / 60", ["lineage:partial"])
+    assert column["source"] == {"bigquery": {"mode": "NULLABLE"}, "dataform": {"file": "definitions/t.sqlx"}}
+    assert [c["key"] for c in column["derived_from"]] == ["column:p.d.raw.m"]
+    assert fathom.get("table:p.d.t")["description"] == "Shift inputs"
+    assert fathom.apply(bigquery, merge=True) == {"added": 0, "changed": 0, "unchanged": 2}  # each import again changes nothing
+    assert fathom.apply(dataform, merge=True) == {"added": 0, "changed": 0, "unchanged": 1}
+    fathom.apply([("column", {"table": "p.d.t", "name": "x", "tags": [], "source": {"dataform": {"file": "definitions/t.sqlx"}}})], merge=True)
+    assert fathom.get("column:p.d.t.x")["tags"] == []  # what an importer says outright still replaces its own earlier word
+
+    assert fathom.put("column", {"table": "p.d.t", "name": "x"})["dtype"] is None  # a plain registration says everything
+
+
 def test_what_is_refused(fathom):
     for kind, payload, code in (("table", {"path": "Has Spaces"}, "path"), ("column", {"table": "nowhere.t", "name": "x"}, "not_found"),
                                 ("project", {"name": "p"}, "description"), ("view", {}, "kind"),

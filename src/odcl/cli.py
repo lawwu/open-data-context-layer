@@ -42,8 +42,25 @@ def lines(command: str, result) -> list[str]:
             if direction in result:
                 out += [direction + ":"] + ([f"  {'  ' * (n['depth'] - 1)}{n['key']}" + flag(n) for n in result[direction]] or ["  nothing"])
         return out
+    if command == "import" and "entries" in result:
+        counts = result["entries"]
+        return ([f"{counts['added']} added, {counts['changed']} changed, {counts['unchanged']} unchanged from {result['compilation_result']}"]
+                + (["Definitions not applied: a newer compilation of this repository was imported before"] if result["definitions"] != "applied" else [])
+                + [f"  {a['target']}  {a['state']}" + (f"  job {a['job_id']}" if a["job_id"] else "") for a in result["actions"]])
     if command == "import":
         return [f"{result['added']} added, {result['changed']} changed, {result['unchanged']} unchanged"]
+    if command == "handoff":
+        return [f"{result['reference']}  {result['change']}"]
+    if command == "explain":
+        produced, job, defined = result["produced_by"], result["executed_as"], result["defined_in"]
+        out = [result["reference"], f"  snapshot of   {result['snapshot_of']}",
+               f"  produced by   {produced['dataform_invocation']} / {produced['target']}  {produced['state']}",
+               "  executed as   " + (f"BigQuery job ({job['project']}, {job['location']}, {job['job_id']})  {job['statement_type']}" if job else "unknown"),
+               f"  defined in    {defined['file']} at commit {defined['commit']}"]
+        for c in result["columns"]:
+            out.append(f"  {c['field']} = {c['expression'] or '?'}" + (f"  from {', '.join(d['column'] for d in c['derived_from'])}" if c["derived_from"] else "")
+                       + ("" if c["lineage"] == "resolved" else f"  ({c['lineage']})"))
+        return out + [f"missing: {m}" for m in result["missing"]]
     if command == "sync":
         return [f"{result['jobs']} jobs read, {result['added']} new, from {result['since']} to {result['until']}"
                 + (f" ({result['excluded']} monitoring jobs left out)" if result["excluded"] else "")
@@ -74,7 +91,11 @@ def run(catalog: Catalog, args):
         from .legacy import import_sqlite
         return import_sqlite(catalog, args.path)
     if args.command == "import":
-        require(bool(args.dbt) != bool(args.bigquery), "import", "Import from one place: --dbt PATH or --bigquery TABLE...")
+        require(sum(map(bool, (args.dbt, args.bigquery, args.dataform))) == 1, "import",
+                "Import from one place: --dbt PATH, --bigquery TABLE... or --dataform INVOCATION")
+        if args.dataform:
+            from . import dataform
+            return dataform.import_invocation(catalog, args.dataform, client=dataform.client())
         if args.bigquery:
             from . import bigquery
             client = bigquery.client(args.project)
@@ -91,6 +112,17 @@ def run(catalog: Catalog, args):
             return bigquery.sync_jobs(catalog, args.project, client=client, backfill=span(args.backfill), sql=args.sql)
         finally:
             client.close()
+    if args.command == "handoff":
+        from . import bigquery, builds
+        client = bigquery.client(args.project)
+        try:
+            facts = bigquery.snapshot(args.snapshot, client=client)
+        finally:
+            client.close()
+        return builds.record_handoff(catalog, args.invocation, args.target, facts)
+    if args.command == "explain":
+        from . import builds
+        return builds.explain_dataset(catalog, args.reference)
     if args.command == "history":
         return catalog.table_history(args.key, span(args.since), args.patterns, args.limit)
     if args.command == "add":
@@ -127,9 +159,22 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("import", help="read tables and columns from a dbt project or from BigQuery")
     s.add_argument("--dbt", metavar="PATH", help="a dbt target folder or its manifest.json")
+    s.add_argument("--select", nargs="+", metavar="MODEL", help="with --dbt: only these models and what they are built from")
     s.add_argument("--bigquery", nargs="+", metavar="TABLE", help="BigQuery tables to read, as project.dataset.table")
+    s.add_argument("--dataform", metavar="INVOCATION",
+                   help="a Dataform workflow invocation, as projects/P/locations/L/repositories/R/workflowInvocations/I")
     s.add_argument("--project", help="with --bigquery: the project the API calls are made from (default: your credentials' project)")
-    s.add_argument("--select", nargs="+", metavar="MODEL", help="only these models and what they are built from")
+
+    s = sub.add_parser("handoff", help="record that a successful build handed on a snapshot of its output")
+    s.add_argument("--invocation", required=True, help="the Dataform workflow invocation that built the table")
+    s.add_argument("--target", required=True, help="the table the build wrote, as project.dataset.table")
+    s.add_argument("--snapshot", required=True, help="the table snapshot taken of it, as project.dataset.table")
+    s.add_argument("--project", help="the project BigQuery calls are made from (default: your credentials' project)")
+
+    s = sub.add_parser("explain", help="where something came from, as recorded")
+    kinds = s.add_subparsers(dest="what", required=True)
+    e = kinds.add_parser("dataset", help="a dataset version: its build, job, definition and each field's inputs")
+    e.add_argument("reference", help="project.dataset.snapshot, or project.dataset.snapshot@time")
 
     s = sub.add_parser("add", help="register a table, a column or a project by hand")
     kinds = s.add_subparsers(dest="kind", required=True)

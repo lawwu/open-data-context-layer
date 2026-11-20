@@ -3,23 +3,64 @@
     "name": "projects/workforce-demo/locations/us-central1/repositories/workforce/compilationResults/cr-042",
     "gitCommitish": "main",
     "resolvedGitCommitSha": "91fa3c5be2d04a6c8f7e1b0d9a2c4e6f8a1b3c5d",
-    "codeCompilationConfig": {"defaultDatabase": "workforce-demo", "defaultLocation": "us-central1"}
+    "codeCompilationConfig": {
+      "defaultDatabase": "workforce-demo",
+      "defaultLocation": "us-central1"
+    },
+    "createTime": "2026-09-02T01:58:20Z"
   },
   "compilationResultActions": [
     {
-      "target": {"database": "workforce-demo", "schema": "raw", "name": "shift_totals"},
-      "canonicalTarget": {"database": "workforce-demo", "schema": "raw", "name": "shift_totals"},
+      "target": {
+        "database": "workforce-demo",
+        "schema": "raw",
+        "name": "shift_totals"
+      },
+      "canonicalTarget": {
+        "database": "workforce-demo",
+        "schema": "raw",
+        "name": "shift_totals"
+      },
       "filePath": "definitions/sources/shift_totals.sqlx",
-      "declaration": {"relationDescriptor": {"description": "Shift totals as loaded from timekeeping"}}
+      "declaration": {
+        "relationDescriptor": {
+          "description": "Shift totals as loaded from timekeeping"
+        }
+      }
     },
     {
-      "target": {"database": "workforce-demo", "schema": "features", "name": "shift_inputs"},
-      "canonicalTarget": {"database": "workforce-demo", "schema": "features", "name": "shift_inputs"},
+      "target": {
+        "database": "workforce-demo",
+        "schema": "features",
+        "name": "shift_inputs"
+      },
+      "canonicalTarget": {
+        "database": "workforce-demo",
+        "schema": "features",
+        "name": "shift_inputs"
+      },
       "filePath": "definitions/shift_inputs.sqlx",
       "relation": {
         "relationType": "TABLE",
-        "dependencyTargets": [{"database": "workforce-demo", "schema": "raw", "name": "shift_totals"}],
-        "selectQuery": "SELECT employee_id, pay_period_start, worked_minutes_asof / 60 AS hours_at_cutoff FROM `workforce-demo.raw.shift_totals`"
+        "dependencyTargets": [
+          {
+            "database": "workforce-demo",
+            "schema": "raw",
+            "name": "shift_totals"
+          }
+        ],
+        "selectQuery": "SELECT employee_id, pay_period_start, worked_minutes_asof / 60 AS hours_at_cutoff FROM `workforce-demo.raw.shift_totals`",
+        "relationDescriptor": {
+          "description": "Hours worked per employee and pay period, as known at the prediction cutoff",
+          "columns": [
+            {
+              "path": [
+                "hours_at_cutoff"
+              ],
+              "description": "Hours worked in the pay period, as known at the prediction cutoff"
+            }
+          ]
+        }
       }
     }
   ]

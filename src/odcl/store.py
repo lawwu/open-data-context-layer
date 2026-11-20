@@ -174,8 +174,12 @@ class Catalog:
         return {**row["body"], "revision": row["id"], "registered_by": row["actor"], "at": stamp(row["recorded_at"])}
 
     # ---- writes ----------------------------------------------------------------------------------------------
-    def put(self, kind: str, payload: dict) -> dict:
-        """Register an entry, or a new revision of it. Saying exactly what is already registered changes nothing."""
+    def put(self, kind: str, payload: dict, merge: bool = False) -> dict:
+        """Register an entry, or a new revision of it. Saying exactly what is already registered changes nothing.
+
+        With `merge`, fields the payload leaves out (or sets to None) keep what the entry already says, and
+        `source` objects combine, so importers that each know part of an entry do not erase one another. An
+        importer keeps its own details under its name in `source`, e.g. {"bigquery": {...}}."""
         with self.db.transaction():
             require(kind in KINDS, "kind", f"An entry is one of: {', '.join(KINDS)}")
             require(isinstance(payload, dict), "payload", "An entry is described by an object of fields")
@@ -199,6 +203,15 @@ class Catalog:
                 self._lock(key)
                 prior = self._head(key)
                 links = [link for link in prior["body"]["links"] if link["relation"] == "uses"] if prior else []
+            if merge:
+                self._lock(key)
+                prior = self._head(key)
+                if prior:
+                    said = prior["body"]
+                    kept = {"description": said["description"] or None, **{f: said.get(f) for f in TEXT[kind]}, "tags": said["tags"],
+                            "derived_from": [link["to"] for link in said["links"] if link["relation"] == "derived_from"]}
+                    require(isinstance(payload.get("source") or {}, dict), "source", "source is a small object saying where the entry came from")
+                    p = {**kept, **{k: v for k, v in payload.items() if v is not None}, "source": {**said["source"], **(payload.get("source") or {})}}
             if kind != "project":
                 for parent in names(p.get("derived_from"), "derived_from"):
                     parent = self.resolve(parent, (kind,))
@@ -214,12 +227,12 @@ class Catalog:
                     "tags": sorted(set(tags)), "source": source, "links": links}
             return self._write(body)
 
-    def apply(self, entries) -> dict:
+    def apply(self, entries, merge: bool = False) -> dict:
         """Register many (kind, payload) entries in order, as an importer produces them. All of them, or none."""
         counts = {"added": 0, "changed": 0, "unchanged": 0}
         with self.db.transaction():
             for kind, payload in entries:
-                counts[self.put(kind, payload)["change"]] += 1
+                counts[self.put(kind, payload, merge)["change"]] += 1
         return counts
 
     def use(self, project: str, keys: list[str], purpose: str | None = None) -> dict:

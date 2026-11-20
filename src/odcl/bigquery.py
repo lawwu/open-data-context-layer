@@ -57,24 +57,36 @@ def table_entries(found: dict) -> list[tuple[str, dict]]:
     would make every import a new revision."""
     table = found["table"]
     snapshot = (table["resource"].get("snapshotDefinition") or {}).get("snapshotTime")
-    where = {"tool": "bigquery", "fqn": table["fqn"], "location": table.get("location"), "base_table": table.get("base_table"),
+    where = {"fqn": table["fqn"], "location": table.get("location"), "base_table": table.get("base_table"),
              "base_kind": table.get("base_kind"), "snapshot_time": snapshot, "partitioning": table.get("partitioning"),
              "clustering": table.get("clustering")}
-    entries = [("table", {"path": table["fqn"], "description": (table.get("description") or "")[:4000], "system": "bigquery",
-                          "type": (table.get("type") or "table").lower(), "source": {k: v for k, v in where.items() if v is not None}})]
+    entries = [("table", {"path": table["fqn"], "description": (table.get("description") or "")[:4000] or None, "system": "bigquery",
+                          "type": (table.get("type") or "table").lower(), "source": {"bigquery": {k: v for k, v in where.items() if v is not None}}})]
     for column in found["columns"]:
         entries.append(("column", {"table": "table:" + table["fqn"], "name": column["path"], "dtype": column["type"],
-                                   "description": (column.get("description") or "")[:4000],
-                                   "source": {"tool": "bigquery", "path": column["path"], "mode": column["mode"]}}))
+                                   "description": (column.get("description") or "")[:4000] or None,
+                                   "source": {"bigquery": {"path": column["path"], "mode": column["mode"]}}}))
     return entries
 
 
 def import_tables(catalog: Catalog, tables: list[str], *, client) -> dict:
-    """Register these BigQuery tables and their columns as they are defined now. All of them, or none."""
+    """Register these BigQuery tables and their columns as they are defined now. All of them, or none.
+
+    What other importers said about the same tables, such as how Dataform computes a column, is kept."""
     require(tables, "tables", "Name at least one table as project.dataset.table")
     with reading():
         found = [source.table(fqn, client=client) for fqn in tables]
-    return catalog.apply([entry for table in found for entry in table_entries(table)])
+    return catalog.apply([entry for table in found for entry in table_entries(table)], merge=True)
+
+
+def snapshot(fqn: str, *, client) -> dict:
+    """What BigQuery says about a table snapshot, in the shape `builds.record_handoff` checks."""
+    with reading():
+        found = source.table(fqn, client=client)
+    table = found["table"]
+    return {"table": table["fqn"], "kind": table.get("base_kind") or table.get("type"), "base_table": table.get("base_table"),
+            "snapshot_time": (table["resource"].get("snapshotDefinition") or {}).get("snapshotTime"),
+            "schema": [c["path"] for c in found["columns"] if "." not in c["path"]]}
 
 
 # ---- query shapes --------------------------------------------------------------------------------------------

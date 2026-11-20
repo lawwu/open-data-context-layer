@@ -1,7 +1,7 @@
 """Read a dbt project into catalog entries: every source and model as a table, every column, and the lineage between them.
 
-Table lineage comes from dbt's own dependency graph. Column lineage is read from each model's compiled SQL with
-sqlglot, so nothing here parses SQL by hand. Each entry records the file that defines it and the commit that last
+Table lineage comes from dbt's own dependency graph. Column lineage is read from each model's compiled SQL by
+`lineage.column_parents`, so nothing here parses SQL by hand. Each entry records the file that defines it and the commit that last
 changed that file, so re-importing after unrelated commits changes nothing.
 """
 from __future__ import annotations
@@ -11,6 +11,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from . import lineage
+from .lineage import column_parents
 from .store import require
 
 LAYERS = ("bronze", "silver", "gold")
@@ -52,29 +54,6 @@ def code_ref(path) -> dict | None:
     relative = path.relative_to(Path(root.stdout.strip()).resolve()).as_posix()
     return {"repository": repository, "commit": commit.stdout.strip(), "path": relative,
             "url": f"{repository}/blob/{commit.stdout.strip()}/{relative}" if repository else None}
-
-
-def column_parents(column: str, sql: str, dialect, schema: dict) -> tuple[str | None, list[tuple[str, str]], bool]:
-    """(the column's expression, [(upstream relation, column)], whether every input was traced) from compiled SQL.
-
-    A row count has no input column. It is traced to the filter and grouping columns of the table it counts, and
-    reported as not fully traced so the entry says so."""
-    from sqlglot import exp
-    from sqlglot.lineage import lineage
-    node = lineage(column, sql, schema=schema or None, dialect=dialect)
-    relation = lambda t: ".".join(p for p in (t.catalog, t.db, t.name) if p).lower()
-    nodes = list(node.walk())
-    leaves = {(relation(n.source), n.name.split(".")[-1]) for n in nodes if isinstance(n.source, exp.Table)}
-    expression = node.expression.this.sql(dialect=dialect) if isinstance(node.expression, exp.Alias) else node.expression.sql(dialect=dialect)
-    if leaves:
-        return expression, sorted(leaves), True
-    for inner in reversed(nodes):  # nothing traced: the deepest select that reads exactly one table
-        source = inner.source
-        tables = list(source.find_all(exp.Table)) if isinstance(source, exp.Select) else []
-        if len(tables) == 1 and not tables[0].find_ancestor(exp.Subquery):
-            used = [c for clause in ("where", "group") if source.args.get(clause) for c in source.args[clause].find_all(exp.Column)]
-            return expression, sorted({(relation(tables[0]), c.name) for c in used}), False
-    return expression, [], False
 
 
 def dbt_entries(path, select=None) -> list[tuple[str, dict]]:
@@ -119,11 +98,7 @@ def dbt_entries(path, select=None) -> list[tuple[str, dict]]:
         if uid not in selected:
             selected[uid] = []
             if nodes[uid].get("compiled_code") and nodes[uid].get("resource_type") == "model":
-                try:
-                    import sqlglot
-                    selected[uid] = [name.lower() for name in sqlglot.parse_one(nodes[uid]["compiled_code"], dialect=dialect).named_selects if name != "*"]
-                except Exception:  # noqa: BLE001 - unreadable SQL leaves only the described columns
-                    pass
+                selected[uid] = lineage.selected(nodes[uid]["compiled_code"], dialect)
         return selected[uid]
 
     def typed(uid) -> dict:
