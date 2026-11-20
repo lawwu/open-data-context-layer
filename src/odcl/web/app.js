@@ -296,9 +296,22 @@ function missingList(missing) {
     missing.length ? missing.map((m) => h("div", { class: "missing" }, "△ ", m)) : h("p", { class: "status good" }, "✓ Every link of this trace is recorded.")];
 }
 
+function filesSteps(files) {
+  const written = files.produced_by;
+  const exported = files.exported_from;
+  return [
+    step("Written by", written ? `${written.pipeline_run.split("/").pop()} / task ${written.task}` : "not recorded",
+      written ? written.pipeline_run : "the files were named by URI, not read from a pipeline task's output",
+      written?.state ? h("span", {}, stateBadge(written.state)) : null),
+    step("Exported from", exported ? entryLink(`table:${exported.table}`, exported.table) : "not recorded",
+      exported ? h("span", {}, "table-level lineage only, pinned when the files were recorded",
+        exported.changed_since ? [" ", changedBadge()] : null) : null)];
+}
+
 async function modelPage(name, version) {
   const trace = await api(`/v1/models/${enc(name)}/versions/${enc(version)}/trace`);
   const p = trace.produced_by, read = trace.read;
+  if (read.kind === "gcs_files") return modelOnFilesPage(trace);
   render(
     h("div", {}, kindBadge("project"), h("span", { class: "muted" }, " model version")),
     h("h1", {}, `${trace.model} ${trace.version}`),
@@ -325,8 +338,44 @@ async function modelPage(name, version) {
     ...missingList(trace.missing));
 }
 
+function modelOnFilesPage(trace) {
+  const p = trace.produced_by, read = trace.read;
+  render(
+    h("div", {}, kindBadge("project"), h("span", { class: "muted" }, " model version")),
+    h("h1", {}, `${trace.model} ${trace.version}`),
+    h("p", { class: "sub" }, "Trained on files a pipeline exported, not on a BigQuery snapshot. The files prove the exact bytes the trainer read; "
+      + "they do not show which build produced them, so no column lineage is claimed below them."),
+    h("ol", { class: "trace" },
+      step("Model artifact", trace.artifact.uri, `generation ${trace.artifact.generation}`, `sha256 ${trace.artifact.sha256}`),
+      step("Trained by", `${p.pipeline_run.split("/").pop()} / task ${p.task}`, p.pipeline_run,
+        p.training_commit ? `training code at commit ${p.training_commit}` : "training code commit not recorded"),
+      step("Read files", h("a", { href: `#/dataset/${enc(read.dataset_version)}` }, read.uri), `${plural(read.objects, "object")}, generations pinned`),
+      ...filesSteps(read)),
+    h("h2", {}, `Inputs (${trace.inputs.length})`),
+    table(["Field", "Role", "Type", "Lineage"], trace.inputs.map((i) => [h("strong", {}, i.field),
+      `${i.role}${i.position !== null ? ` #${i.position}` : ""}`, i.dtype || "?", h("span", { class: "muted" }, "not claimed")])),
+    ...missingList(trace.missing));
+}
+
+function filesPage(d) {
+  render(
+    h("div", {}, h("span", { class: "kind table" }, "dataset version"), " ", h("span", { class: "badge" }, "files")),
+    h("h1", {}, d.reference),
+    h("p", { class: "sub" }, "Cloud Storage files a training run read, each pinned to the object generation recorded. "
+      + "Its fields come from the Parquet schema; column lineage below them is not claimed."),
+    h("ol", { class: "trace" }, step("Files", d.uri, `${plural(d.objects.length, "object")}, generations pinned`), ...filesSteps(d)),
+    h("h2", {}, `Fields (${d.columns.length})`),
+    table(["Field", "Type"], d.columns.map((c) => [c.field, c.dtype || "?"]), "The fields of these files are not known."),
+    h("h2", {}, `Objects (${d.objects.length})`),
+    table(["Object", "Generation", "Size"], d.objects.map((o) => [h("code", {}, o.uri), h("code", {}, o.generation),
+      o.size === null ? "?" : `${o.size.toLocaleString()} bytes`])),
+    h("h2", {}, "Recorded"), facts([["By", d.recorded_by], ["When", when(d.recorded_at)]]),
+    ...missingList(d.missing));
+}
+
 async function datasetPage(reference) {
   const d = await api(`/v1/datasets/${enc(reference)}/trace`);
+  if (d.kind === "gcs_files") return filesPage(d);
   render(
     h("div", {}, h("span", { class: "kind table" }, "dataset version")),
     h("h1", {}, d.reference),

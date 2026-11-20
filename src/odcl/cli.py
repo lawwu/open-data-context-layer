@@ -56,6 +56,20 @@ def lines(command: str, result) -> list[str]:
         checked = ("already recorded, so the artifact was not read again" if result["artifact_verified"] == "recorded"
                    else f"artifact checked by {result['artifact_verified']}")
         return [f"{result['model']} {result['version']}  {result['change']}  ({result['inputs']} input(s), {checked})"]
+    if command == "record":
+        return [f"{result['reference']}  {result['change']}  ({result['objects']} objects, {result['fields']} fields)"] + (
+            [f"fields not known: {result['schema']}"] if result["schema"] != "read" else [])
+    if command == "explain" and "model" in result and result["read"].get("kind") == "gcs_files":
+        produced, artifact, read = result["produced_by"], result["artifact"], result["read"]
+        out = [f"{result['model']} / {result['version']}",
+               f"  produced by   {produced['pipeline_run']} / task {produced['task']}",
+               f"  artifact      {artifact['uri']}#{artifact['generation']}  sha256 {artifact['sha256'][:12]}…",
+               f"  read          {read['uri']}  ({read['objects']} objects, generations pinned)",
+               "  written by    " + (f"{read['produced_by']['pipeline_run']} / task {read['produced_by']['task']}" if read["produced_by"] else "unknown"),
+               "  exported from " + (f"{read['exported_from']['table']}" + ("  (changed since)" if read["exported_from"]["changed_since"] else "")
+                                     if read["exported_from"] else "not recorded")]
+        out += [f"  {i['role']:<8} {i['field']}  {i['dtype'] or '?'}  (lineage not claimed)" for i in result["inputs"]]
+        return out + [f"missing: {m}" for m in result["missing"]]
     if command == "explain" and "model" in result:
         produced, artifact, read = result["produced_by"], result["artifact"], result["read"]
         out = [f"{result['model']} / {result['version']}",
@@ -78,6 +92,13 @@ def lines(command: str, result) -> list[str]:
         return [f"{result['added']} added, {result['changed']} changed, {result['unchanged']} unchanged"]
     if command == "handoff":
         return [f"{result['reference']}  {result['change']}"]
+    if command == "explain" and result.get("kind") == "gcs_files":
+        produced, exported = result["produced_by"], result["exported_from"]
+        out = [result["reference"], f"  files         {result['uri']}  ({len(result['objects'])} objects, generations pinned)",
+               "  written by    " + (f"{produced['pipeline_run']} / task {produced['task']}  {produced['state']}" if produced else "unknown"),
+               "  exported from " + (f"{exported['table']}" + ("  (changed since)" if exported["changed_since"] else "") if exported else "not recorded")]
+        out += [f"  {c['field']}  {c['dtype'] or '?'}" for c in result["columns"]]
+        return out + [f"missing: {m}" for m in result["missing"]]
     if command == "explain":
         produced, job, defined = result["produced_by"], result["executed_as"], result["defined_in"]
         out = [result["reference"], f"  snapshot of   {result['snapshot_of']}",
@@ -157,6 +178,12 @@ def run(catalog: Catalog, args):
         finally:
             client.close()
         return builds.record_handoff(catalog, args.invocation, args.target, facts)
+    if args.command == "record":
+        from . import filesets, vertex
+        location = vertex.JOB.match(args.pipeline_run or "")
+        require(location or not args.pipeline_run, "files", "--pipeline-run is a Vertex AI pipeline job: projects/P/locations/L/pipelineJobs/J")
+        return filesets.record(catalog, client=vertex.client(location.group(2) if location else "us-central1"), pipeline_run=args.pipeline_run,
+                               task=args.task, output=args.output, uris=args.uri, from_table=args.from_table)
     if args.command == "explain" and args.what == "model":
         return catalog.explain_model(args.name, args.version)
     if args.command == "explain":
@@ -211,6 +238,15 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--target", required=True, help="the table the build wrote, as project.dataset.table")
     s.add_argument("--snapshot", required=True, help="the table snapshot taken of it, as project.dataset.table")
     s.add_argument("--project", help="the project BigQuery calls are made from (default: your credentials' project)")
+
+    s = sub.add_parser("record", help="record a dataset version that is not a BigQuery snapshot")
+    kinds = s.add_subparsers(dest="what", required=True)
+    f = kinds.add_parser("dataset-files", help="the Cloud Storage files a training run read, such as a data-loader task's Parquet output")
+    f.add_argument("--pipeline-run", metavar="JOB", help="the Vertex AI pipeline job whose task wrote the files")
+    f.add_argument("--task", help="with --pipeline-run: the task that wrote them")
+    f.add_argument("--output", metavar="NAME", help="with --pipeline-run: the task's output artifact, e.g. output_train_dataset")
+    f.add_argument("--uri", nargs="+", metavar="GS_URI", help="instead: gs:// files or folders not written by a pipeline task")
+    f.add_argument("--from-table", metavar="TABLE", help="the catalog table the files were exported from (table-level lineage only)")
 
     s = sub.add_parser("explain", help="where something came from, as recorded")
     kinds = s.add_subparsers(dest="what", required=True)

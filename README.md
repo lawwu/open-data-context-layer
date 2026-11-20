@@ -77,6 +77,7 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 | `odcl import --dataform INVOCATION` | Read what a Dataform run compiled and how each action ran |
 | `odcl handoff --invocation INVOCATION --target TABLE --snapshot SNAPSHOT` | Record that a build handed on a snapshot of its output |
 | `odcl explain dataset SNAPSHOT[@TIME]` | Which build, job, file and inputs a dataset version came from |
+| `odcl record dataset-files --pipeline-run JOB --task TASK --output NAME [--from-table TABLE]` | Record the files a pipeline task exported as a dataset version |
 | `odcl import --vertex-manifest PATH\|gs://...` | Check a training manifest against Vertex AI and Cloud Storage, and record the model version |
 | `odcl explain model NAME --version V` | Which run, artifact, dataset version and raw columns a model version came from |
 | `odcl overview` | Counts, and data that changed after a project used it |
@@ -184,6 +185,25 @@ Anything it could not establish is listed under `missing`: a job not yet in sync
 
 A Dataform action runs as a BigQuery script, and the statement that writes the table is a child job of it. The build's own statements count as the build, not as another write.
 
+### When the training data is files, not a snapshot
+
+Many pipelines train on files instead: a data-loader task exports Parquet (`output_train_dataset`, `output_val_dataset`, …) and the trainer reads those. The table they came from may have been re-created since, so no snapshot can be taken. Record the files instead:
+
+```sh
+uv run odcl record dataset-files --pipeline-run projects/P/locations/L/pipelineJobs/J --task load-data \
+  --output output_train_dataset --from-table my-project.features.shift_inputs
+uv run odcl explain dataset gs://bucket/.../output_train_dataset@J
+```
+
+- **Which files.** The command reads the task's output artifact URI from the pipeline job, which must have succeeded. It lists every object under that URI, skipping empty markers such as `_SUCCESS`, and keeps each one with its object generation.
+- **Reference.** The file set's reference is the artifact URI and the job, `gs://…/output_train_dataset@J`.
+- **Files not written by a pipeline task** can be named directly with `--uri gs://…`. Their reference ends in the newest object's generation, and the trace says their producer is not known: a producer is never guessed.
+- **Fields** come from each object's Parquet footer, read with a range request, so no file is downloaded. If the footers cannot be read, or the objects disagree, the file set is recorded with no fields and says why. A manifest that names fields is then refused with that reason.
+- **Recording again.** Recording the same files again changes nothing. The same reference naming other bytes is refused.
+- **`--from-table`** records the table the files were exported from, as table-level lineage only. Its definition is pinned as it is when the files are recorded, and the trace says the table may have changed between writing the files and recording them.
+
+What a file set proves, and what it does not: it proves the exact bytes the trainer read, because each object is pinned to a generation and checked again when a model is imported. It does not prove which build produced those bytes, and it claims no column lineage below them. The trace lists both under `missing`.
+
 ## Model versions from Vertex AI Pipelines
 
 The training task writes a manifest after it uploads the model: which pipeline run and task it is, the dataset version it read, the fields of the training matrix in order with each one's role (`feature`, `label`, `cohort_filter`, `join_key`, `weight`), and the artifact's Cloud Storage URI, object generation and SHA-256. [`odcl.manifest`](src/odcl/manifest.py) writes one and has no dependencies, so training code can vendor that file. Take the fields from the matrix as fitted, not from configuration.
@@ -198,7 +218,8 @@ The manifest is the trainer's claim, so the import checks it before writing anyt
 
 - The pipeline run has the named task and the task succeeded.
 - The artifact is still the object generation the manifest names, and its bytes hash to the manifest's SHA-256 (artifacts over 512 MB are checked by generation only).
-- The dataset version is recorded (by `odcl handoff`), and each field is a column of it. A missing one is named, and nothing is written until it is there.
+- The dataset version is recorded (by `odcl handoff`, or `odcl record dataset-files` for files), and each field is a column of it. A missing one is named, and nothing is written until it is there.
+- For a file set, every object still has the generation recorded. An object replaced or deleted since is named, and nothing is written.
 - Importing the same manifest again changes nothing. A different manifest for a version already recorded is refused: a model version is written once.
 
 The model's project is registered at its first version if it is not already. If the version is the project's most recently trained one, its project's `uses` links then point at the columns it was trained on, pinned to the definitions it used and noted with each field's role (`feature in v17`). Links a person recorded with `odcl use` are kept. A version imported late, after a newer one, does not move them back. Replaying the manifest of a version recorded by an earlier release fills its links in.
@@ -216,7 +237,7 @@ staffing-forecast / v17
            from workforce-demo.raw.shift_totals.worked_minutes_asof
 ```
 
-Redefining the feature and training a later version leaves this answer unchanged. `odcl` reads Google with your Application Default Credentials, which bill each request to their quota project. If that project has no billing, Google refuses with a billing error; set `GOOGLE_CLOUD_QUOTA_PROJECT` to one that does.
+Redefining the feature and training a later version leaves this answer unchanged. A model trained on a file set traces to the files (how many objects, generations pinned), the task that wrote them and the table they were exported from, and stops there. Its project's `uses` link points at that table. `odcl` reads Google with your Application Default Credentials, which bill each request to their quota project. If that project has no billing, Google refuses with a billing error; set `GOOGLE_CLOUD_QUOTA_PROJECT` to one that does.
 
 ## OpenLineage
 

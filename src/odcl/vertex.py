@@ -34,8 +34,10 @@ class Client:
     def __init__(self, session, location: str):
         self.session, self.location = session, location
 
-    def _get(self, url: str, **params):
-        response = self.session.get(url, params=params or None, timeout=120)
+    def _get(self, url: str, headers: dict | None = None, missing_ok: bool = False, **params):
+        response = self.session.get(url, params=params or None, timeout=120, **({"headers": headers} if headers else {}))
+        if missing_ok and getattr(response, "status_code", None) == 404:
+            return None
         if not response.ok:
             raise CatalogError("vertex", f"Google refused the request for {url.split('?')[0]}: {refusal(response)}")
         return response
@@ -43,9 +45,29 @@ class Client:
     def get(self, name: str) -> dict:
         return self._get(f"https://{self.location}-aiplatform.googleapis.com/v1/{name}").json()
 
-    def object(self, uri: str) -> dict:
+    def object(self, uri: str, missing_ok: bool = False) -> dict | None:
+        """An object's metadata, or None when `missing_ok` and it is not there."""
         bucket, path = GCS.match(uri).groups()
-        return self._get(f"https://storage.googleapis.com/storage/v1/b/{bucket}/o/{quote(path, safe='')}").json()
+        found = self._get(f"https://storage.googleapis.com/storage/v1/b/{bucket}/o/{quote(path, safe='')}", missing_ok=missing_ok)
+        return found.json() if found is not None else None
+
+    def list(self, prefix: str) -> list[dict]:
+        """Every object whose name starts with the path of `prefix`, following page tokens."""
+        bucket, path = GCS.match(prefix).groups()
+        found, token = [], None
+        while True:
+            page = self._get(f"https://storage.googleapis.com/storage/v1/b/{bucket}/o", prefix=path,
+                             fields="items(name,bucket,generation,size,crc32c,md5Hash),nextPageToken", **({"pageToken": token} if token else {})).json()
+            found += page.get("items") or []
+            token = page.get("nextPageToken")
+            if not token:
+                return found
+
+    def tail(self, uri: str, generation: str, size: int) -> bytes:
+        """The last `size` bytes of one generation of an object."""
+        bucket, path = GCS.match(uri).groups()
+        return self._get(f"https://storage.googleapis.com/storage/v1/b/{bucket}/o/{quote(path, safe='')}", headers={"Range": f"bytes=-{size}"},
+                         alt="media", generation=generation).content
 
     def read(self, uri: str, generation: str) -> bytes:
         bucket, path = GCS.match(uri).groups()
@@ -112,8 +134,7 @@ def import_build(catalog: Catalog, manifest: dict, *, client) -> dict:
 
     # the run and the task that claims to have produced the model
     job = client.get(manifest["pipeline_run"])
-    task = next((t for t in (job.get("jobDetail") or {}).get("taskDetails") or [] if t.get("taskName") == manifest["task"]), None)
-    require(task, "task_not_found", f"{manifest['pipeline_run']} has no task named {manifest['task']}")
+    task = task_detail(job, manifest["pipeline_run"], manifest["task"])
     require(task.get("state") in SUCCEEDED, "task_not_succeeded", f"Task {manifest['task']} is {task.get('state')}, so it produced no model")
     execution = (task.get("execution") or {}).get("name")
     require(not manifest.get("execution") or manifest["execution"] == execution, "execution_mismatch",
@@ -132,11 +153,20 @@ def import_build(catalog: Catalog, manifest: dict, *, client) -> dict:
     # what it read, as the catalog recorded it
     db = catalog.db
     reference = reference_key(manifest["dataset_version"])
-    data = db.execute("SELECT id FROM dataset_versions WHERE reference = %s", (reference,)).fetchone()
-    require(data, "missing_dependency", f"No dataset version {reference} is recorded. Record the build's handoff (odcl handoff), then import again")
+    data = db.execute("SELECT id, kind, verification FROM dataset_versions WHERE reference = %s", (reference,)).fetchone()
+    require(data, "missing_dependency", f"No dataset version {reference} is recorded. Record the build's handoff (odcl handoff) or the files it read "
+                                        "(odcl record dataset-files), then import again")
+    if data["kind"] == "gcs_files":  # the files must still be the bytes recorded, or the model cannot be shown to have read them
+        for o in db.execute("SELECT uri, generation FROM dataset_version_objects WHERE dataset_version_id = %s ORDER BY uri", (data["id"],)).fetchall():
+            now = client.object(o["uri"], missing_ok=True)
+            what = "deleted" if now is None else f"replaced (it is now generation {now.get('generation')})"
+            require(now is not None and str(now.get("generation")) == o["generation"], "dataset_files_changed",
+                    f"{o['uri']} was {what} after {reference} was recorded at generation {o['generation']}; "
+                    "the files the model read can no longer be shown to be these")
     fields = {r["field_path"] for r in db.execute("SELECT field_path FROM version_columns WHERE dataset_version_id = %s", (data["id"],))}
     absent = [i["field"] for i in manifest["inputs"] if i["field"].lower() not in fields]
-    require(not absent, "missing_dependency", f"{reference} has no recorded field {', '.join(absent)}")
+    reason = data["verification"].get("schema", "read")
+    require(not absent, "missing_dependency", f"{reference} has no recorded field {', '.join(absent)}" + (f": {reason}" if not fields and reason != "read" else ""))
 
     with db.transaction():
         catalog._lock(f"{project}@{version}")
@@ -147,13 +177,7 @@ def import_build(catalog: Catalog, manifest: dict, *, client) -> dict:
         if not catalog._head(project):
             catalog.put("project", {"name": model, "description": f"Model {model}, trained in Vertex AI Pipelines",
                                     "source": {"vertex": {"created_by": "the import of its first model version"}}})
-        timing = lambda r, k: _time(r.get(k))  # noqa: E731
-        run = _execution(db, {"native_key": manifest["pipeline_run"], "kind": "pipeline_run", "parent_id": None, "state": job.get("state") or "UNKNOWN",
-                              "started_at": timing(job, "startTime"), "ended_at": timing(job, "endTime"),
-                              "evidence": Jsonb({"display_name": job.get("displayName")})})
-        producer = _execution(db, {"native_key": execution or f"{manifest['pipeline_run']}/tasks/{manifest['task']}", "kind": "task", "parent_id": run,
-                                   "state": task["state"], "started_at": timing(task, "startTime"), "ended_at": timing(task, "endTime"),
-                                   "evidence": Jsonb({"task": manifest["task"], "task_id": task.get("taskId"), "pipeline_run": manifest["pipeline_run"]})})
+        producer = record_task(db, job, task, manifest["pipeline_run"], manifest["task"])
         build = db.execute("""
             INSERT INTO model_builds (project_key, version, producing_execution, dataset_version_id, artifact_uri, artifact_generation, artifact_sha256,
                                       training_commit, prediction_cutoff, manifest, manifest_sha256, recorded_by)
@@ -165,6 +189,23 @@ def import_build(catalog: Catalog, manifest: dict, *, client) -> dict:
                                [(build, i["role"], i["field"], i.get("position"), data["id"], i["field"].lower()) for i in manifest["inputs"]])
         _record_use(catalog, build)
     return {"model": model, "version": version, "change": "added", "inputs": len(manifest["inputs"]), "artifact_verified": verified}
+
+
+def task_detail(job: dict, pipeline_run: str, name: str) -> dict:
+    task = next((t for t in (job.get("jobDetail") or {}).get("taskDetails") or [] if t.get("taskName") == name), None)
+    require(task, "task_not_found", f"{pipeline_run} has no task named {name}")
+    return task
+
+
+def record_task(db, job: dict, task: dict, pipeline_run: str, name: str) -> int:
+    """Record a pipeline run and one of its tasks as executions; the task's id."""
+    run = _execution(db, {"native_key": pipeline_run, "kind": "pipeline_run", "parent_id": None, "state": job.get("state") or "UNKNOWN",
+                          "started_at": _time(job.get("startTime")), "ended_at": _time(job.get("endTime")),
+                          "evidence": Jsonb({"display_name": job.get("displayName")})})
+    execution = (task.get("execution") or {}).get("name")
+    return _execution(db, {"native_key": execution or f"{pipeline_run}/tasks/{name}", "kind": "task", "parent_id": run,
+                           "state": task["state"], "started_at": _time(task.get("startTime")), "ended_at": _time(task.get("endTime")),
+                           "evidence": Jsonb({"task": name, "task_id": task.get("taskId"), "pipeline_run": pipeline_run})})
 
 
 def _record_use(catalog: Catalog, build: int) -> None:
@@ -180,8 +221,13 @@ def _record_use(catalog: Catalog, build: int) -> None:
         return
     pinned = db.execute("""SELECT i.role, c.column_key, c.column_revision FROM build_inputs i
                            JOIN version_columns c ON (c.dataset_version_id, c.field_path) = (i.dataset_version_id, i.field_path)
-                           WHERE i.build_id = %s ORDER BY c.column_key, i.role""", (build,)).fetchall()
-    catalog._use_from_model(row["project_key"], [(r["column_key"], r["column_revision"], f"{r['role']} in {row['version']}") for r in pinned])
+                           WHERE i.build_id = %s AND c.column_key IS NOT NULL ORDER BY c.column_key, i.role""", (build,)).fetchall()
+    uses = [(r["column_key"], r["column_revision"], f"{r['role']} in {row['version']}") for r in pinned]
+    files = db.execute("""SELECT d.table_key, d.table_revision FROM model_builds b JOIN dataset_versions d ON d.id = b.dataset_version_id
+                          WHERE b.id = %s AND d.kind = 'gcs_files' AND d.table_key IS NOT NULL""", (build,)).fetchone()
+    if files:  # a file set's fields pin no column; the table it was exported from is what the model depends on
+        uses.append((files["table_key"], files["table_revision"], f"read as files in {row['version']}"))
+    catalog._use_from_model(row["project_key"], uses)
 
 
 def explain_model(catalog: Catalog, name: str, version: str) -> dict:
@@ -196,6 +242,21 @@ def explain_model(catalog: Catalog, name: str, version: str) -> dict:
     require(row, "not_found", f"No build of {name} {version} is recorded. Import its training manifest with odcl import --vertex-manifest")
     data = explain_dataset(catalog, row["reference"])
     columns = {c["field"]: c for c in data["columns"]}
+    manifest = row["manifest"]
+    produced = {"pipeline_run": row["task"]["pipeline_run"], "task": row["task"]["task"], "execution": row["execution"],
+                "training_commit": row["training_commit"], "prediction_cutoff": manifest.get("prediction_cutoff")}
+    artifact = {"uri": row["artifact_uri"], "generation": row["artifact_generation"], "sha256": row["artifact_sha256"]}
+    if data.get("kind") == "gcs_files":
+        return {
+            "model": manifest["model"], "version": row["version"], "produced_by": produced, "artifact": artifact,
+            "read": {"dataset_version": data["reference"], "kind": "gcs_files", "uri": data["uri"], "objects": len(data["objects"]), "generations_pinned": True,
+                     "produced_by": {k: data["produced_by"][k] for k in ("pipeline_run", "task", "state")} if data["produced_by"] else None,
+                     "exported_from": data["exported_from"]},
+            "inputs": [{"field": i["field"], "role": i["role"], "position": i["position"], "dtype": columns.get(i["field_path"], {}).get("dtype"),
+                        "lineage": "not_claimed"}
+                       for i in db.execute("SELECT * FROM build_inputs WHERE build_id = %s ORDER BY position NULLS LAST, role, field", (row["id"],))],
+            "missing": data["missing"],
+        }
     inputs = []
     for i in db.execute("SELECT * FROM build_inputs WHERE build_id = %s ORDER BY position NULLS LAST, role, field", (row["id"],)):
         column = columns.get(i["field_path"], {})
@@ -205,12 +266,8 @@ def explain_model(catalog: Catalog, name: str, version: str) -> dict:
             "executed_as": {k: data["executed_as"][k] for k in ("project", "location", "job_id", "statement_type", "state")} if data["executed_as"] else None,
             "defined_in": data["defined_in"], "expression": column.get("expression"),
             "derived_from": [d["column"] for d in column.get("derived_from", [])], "lineage": column.get("lineage", "unresolved")})
-    manifest = row["manifest"]
     return {
-        "model": manifest["model"], "version": row["version"],
-        "produced_by": {"pipeline_run": row["task"]["pipeline_run"], "task": row["task"]["task"], "execution": row["execution"],
-                        "training_commit": row["training_commit"], "prediction_cutoff": manifest.get("prediction_cutoff")},
-        "artifact": {"uri": row["artifact_uri"], "generation": row["artifact_generation"], "sha256": row["artifact_sha256"]},
+        "model": manifest["model"], "version": row["version"], "produced_by": produced, "artifact": artifact,
         "read": {"dataset_version": data["reference"], "snapshot": data["snapshot"], "snapshot_of": data["snapshot_of"], "snapshot_time": data["snapshot_time"]},
         "inputs": inputs,
         "missing": data["missing"],

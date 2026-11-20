@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from odcl import Catalog, CatalogError, builds, dataform, manifest, vertex
+from odcl import Catalog, CatalogError, builds, dataform, filesets, manifest, vertex
 from test_dataform import INVOCATION, TARGET, FakeDataform, load, snapshot_facts, sync_history
 
 FIXTURES = Path(__file__).parent / "fixtures" / "staffing_trace"
@@ -28,7 +28,9 @@ class FakeVertex:
         assert name == self.job["name"], name
         return self.job
 
-    def object(self, uri):
+    def object(self, uri, missing_ok=False):
+        if missing_ok and uri not in self.objects:
+            return None
         data, generation = self.objects[uri]
         return {"generation": generation, "size": str(len(data))}
 
@@ -36,6 +38,17 @@ class FakeVertex:
         data, current = self.objects[uri]
         assert generation == current
         return data
+
+    def list(self, prefix):
+        """What Cloud Storage's objects.list answers for a prefix: every object whose name starts with it."""
+        return [{"name": uri.split("/", 3)[3], "bucket": uri.split("/")[2], "generation": generation, "size": str(len(data)),
+                 "crc32c": "AAAAAA==", "md5Hash": "1B2M2Y8AsgTpgAmY7PhCfg=="}
+                for uri, (data, generation) in sorted(self.objects.items()) if uri.startswith(prefix)]
+
+    def tail(self, uri, generation, size):
+        data, current = self.objects[uri]
+        assert generation == current
+        return data[-size:]
 
 
 @pytest.fixture
@@ -276,3 +289,140 @@ def test_replaying_a_version_recorded_before_projects_kept_their_uses_fills_them
     assert catalog.uses("staffing-forecast")["uses"] == []
     assert vertex.import_build(catalog, load("training_manifest.json"), client=FakeVertex())["change"] == "unchanged"
     assert [u["purpose"] for u in catalog.uses("staffing-forecast")["uses"]] == ["feature in v17"]
+
+
+# ---- a model trained on files a data-loader task exported, not on a BigQuery snapshot ---------------------------------
+FILE_JOB = json.loads((Path(__file__).parent / "fixtures" / "file_trace" / "vertex_pipeline_job.json").read_text())
+LOADER_OUT = FILE_JOB["jobDetail"]["taskDetails"][0]["outputs"]["output_train_dataset"]["artifacts"][0]["uri"]
+FILE_SET = f"{LOADER_OUT}@train-files-007"
+
+
+def parquet_rows(**columns) -> bytes:
+    pa = pytest.importorskip("pyarrow")
+    import io
+
+    import pyarrow.parquet as pq
+    out = io.BytesIO()
+    pq.write_table(pa.table(columns), out)
+    return out.getvalue()
+
+
+def exported(generation_offset=0, data=None):
+    """Three Parquet parts and a _SUCCESS marker under the loader's output, and a sibling that only shares its prefix."""
+    part = data or parquet_rows(employee_id=["E-1", "E-2"], hours_at_cutoff=[40.5, 38.0], tenure_days=[400, 30], is_train=[True, False])
+    files = {f"{LOADER_OUT}/part-{i}.parquet": (part, str(1791000000000000 + i + generation_offset)) for i in range(3)}
+    return files | {f"{LOADER_OUT}/_SUCCESS": (b"", "1791000000000009"), f"{LOADER_OUT}_old/part-0.parquet": (part, "1")}
+
+
+def file_manifest(**changes):
+    m = load("training_manifest.json") | {"version": "v20", "pipeline_run": FILE_JOB["name"], "task": "train", "dataset_version": FILE_SET,
+                                          "execution": FILE_JOB["jobDetail"]["taskDetails"][1]["execution"]["name"]}
+    m["artifact"] = m["artifact"] | {"uri": "gs://demo-models/staffing/v20/model.bin"}
+    return m | changes
+
+
+def files_client(objects=None):
+    return FakeVertex(job=FILE_JOB, objects=(objects or exported()) | {"gs://demo-models/staffing/v20/model.bin": (MODEL, "1788318000000000")})
+
+
+def record_loader_output(catalog, client=None, **options):
+    return filesets.record(catalog, client=client or files_client(), pipeline_run=FILE_JOB["name"], task="load-data",
+                           output="output_train_dataset", **options)
+
+
+def test_a_file_set_a_task_exported_is_recorded_with_its_generations_and_fields(catalog):
+    assert record_loader_output(catalog) == {"reference": FILE_SET, "change": "added", "objects": 3, "fields": 4, "schema": "read"}
+    stored = catalog.db.execute("SELECT uri, generation FROM dataset_version_objects ORDER BY uri").fetchall()
+    assert [(r["uri"].rsplit("/", 1)[1], r["generation"]) for r in stored] == [(f"part-{i}.parquet", str(1791000000000000 + i)) for i in range(3)]
+    fields = {r["field_path"]: r["dtype"] for r in catalog.db.execute("SELECT field_path, dtype FROM version_columns")}
+    assert fields == {"employee_id": "STRING", "hours_at_cutoff": "DOUBLE", "tenure_days": "INT64", "is_train": "BOOLEAN"}
+
+    assert record_loader_output(catalog)["change"] == "unchanged"
+    with pytest.raises(CatalogError) as error:  # the same reference cannot later name other bytes
+        record_loader_output(catalog, client=files_client(exported(generation_offset=100)))
+    assert error.value.code == "conflict" and "part-0.parquet" in str(error.value)
+
+
+def test_a_model_trained_on_files_traces_to_the_files_their_producer_and_the_table_they_came_from(catalog):
+    catalog.put("table", {"path": TARGET, "description": "Shift features", "system": "bigquery"})
+    table_revision = catalog.get(TARGET)["revision"]
+    record_loader_output(catalog, from_table=TARGET)
+    assert vertex.import_build(catalog, file_manifest(), client=files_client())["change"] == "added"
+
+    trace = catalog.explain_model("staffing-forecast", "v20")
+    assert trace["read"] == {"dataset_version": FILE_SET, "kind": "gcs_files", "uri": LOADER_OUT, "objects": 3, "generations_pinned": True,
+                             "produced_by": {"pipeline_run": FILE_JOB["name"], "task": "load-data", "state": "SUCCEEDED"},
+                             "exported_from": {"table": TARGET, "revision": table_revision, "changed_since": False}}
+    [feature] = trace["inputs"]
+    assert feature == {"field": "hours_at_cutoff", "role": "feature", "position": 0, "dtype": "DOUBLE", "lineage": "not_claimed"}
+    assert "column-level lineage below the file set is not claimed" in " ".join(trace["missing"])
+    # the project depends on the table the files were exported from, at the revision pinned when they were recorded
+    [used] = catalog.uses("staffing-forecast")["uses"]
+    assert used["key"] == f"table:{TARGET}" and used["purpose"] == "read as files in v20"
+
+    catalog.put("table", {"path": TARGET, "description": "Shift features, redefined", "system": "bigquery"})
+    assert catalog.explain_model("staffing-forecast", "v20")["read"]["exported_from"]["changed_since"] is True
+
+
+def test_a_file_replaced_or_deleted_since_it_was_recorded_is_named_and_nothing_is_written(catalog):
+    record_loader_output(catalog)
+    replaced = exported() | {f"{LOADER_OUT}/part-1.parquet": (exported()[f"{LOADER_OUT}/part-1.parquet"][0], "999")}
+    deleted = {k: v for k, v in exported().items() if not k.endswith("part-2.parquet")}
+    for objects, named in ((replaced, "part-1.parquet"), (deleted, "part-2.parquet")):
+        with pytest.raises(CatalogError) as error:
+            vertex.import_build(catalog, file_manifest(), client=files_client(objects))
+        assert error.value.code == "dataset_files_changed" and named in str(error.value)
+    assert catalog.db.execute("SELECT count(*) AS n FROM model_builds").fetchone()["n"] == 0
+
+
+def test_a_field_the_files_do_not_have_or_files_whose_schema_cannot_be_read_are_refused_with_the_reason(catalog):
+    record_loader_output(catalog)
+    wrong = file_manifest(inputs=[{"field": "hours_worked", "role": "feature", "position": 0}])
+    with pytest.raises(CatalogError) as error:
+        vertex.import_build(catalog, wrong, client=files_client())
+    assert error.value.code == "missing_dependency" and "hours_worked" in str(error.value)
+
+    not_parquet = {f"{LOADER_OUT}/part-0.csv": (b"employee_id,hours\nE-1,40\n", "5")}
+    other = FILE_JOB["name"].replace("train-files-007", "train-files-008")
+    job = json.loads(json.dumps(FILE_JOB).replace("train-files-007", "train-files-008"))
+    out = LOADER_OUT.replace("train-files-007", "train-files-008")
+    client = FakeVertex(job=job, objects={k.replace("train-files-007", "train-files-008"): v for k, v in not_parquet.items()}
+                        | {"gs://demo-models/staffing/v20/model.bin": (MODEL, "1788318000000000")})
+    result = filesets.record(catalog, client=client, pipeline_run=other, task="load-data", output="output_train_dataset")
+    assert result["fields"] == 0 and "no Parquet object" in result["schema"]
+    with pytest.raises(CatalogError) as error:
+        vertex.import_build(catalog, file_manifest(dataset_version=f"{out}@train-files-008", pipeline_run=other), client=client)
+    assert error.value.code == "missing_dependency" and "no Parquet object" in str(error.value)
+
+
+def test_files_named_directly_have_no_producer_and_the_trace_says_so(catalog):
+    result = filesets.record(catalog, client=files_client(), uris=[LOADER_OUT])
+    assert result["reference"] == f"{LOADER_OUT}@1791000000000002" and result["objects"] == 3  # named by its newest object
+    trace = builds.explain_dataset(catalog, result["reference"])
+    assert trace["produced_by"] is None and trace["exported_from"] is None
+    assert any("producer" in m for m in trace["missing"]) and any("exported from" in m for m in trace["missing"])
+    verification = catalog.db.execute("SELECT verification FROM dataset_versions").fetchone()["verification"]
+    assert verification["producer_unknown"] is True
+
+
+def test_a_loader_task_that_failed_or_has_no_such_output_records_nothing(catalog):
+    failed = json.loads(json.dumps(FILE_JOB))
+    failed["jobDetail"]["taskDetails"][0]["state"] = "FAILED"
+    with pytest.raises(CatalogError) as error:
+        record_loader_output(catalog, client=FakeVertex(job=failed, objects=exported()))
+    assert error.value.code == "task_not_succeeded"
+    with pytest.raises(CatalogError) as error:
+        filesets.record(catalog, client=files_client(), pipeline_run=FILE_JOB["name"], task="load-data", output="output_test_dataset")
+    assert error.value.code == "output_not_found" and "output_train_dataset" in str(error.value)
+    assert catalog.db.execute("SELECT count(*) AS n FROM dataset_versions").fetchone()["n"] == 0
+
+
+def test_the_command_line_records_files_and_explains_them(database, monkeypatch, capsys):
+    from odcl.cli import main
+    monkeypatch.setattr(vertex, "client", lambda location: files_client())
+    db = ["--database-url", database]
+    assert main([*db, "record", "dataset-files", "--pipeline-run", FILE_JOB["name"], "--task", "load-data", "--output", "output_train_dataset"]) == 0
+    assert f"{FILE_SET}  added  (3 objects, 4 fields)" in capsys.readouterr().out
+    assert main([*db, "explain", "dataset", FILE_SET]) == 0
+    out = capsys.readouterr().out
+    assert "3 objects, generations pinned" in out and "load-data" in out and "hours_at_cutoff  DOUBLE" in out
