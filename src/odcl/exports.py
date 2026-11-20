@@ -200,11 +200,13 @@ def evaluate(catalog: Catalog, client, refs: list[str], source_uri: str, objects
                      "sql_sha256": hashlib.sha256(query.encode()).hexdigest(), "sql_template": lineage.template(query, DIALECT) if sql == "templates" else None,
                      "row_filter": shape.split(" WHERE ", 1)[1] if shape and " WHERE " in shape else None})
 
-    # are the files the jobs' own output?
-    files, rows = len(objects), [o.get("rows") for o in objects]
+    # are the files the jobs' own output? Only the Parquet objects count: a sidecar such as metadata.json is not the job's
+    data = [o for o in objects if o.get("parquet")]
+    others = sorted(o["uri"] for o in objects if not o.get("parquet"))
+    files = len(data)
     exported_files = sum(j["file_count"] or 0 for j in jobs) if all(j["file_count"] is not None for j in jobs) else None
     exported_rows = sum(j["row_count"] or 0 for j in jobs) if all(j["row_count"] is not None for j in jobs) else None
-    footer_rows = sum(rows) if rows and all(r is not None for r in rows) else None
+    footer_rows = sum(o["rows"] for o in data) if data and all(o.get("rows") is not None for o in data) else None
     refs_named = [name(j["project"], j["location"], j["job_id"]) for j in jobs]
     if exported_rows is not None and footer_rows is not None and exported_rows != footer_rows:
         raise CatalogError("export_rows_differ", f"{', '.join(refs_named)} exported {exported_rows:,} rows, but the files hold {footer_rows:,}: "
@@ -212,10 +214,10 @@ def evaluate(catalog: Catalog, client, refs: list[str], source_uri: str, objects
     own = exported_files == files
     if not own:
         require(exported_rows is not None and footer_rows is not None, "export_rows_differ",
-                f"{', '.join(refs_named)} wrote {exported_files if exported_files is not None else 'an unknown number of'} files and {files} are recorded; "
-                "the row counts that would show they hold the same rows are not known")
+                f"{', '.join(refs_named)} wrote {exported_files if exported_files is not None else 'an unknown number of'} files and {files} Parquet "
+                "object(s) are recorded; the row counts that would show they hold the same rows are not known")
     return {"jobs": jobs, "jobs_named": refs_named, "fields": traced, "filters": filters, "own_output": own,
-            "exported_files": exported_files, "files": files, "rows": exported_rows}
+            "exported_files": exported_files, "files": files, "rows": exported_rows, "not_counted": others}
 
 
 def store(catalog: Catalog, version: int, binding: dict) -> str:
@@ -243,5 +245,5 @@ def store(catalog: Catalog, version: int, binding: dict) -> str:
                                [(version, key, rev, pinned) for key, (rev, pinned) in sorted(binding["filters"].items())])
         db.execute("UPDATE dataset_versions SET verification = verification || %s WHERE id = %s",
                    (Jsonb({"export": {"jobs": binding["jobs_named"], "own_output": binding["own_output"], "exported_files": binding["exported_files"],
-                                      "files": binding["files"], "rows": binding["rows"]}}), version))
+                                      "files": binding["files"], "rows": binding["rows"], "not_counted": binding["not_counted"]}}), version))
     return "bound"

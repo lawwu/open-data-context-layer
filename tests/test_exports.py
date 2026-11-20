@@ -154,3 +154,34 @@ def test_the_command_line_binds_and_explains(database, monkeypatch, capsys):
     assert f"exported by   BigQuery job ({REF})  EXPORT_DATA  6 rows" in out and "row filter    time_split = ? AND valid_for_training = TRUE" in out
     assert f"hours_at_cutoff = worked_hours  from {SOURCE}.worked_hours" in out
     assert json.loads(json.dumps(builds.explain_dataset(Catalog(database), FILE_SET)))  # serialisable
+
+
+SIDECAR = f"{LOADER_OUT}/metadata.json"
+
+
+def with_sidecar():
+    return exported() | {SIDECAR: (b'{"rows": 6, "written_by": "load-data"}', "1791000000000050")}
+
+
+@pytest.mark.parametrize("files", ["3", "4127"])  # the job's own files, or compacted afterwards: either way only the Parquet is counted
+def test_a_non_parquet_sidecar_is_not_counted_against_the_export_job(catalog, files):
+    record(catalog, client(export_job(files=files, rows="6"), objects=with_sidecar()), export_jobs=[REF])
+    trace = builds.explain_dataset(catalog, FILE_SET)
+    assert len(trace["objects"]) == 4  # the sidecar is still recorded and pinned
+    assert any("metadata.json" in m and "not Parquet" in m and "not counted" in m for m in trace["missing"])
+    assert any("rewritten after the export" in m for m in trace["missing"]) == (files != "3")
+
+
+def test_parquet_rows_that_differ_from_the_jobs_are_refused_even_beside_a_sidecar(catalog):
+    with pytest.raises(CatalogError) as error:
+        record(catalog, client(export_job(files="4127", rows="7"), objects=with_sidecar()), export_jobs=[REF])
+    assert error.value.code == "export_rows_differ" and "7" in str(error.value) and "6" in str(error.value)
+
+
+def test_a_file_set_recorded_before_row_counts_were_kept_binds_when_recorded_again(catalog):
+    record(catalog, client(objects=with_sidecar()))
+    # as a release before migration 0007 left it: no row counts or creation times on the objects
+    catalog.db.execute("UPDATE dataset_version_objects SET num_rows = NULL, time_created = NULL")
+    assert record(catalog, client(export_job(files="4127", rows="6"), objects=with_sidecar()), export_jobs=[REF])["change"] == "bound"
+    rows = {r["uri"].rsplit("/", 1)[1]: r["num_rows"] for r in catalog.db.execute("SELECT uri, num_rows FROM dataset_version_objects")}
+    assert rows == {"part-0.parquet": 2, "part-1.parquet": 2, "part-2.parquet": 2, "metadata.json": None}  # filled in from the footers
