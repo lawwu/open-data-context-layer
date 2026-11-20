@@ -21,6 +21,10 @@ def flag(entry) -> str:
     return "  (changed since)" if entry.get("changed_since") else ""
 
 
+def _count(n: int, word: str) -> str:
+    return f"{n:,} {word}{'' if n == 1 else 's'}"
+
+
 def _defined(defined: dict) -> str:
     return f"{defined['file']} at commit {defined['commit']}" if defined.get("commit") else f"{defined['file']} (no git commit)"
 
@@ -57,18 +61,24 @@ def lines(command: str, result) -> list[str]:
                    else f"artifact checked by {result['artifact_verified']}")
         return [f"{result['model']} {result['version']}  {result['change']}  ({result['inputs']} input(s), {checked})"]
     if command == "record":
-        return [f"{result['reference']}  {result['change']}  ({result['objects']} objects, {result['fields']} fields)"] + (
-            [f"fields not known: {result['schema']}"] if result["schema"] != "read" else [])
+        return [f"{result['reference']}  {result['change']}  ({_count(result['objects'], 'object')}, {_count(result['fields'], 'field')})"] + (
+            [f"fields not known: {result['schema']}"] if result["schema"] != "read" else []) + (
+            [f"exported by {', '.join(result['exported_by'])}"] if result.get("exported_by") else [])
     if command == "explain" and "model" in result and result["read"].get("kind") == "gcs_files":
         produced, artifact, read = result["produced_by"], result["artifact"], result["read"]
         out = [f"{result['model']} / {result['version']}",
                f"  produced by   {produced['pipeline_run']} / task {produced['task']}",
                f"  artifact      {artifact['uri']}#{artifact['generation']}  sha256 {artifact['sha256'][:12]}…",
-               f"  read          {read['uri']}  ({read['objects']} objects, generations pinned)",
+               f"  read          {read['uri']}  ({_count(read['objects'], 'object')}, generations pinned)",
                "  written by    " + (f"{read['produced_by']['pipeline_run']} / task {read['produced_by']['task']}" if read["produced_by"] else "unknown"),
                "  exported from " + (f"{read['exported_from']['table']}" + ("  (changed since)" if read["exported_from"]["changed_since"] else "")
                                      if read["exported_from"] else "not recorded")]
-        out += [f"  {i['role']:<8} {i['field']}  {i['dtype'] or '?'}  (lineage not claimed)" for i in result["inputs"]]
+        for j in read.get("exported_by") or []:
+            out.append(f"  exported by   BigQuery job ({j['job']})  {j['statement_type']}" + (f"  {j['rows']:,} rows" if j["rows"] is not None else ""))
+        if read.get("row_filter"):
+            out.append(f"  row filter    {read['row_filter']['expression'] or ', '.join(read['row_filter']['columns'])}")
+        out += [f"  {i['role']:<8} {i['field']} = {i['expression'] or '?'}  from {', '.join(i['derived_from']) or '?'}" if "derived_from" in i
+                else f"  {i['role']:<8} {i['field']}  {i['dtype'] or '?'}  (lineage not claimed)" for i in result["inputs"]]
         return out + [f"missing: {m}" for m in result["missing"]]
     if command == "explain" and "model" in result:
         produced, artifact, read = result["produced_by"], result["artifact"], result["read"]
@@ -94,10 +104,16 @@ def lines(command: str, result) -> list[str]:
         return [f"{result['reference']}  {result['change']}"]
     if command == "explain" and result.get("kind") == "gcs_files":
         produced, exported = result["produced_by"], result["exported_from"]
-        out = [result["reference"], f"  files         {result['uri']}  ({len(result['objects'])} objects, generations pinned)",
+        out = [result["reference"], f"  files         {result['uri']}  ({_count(len(result['objects']), 'object')}, generations pinned)",
                "  written by    " + (f"{produced['pipeline_run']} / task {produced['task']}  {produced['state']}" if produced else "unknown"),
                "  exported from " + (f"{exported['table']}" + ("  (changed since)" if exported["changed_since"] else "") if exported else "not recorded")]
-        out += [f"  {c['field']}  {c['dtype'] or '?'}" for c in result["columns"]]
+        for j in result.get("exported_by") or []:
+            out.append(f"  exported by   BigQuery job ({j['job']})  {j['statement_type']}" + (f"  {j['rows']:,} rows" if j["rows"] is not None else ""))
+        if result.get("row_filter"):
+            out.append(f"  row filter    {result['row_filter']['expression'] or ', '.join(result['row_filter']['columns'])}")
+        out += [f"  {c['field']} = {c.get('expression') or '?'}" + (f"  from {', '.join(d['column'] for d in c['derived_from'])}" if c["derived_from"] else "")
+                + ("" if c["lineage"] == "resolved" else f"  ({c['lineage']})") if "derived_from" in c else f"  {c['field']}  {c['dtype'] or '?'}"
+                for c in result["columns"]]
         return out + [f"missing: {m}" for m in result["missing"]]
     if command == "explain":
         produced, job, defined = result["produced_by"], result["executed_as"], result["defined_in"]
@@ -183,7 +199,8 @@ def run(catalog: Catalog, args):
         location = vertex.JOB.match(args.pipeline_run or "")
         require(location or not args.pipeline_run, "files", "--pipeline-run is a Vertex AI pipeline job: projects/P/locations/L/pipelineJobs/J")
         return filesets.record(catalog, client=vertex.client(location.group(2) if location else "us-central1"), pipeline_run=args.pipeline_run,
-                               task=args.task, output=args.output, uris=args.uri, from_table=args.from_table)
+                               task=args.task, output=args.output, uris=args.uri, from_table=args.from_table, export_jobs=args.export_job,
+                               find_export_job=args.find_export_job, sql=args.sql)
     if args.command == "explain" and args.what == "model":
         return catalog.explain_model(args.name, args.version)
     if args.command == "explain":
@@ -247,6 +264,10 @@ def parser() -> argparse.ArgumentParser:
     f.add_argument("--output", metavar="NAME", help="with --pipeline-run: the task's output artifact, e.g. output_train_dataset")
     f.add_argument("--uri", nargs="+", metavar="GS_URI", help="instead: gs:// files or folders not written by a pipeline task")
     f.add_argument("--from-table", metavar="TABLE", help="the catalog table the files were exported from (table-level lineage only)")
+    f.add_argument("--export-job", action="append", metavar="PROJECT:LOCATION.JOB_ID",
+                   help="the BigQuery EXPORT DATA job that wrote the files; each field is traced through its SELECT (repeat for several)")
+    f.add_argument("--find-export-job", action="store_true", help="with --pipeline-run: find the EXPORT DATA job among the jobs created while the task ran")
+    f.add_argument("--sql", choices=["templates", "none"], default="templates", help="keep the export job's SQL as its shape (default), or not at all")
 
     s = sub.add_parser("explain", help="where something came from, as recorded")
     kinds = s.add_subparsers(dest="what", required=True)

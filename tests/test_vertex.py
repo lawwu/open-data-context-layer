@@ -20,13 +20,14 @@ MODEL = (FIXTURES / "model.bin").read_bytes()
 class FakeVertex:
     """Answers the pipeline-job read and the two Cloud Storage reads from the fixture."""
 
-    def __init__(self, job=None, objects=None):
-        self.job = job or load("vertex_pipeline_job.json")
+    def __init__(self, job=None, objects=None, bq_jobs=(), created="2026-10-05T09:11:00Z"):
+        self.pipeline_job = job or load("vertex_pipeline_job.json")
         self.objects = objects or {"gs://demo-models/staffing/v17/model.bin": (MODEL, "1788318000000000")}
+        self.bq_jobs, self.created = {j["jobReference"]["jobId"]: j for j in bq_jobs}, created
 
     def get(self, name):
-        assert name == self.job["name"], name
-        return self.job
+        assert name == self.pipeline_job["name"], name
+        return self.pipeline_job
 
     def object(self, uri, missing_ok=False):
         if missing_ok and uri not in self.objects:
@@ -42,8 +43,15 @@ class FakeVertex:
     def list(self, prefix):
         """What Cloud Storage's objects.list answers for a prefix: every object whose name starts with it."""
         return [{"name": uri.split("/", 3)[3], "bucket": uri.split("/")[2], "generation": generation, "size": str(len(data)),
-                 "crc32c": "AAAAAA==", "md5Hash": "1B2M2Y8AsgTpgAmY7PhCfg=="}
+                 "crc32c": "AAAAAA==", "md5Hash": "1B2M2Y8AsgTpgAmY7PhCfg==", "timeCreated": self.created}
                 for uri, (data, generation) in sorted(self.objects.items()) if uri.startswith(prefix)]
+
+    def job(self, project, location, job_id):
+        assert (project, location) == tuple(self.bq_jobs[job_id]["jobReference"][k] for k in ("projectId", "location"))
+        return self.bq_jobs[job_id]
+
+    def jobs(self, project, min_ms, max_ms):
+        return [j for j in self.bq_jobs.values() if j["jobReference"]["projectId"] == project and min_ms <= int(j["statistics"]["creationTime"]) <= max_ms]
 
     def tail(self, uri, generation, size):
         data, current = self.objects[uri]

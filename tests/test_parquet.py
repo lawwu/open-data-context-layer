@@ -39,3 +39,8 @@ def test_what_is_not_parquet_is_refused():
     data = written(pa.table({"a": [1]}))
     with pytest.raises(ValueError):
         parquet.fields(data[-20:])  # a tail too short to hold the footer
+
+
+def test_the_footer_also_says_how_many_rows_the_file_holds():
+    data = written(pa.table({"a": list(range(7))}))
+    assert parquet.metadata(data[-parquet.footer_size(data[-8:]):]) == ([("a", "INT64")], 7)

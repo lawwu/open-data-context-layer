@@ -25,15 +25,20 @@ def footer_size(last8: bytes) -> int:
 def fields(tail: bytes) -> list[tuple[str, str]]:
     """(field path, type) for every field, in schema order, from the file's last `footer_size` (or more) bytes.
     Nested struct fields are dotted paths; a list or map is one field. Names are lower-cased."""
+    return metadata(tail)[0]
+
+
+def metadata(tail: bytes) -> tuple[list[tuple[str, str]], int | None]:
+    """The fields, as `fields` gives them, and the number of rows the footer reports."""
     size = footer_size(tail[-8:])
     if len(tail) < size:
         raise ValueError(f"the footer needs the last {size} bytes of the file, not {len(tail)}")
-    elements = _schema(_Reader(tail[-size:-8]))
+    elements, rows = _file_metadata(_Reader(tail[-size:-8]))
     if not elements:
         raise ValueError("the footer holds no schema")
     out: list[tuple[str, str]] = []
     _walk(elements, 1, elements[0].get("num_children", 0), "", out)
-    return out
+    return out, rows
 
 
 def _kind(e: dict) -> str | None:
@@ -58,13 +63,19 @@ def _walk(elements: list[dict], i: int, count: int, prefix: str, out: list | Non
     return i
 
 
-def _schema(r: "_Reader") -> list[dict]:
+def _file_metadata(r: "_Reader") -> tuple[list[dict], int | None]:
+    """FileMetaData's schema (field 2) and num_rows (field 3); the fields after them are not read."""
+    elements, rows = [], None
     for field, kind in r.struct():
         if field == 2 and kind == 9:
             size, _ = r.list_header()
-            return [_element(r) for _ in range(size)]
-        r.skip(kind)
-    return []
+            elements = [_element(r) for _ in range(size)]
+        elif field == 3 and kind == 6:
+            rows = r.zigzag()
+            return elements, rows
+        else:
+            r.skip(kind)
+    return elements, rows
 
 
 def _element(r: "_Reader") -> dict:

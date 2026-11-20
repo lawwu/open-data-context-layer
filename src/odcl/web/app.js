@@ -345,7 +345,23 @@ function filesSteps(files) {
       written?.state ? h("span", {}, stateBadge(written.state)) : null),
     step("Exported from", exported ? entryLink(`table:${exported.table}`, exported.table) : "not recorded",
       exported ? h("span", {}, "table-level lineage only, pinned when the files were recorded",
-        exported.changed_since ? [" ", changedBadge()] : null) : null)];
+        exported.changed_since ? [" ", changedBadge()] : null) : null),
+    ...(files.exported_by || []).map((j) => {
+      const [, project, location, id] = /^(.+):([A-Za-z0-9-]+)\.([\w-]+)$/.exec(j.job) || [];
+      return step("Exported by", j.job, h("span", {}, `BigQuery ${j.statement_type} job`, j.rows !== null ? ` · ${plural(j.rows, "row")}` : "",
+        j.files !== null ? ` · ${plural(j.files, "file")}` : "", " · ", when(j.created), " ", consoleLink(gcp.job(project, location, id))));
+    }),
+    ...(files.row_filter ? [step("Row filter", h("code", {}, files.row_filter.expression || "?"),
+      files.row_filter.columns.length ? h("span", {}, "filters on ", files.row_filter.columns.map((c, n) => [n ? ", " : "", entryLink(`column:${c}`, c)])) : null)] : [])];
+}
+
+function fieldSources(c) {
+  return (c.derived_from || []).map((d, n) => [n ? ", " : "", entryLink(`column:${d.column ?? d}`, d.column ?? d), d.changed_since ? [" ", changedBadge()] : ""]);
+}
+
+function lineageCell(status) {
+  return status === "resolved" ? h("span", { class: "status good" }, "✓ resolved")
+    : status === "not_claimed" ? h("span", { class: "muted" }, "not claimed") : h("span", { class: "status warning" }, `△ ${status}`);
 }
 
 async function modelPage(name, version) {
@@ -384,8 +400,10 @@ function modelOnFilesPage(trace) {
   render(
     h("div", {}, kindBadge("project"), h("span", { class: "muted" }, " model version")),
     h("h1", {}, `${trace.model} ${trace.version}`),
-    h("p", { class: "sub" }, "Trained on files a pipeline exported, not on a BigQuery snapshot. The files prove the exact bytes the trainer read; "
-      + "they do not show which build produced them, so no column lineage is claimed below them."),
+    h("p", { class: "sub" }, read.exported_by
+      ? "Trained on files a BigQuery export job wrote. The files prove the exact bytes the trainer read; the job's SELECT is each field's definition."
+      : "Trained on files a pipeline exported, not on a BigQuery snapshot. The files prove the exact bytes the trainer read; "
+        + "they do not show which build produced them, so no column lineage is claimed below them."),
     h("ol", { class: "trace" },
       step("Model artifact", trace.artifact.uri, `generation ${trace.artifact.generation}`, `sha256 ${trace.artifact.sha256}`, consoleLink(gcp.object(trace.artifact.uri))),
       step("Trained by", `${p.pipeline_run.split("/").pop()} / task ${p.task}`, h("span", {}, p.pipeline_run, " ", consoleLink(gcp.pipelineRun(p.pipeline_run))),
@@ -394,8 +412,9 @@ function modelOnFilesPage(trace) {
         consoleLink(gcp.folder(read.uri))),
       ...filesSteps(read)),
     h("h2", {}, `Inputs (${trace.inputs.length})`),
-    table(["Field", "Role", "Type", "Lineage"], trace.inputs.map((i) => [h("strong", {}, i.field),
-      `${i.role}${i.position !== null ? ` #${i.position}` : ""}`, i.dtype || "?", h("span", { class: "muted" }, "not claimed")])),
+    table(["Field", "Role", "Type", "Expression", "From", "Lineage"], trace.inputs.map((i) => [h("strong", {}, i.field),
+      `${i.role}${i.position !== null ? ` #${i.position}` : ""}`, i.dtype || "?", i.expression ? h("code", {}, i.expression) : "", fieldSources(i),
+      lineageCell(i.lineage)])),
     ...missingList(trace.missing));
 }
 
@@ -403,11 +422,13 @@ function filesPage(d) {
   render(
     h("div", {}, h("span", { class: "kind table" }, "dataset version"), " ", h("span", { class: "badge" }, "files")),
     h("h1", {}, d.reference),
-    h("p", { class: "sub" }, "Cloud Storage files a training run read, each pinned to the object generation recorded. "
-      + "Its fields come from the Parquet schema; column lineage below them is not claimed."),
+    h("p", { class: "sub" }, "Cloud Storage files a training run read, each pinned to the object generation recorded. " + (d.exported_by
+      ? "They are bound to the BigQuery export job that wrote them, whose SELECT defines each field."
+      : "Its fields come from the Parquet schema; column lineage below them is not claimed.")),
     h("ol", { class: "trace" }, step("Files", d.uri, `${plural(d.objects.length, "object")}, generations pinned`, consoleLink(gcp.folder(d.uri))), ...filesSteps(d)),
     h("h2", {}, `Fields (${d.columns.length})`),
-    table(["Field", "Type"], d.columns.map((c) => [c.field, c.dtype || "?"]), "The fields of these files are not known."),
+    table(["Field", "Type", "Expression", "From", "Lineage"], d.columns.map((c) => [c.field, c.dtype || "?", c.expression ? h("code", {}, c.expression) : "",
+      fieldSources(c), lineageCell(c.lineage)]), "The fields of these files are not known."),
     h("h2", {}, `Objects (${d.objects.length})`),
     table(["Object", "Generation", "Size"], d.objects.map((o) => [[h("code", {}, o.uri), " ", consoleLink(gcp.object(o.uri))], h("code", {}, o.generation),
       o.size === null ? "?" : `${o.size.toLocaleString()} bytes`])),
