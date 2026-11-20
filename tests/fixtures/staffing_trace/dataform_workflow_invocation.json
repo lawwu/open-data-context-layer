@@ -1,0 +1,21 @@
+{
+  "workflowInvocation": {
+    "name": "projects/workforce-demo/locations/us-central1/repositories/workforce/workflowInvocations/build-042",
+    "compilationResult": "projects/workforce-demo/locations/us-central1/repositories/workforce/compilationResults/cr-042",
+    "resolvedCompilationResult": "projects/workforce-demo/locations/us-central1/repositories/workforce/compilationResults/cr-042",
+    "state": "SUCCEEDED",
+    "invocationTiming": {"startTime": "2026-09-02T01:58:30Z", "endTime": "2026-09-02T01:59:55Z"}
+  },
+  "workflowInvocationActions": [
+    {
+      "target": {"database": "workforce-demo", "schema": "features", "name": "shift_inputs"},
+      "canonicalTarget": {"database": "workforce-demo", "schema": "features", "name": "shift_inputs"},
+      "state": "SUCCEEDED",
+      "invocationTiming": {"startTime": "2026-09-02T01:58:40Z", "endTime": "2026-09-02T01:59:52Z"},
+      "bigqueryAction": {
+        "jobId": "job-042",
+        "sqlScript": "CREATE OR REPLACE TABLE `workforce-demo.features.shift_inputs` AS SELECT employee_id, pay_period_start, worked_minutes_asof / 60 AS hours_at_cutoff FROM `workforce-demo.raw.shift_totals`"
+      }
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "model": "staffing-forecast",
+  "version": "v17",
+  "produced_by": {
+    "pipeline_run": "projects/workforce-demo/locations/us-central1/pipelineJobs/train-042",
+    "task": "train",
+    "execution": "projects/workforce-demo/locations/us-central1/metadataStores/default/executions/481",
+    "training_commit": "90c19d9d6f10b60919d40d73eb4d7a60c9fdcd7f",
+    "prediction_cutoff": "2026-09-01T00:00:00Z"
+  },
+  "artifact": {
+    "uri": "gs://demo-models/staffing/v17/model.bin",
+    "generation": "1788318000000000",
+    "sha256": "cc1182a477095268ad266638ef0143a070a00d22227c6fa30c74dbac93e2e77c"
+  },
+  "read": {
+    "dataset_version": "workforce-demo.frozen.shift_inputs_b042@2026-09-02T02:00:00Z",
+    "snapshot": "workforce-demo.frozen.shift_inputs_b042",
+    "snapshot_of": "workforce-demo.features.shift_inputs",
+    "snapshot_time": "2026-09-02T02:00:00Z"
+  },
+  "inputs": [
+    {
+      "field": "hours_at_cutoff",
+      "role": "feature",
+      "position": 0,
+      "column": "workforce-demo.features.shift_inputs.hours_at_cutoff",
+      "produced_by": {
+        "dataform_invocation": "projects/workforce-demo/locations/us-central1/repositories/workforce/workflowInvocations/build-042",
+        "target": "workforce-demo.features.shift_inputs",
+        "state": "SUCCEEDED"
+      },
+      "executed_as": {"project": "workforce-demo", "location": "us-central1", "job_id": "job-042", "statement_type": "CREATE_TABLE_AS_SELECT", "state": "DONE"},
+      "defined_in": {"file": "definitions/shift_inputs.sqlx", "commit": "91fa3c5be2d04a6c8f7e1b0d9a2c4e6f8a1b3c5d"},
+      "expression": "worked_minutes_asof / 60",
+      "derived_from": ["workforce-demo.raw.shift_totals.worked_minutes_asof"],
+      "lineage": "resolved"
+    }
+  ],
+  "missing": []
+}

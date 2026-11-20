@@ -1,0 +1,47 @@
+[
+  {
+    "kind": "bigquery#table",
+    "id": "workforce-demo:raw.shift_totals",
+    "tableReference": {"projectId": "workforce-demo", "datasetId": "raw", "tableId": "shift_totals"},
+    "type": "TABLE",
+    "location": "us-central1",
+    "creationTime": "1767225600000",
+    "lastModifiedTime": "1788300000000",
+    "schema": {"fields": [
+      {"name": "employee_id", "type": "STRING", "mode": "REQUIRED"},
+      {"name": "pay_period_start", "type": "DATE", "mode": "REQUIRED"},
+      {"name": "worked_minutes_asof", "type": "INTEGER", "mode": "NULLABLE", "description": "Minutes worked in the pay period, as known at the load time"}
+    ]}
+  },
+  {
+    "kind": "bigquery#table",
+    "id": "workforce-demo:features.shift_inputs",
+    "tableReference": {"projectId": "workforce-demo", "datasetId": "features", "tableId": "shift_inputs"},
+    "type": "TABLE",
+    "location": "us-central1",
+    "creationTime": "1767229200000",
+    "lastModifiedTime": "1788314392000",
+    "schema": {"fields": [
+      {"name": "employee_id", "type": "STRING", "mode": "NULLABLE"},
+      {"name": "pay_period_start", "type": "DATE", "mode": "NULLABLE"},
+      {"name": "hours_at_cutoff", "type": "FLOAT", "mode": "NULLABLE", "description": "Hours worked in the pay period, as known at the prediction cutoff"}
+    ]}
+  },
+  {
+    "kind": "bigquery#table",
+    "id": "workforce-demo:frozen.shift_inputs_b042",
+    "tableReference": {"projectId": "workforce-demo", "datasetId": "frozen", "tableId": "shift_inputs_b042"},
+    "type": "SNAPSHOT",
+    "location": "us-central1",
+    "creationTime": "1788314520000",
+    "snapshotDefinition": {
+      "baseTableReference": {"projectId": "workforce-demo", "datasetId": "features", "tableId": "shift_inputs"},
+      "snapshotTime": "2026-09-02T02:00:00Z"
+    },
+    "schema": {"fields": [
+      {"name": "employee_id", "type": "STRING", "mode": "NULLABLE"},
+      {"name": "pay_period_start", "type": "DATE", "mode": "NULLABLE"},
+      {"name": "hours_at_cutoff", "type": "FLOAT", "mode": "NULLABLE"}
+    ]}
+  }
+]

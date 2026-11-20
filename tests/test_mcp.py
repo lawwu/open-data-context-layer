@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from fathom_data import Fathom
-from fathom_data.dbt import dbt_entries
-from fathom_data.mcp import Tools, build
+from odcl import Catalog
+from odcl.dbt import dbt_entries
+from odcl.mcp import Tools, build
 
 pytest.importorskip("mcp")
 import anyio
@@ -14,9 +14,9 @@ from mcp import Client
 DBT = Path(__file__).parent / "fixtures" / "dbt_medallion" / "target"
 
 
-def test_an_assistant_finds_data_and_records_use_over_mcp(tmp_path):
+def test_an_assistant_finds_data_and_records_use_over_mcp(database):
     async def session():
-        with Fathom(tmp_path / "f.db", actor="assistant") as fathom:
+        with Catalog(database, actor="assistant") as fathom:
             fathom.apply(dbt_entries(DBT))
             async with Client(build(Tools(fathom))) as reader:
                 names = [t.name for t in (await reader.list_tools()).tools]

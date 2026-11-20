@@ -1,4 +1,4 @@
-"""Read a dbt project into Fathom entries: every source and model as a table, every column, and the lineage between them.
+"""Read a dbt project into catalog entries: every source and model as a table, every column, and the lineage between them.
 
 Table lineage comes from dbt's own dependency graph. Column lineage is read from each model's compiled SQL with
 sqlglot, so nothing here parses SQL by hand. Each entry records the file that defines it and the commit that last
@@ -18,7 +18,7 @@ UNSAFE = re.compile(r"[^a-z0-9_\-$]+")
 
 
 def clean(name) -> str:
-    """A name Fathom accepts, for a table or column the warehouse allowed to be anything."""
+    """A name the catalog accepts, for a table or column the warehouse allowed to be anything."""
     return UNSAFE.sub("_", str(name).lower()).strip("_")[:150] or "unnamed"
 
 

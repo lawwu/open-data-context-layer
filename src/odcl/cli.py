@@ -1,11 +1,11 @@
-"""The `fathom` command. Every subcommand calls one method of `Fathom` and prints what it answers."""
+"""The `odcl` command (`fathom` is a temporary alias). Every subcommand calls one catalog operation and prints what it answers."""
 from __future__ import annotations
 
 import argparse
 import json
 import sys
 
-from .store import Fathom, FathomError
+from .store import Catalog, CatalogError, migrate
 
 
 def flag(entry) -> str:
@@ -35,41 +35,53 @@ def lines(command: str, result) -> list[str]:
         return out
     if command == "import":
         return [f"{result['added']} added, {result['changed']} changed, {result['unchanged']} unchanged"]
+    if command == "migrate":
+        return [f"applied {name}" for name in result["applied"]] or ["The database is up to date."]
+    if command == "import-sqlite":
+        return [f"{result['entries']} entries, {result['revisions']} revisions and {result['links']} pinned links imported from {result['source']}"]
     if command in ("add", "use"):
         return [f"{result['key']}  {result['change']}  ({result['revision']})"]
     return [json.dumps(result, indent=2)]
 
 
-def run(fathom: Fathom, args):
+def run(catalog: Catalog, args):
+    if args.command == "import-sqlite":
+        from .legacy import import_sqlite
+        return import_sqlite(catalog, args.path)
     if args.command == "import":
         from .dbt import dbt_entries
-        return fathom.apply(dbt_entries(args.dbt, args.select))
+        return catalog.apply(dbt_entries(args.dbt, args.select))
     if args.command == "add":
         fields = {k: v for k, v in vars(args).items() if k in ("path", "table", "name", "description", "system", "layer", "owner", "type", "dtype",
                                                                  "definition", "repository", "status", "derived_from", "tags") and v not in (None, [])}
-        return fathom.put(args.kind, fields)
+        return catalog.put(args.kind, fields)
     if args.command == "find":
-        return fathom.find(" ".join(args.words), args.kind, args.layer, args.limit)
+        return catalog.find(" ".join(args.words), args.kind, args.layer, args.limit)
     if args.command == "show":
-        return fathom.get(args.key)
+        return catalog.get(args.key)
     if args.command == "lineage":
-        return fathom.lineage(args.key, args.direction)
+        return catalog.lineage(args.key, args.direction)
     if args.command == "use":
-        return fathom.use(args.project, args.keys, args.purpose)
+        return catalog.use(args.project, args.keys, args.purpose)
     if args.command == "used-by":
-        return fathom.used_by(args.key)
+        return catalog.used_by(args.key)
     if args.command == "uses":
-        return fathom.uses(args.project, args.upstream)
-    return fathom.overview()
+        return catalog.uses(args.project, args.upstream, args.revision)
+    return catalog.overview()
 
 
 def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="fathom", description="What data exists, how it connects, and which projects use it.")
-    p.add_argument("--db", help="the Fathom database (default: $FATHOM_DB, else ~/.fathom/fathom.db)")
-    p.add_argument("--as", dest="actor", help="who is registering (default: $FATHOM_USER, else your login name)")
+    p = argparse.ArgumentParser(prog="odcl", description="What data exists, how it connects, and which projects use it.")
+    p.add_argument("--database-url", metavar="URL", help="the PostgreSQL database (default: $ODCL_DATABASE_URL)")
+    p.add_argument("--as", dest="actor", help="who is registering (default: $ODCL_USER, else your login name)")
     p.add_argument("--json", action="store_true", help="print the full result as JSON")
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("overview", help="how much is registered, and what changed after a project used it")
+
+    sub.add_parser("migrate", help="create or update the catalog's tables in the database")
+
+    s = sub.add_parser("import-sqlite", help="bring a Fathom SQLite catalog into an empty database, once")
+    s.add_argument("path", help="the old SQLite file, e.g. ~/.catalog/catalog.db; it is only read")
 
     s = sub.add_parser("import", help="read tables, columns and lineage from a dbt project")
     s.add_argument("--dbt", required=True, metavar="PATH", help="a dbt target folder or its manifest.json")
@@ -121,8 +133,9 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("uses", help="what a project used")
     s.add_argument("project")
     s.add_argument("--upstream", action="store_true", help="also everything that data is built from")
+    s.add_argument("--revision", metavar="REV", help="what this older revision of the project had pinned")
 
-    s = sub.add_parser("mcp", help="serve Fathom to an assistant over the Model Context Protocol")
+    s = sub.add_parser("mcp", help="serve the catalog to an assistant over the Model Context Protocol")
     s.add_argument("--allow-writes", action="store_true", help="also offer the tools that register projects and record use")
     return p
 
@@ -130,13 +143,17 @@ def parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
     try:
-        with Fathom(args.db, args.actor) as fathom:
+        if args.command == "migrate":
+            result = {"applied": migrate(args.database_url)}
+            print(json.dumps(result, indent=2) if args.json else "\n".join(lines(args.command, result)))
+            return 0
+        with Catalog(args.database_url, args.actor) as catalog:
             if args.command == "mcp":
                 from .mcp import main as serve
-                return serve(fathom, args.allow_writes)
-            result = run(fathom, args)
-    except FathomError as e:
-        print(f"fathom: {e}", file=sys.stderr)
+                return serve(catalog, args.allow_writes)
+            result = run(catalog, args)
+    except CatalogError as e:
+        print(f"odcl: {e}", file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2) if args.json else "\n".join(lines(args.command, result)))
     return 0

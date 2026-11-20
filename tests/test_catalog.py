@@ -3,17 +3,17 @@ from pathlib import Path
 
 import pytest
 
-from fathom_data import Fathom, FathomError
-from fathom_data.cli import main
-from fathom_data.dbt import dbt_entries, web_url
+from odcl import Catalog, CatalogError
+from odcl.cli import main
+from odcl.dbt import dbt_entries, web_url
 
 DBT = Path(__file__).parent / "fixtures" / "dbt_medallion" / "target"
 GOLD, SILVER, BRONZE = "churn.main_gold.account_features", "churn.main_silver.stg_accounts", "churn.bronze.accounts"
 
 
 @pytest.fixture
-def fathom(tmp_path):
-    with Fathom(tmp_path / "fathom.db", actor="ana") as f:
+def fathom(database):
+    with Catalog(database, actor="ana") as f:
         f.apply(dbt_entries(DBT))
         yield f
 
@@ -45,10 +45,10 @@ def test_importing_again_changes_nothing_and_a_changed_table_does_not_ripple(fat
     assert len(fathom.get(BRONZE)["history"]) == 2
 
 
-def test_selecting_a_model_reads_only_what_it_is_built_from(tmp_path):
+def test_selecting_a_model_reads_only_what_it_is_built_from():
     entries = dbt_entries(DBT, ["stg_tickets"])
     assert sorted(p["path"] for k, p in entries if k == "table") == ["churn.bronze.tickets", "churn.main_silver.stg_tickets"]
-    with pytest.raises(FathomError, match="No dbt model named nope"):
+    with pytest.raises(CatalogError, match="No dbt model named nope"):
         dbt_entries(DBT, ["nope"])
 
 
@@ -97,7 +97,7 @@ def test_what_is_refused(fathom):
     for kind, payload, code in (("table", {"path": "Has Spaces"}, "path"), ("column", {"table": "nowhere.t", "name": "x"}, "not_found"),
                                 ("project", {"name": "p"}, "description"), ("view", {}, "kind"),
                                 ("table", {"path": "a.b", "derived_from": ["table:a.b"]}, "not_found")):
-        with pytest.raises(FathomError) as error:
+        with pytest.raises(CatalogError) as error:
             fathom.put(kind, payload)
         assert error.value.code == code
     fathom.put("table", {"path": "a.b"})
@@ -105,16 +105,19 @@ def test_what_is_refused(fathom):
     fathom.put("column", {"table": "a.b.c", "name": "x"})
     assert fathom.get("table:a.b")["columns"] == []  # a.b.c's column is not a.b's
     fathom.put("project", {"name": "a.b", "description": "shares a name with a table"})
-    with pytest.raises(FathomError) as error:
+    with pytest.raises(CatalogError) as error:
         fathom.get("a.b")
     assert error.value.code == "ambiguous"
-    with pytest.raises(FathomError) as error:
+    with pytest.raises(CatalogError) as error:
         fathom.use("a.b", ["project:a.b"])  # a project uses data, not projects
     assert error.value.code == "not_found"
 
 
-def test_the_command_line_end_to_end(tmp_path, capsys):
-    db = ["--db", str(tmp_path / "f.db"), "--as", "ana"]
+def test_the_command_line_end_to_end(empty_database, capsys):
+    db = ["--database-url", empty_database, "--as", "ana"]
+    assert main([*db, "overview"]) == 1 and "Run `odcl migrate`" in capsys.readouterr().err  # nothing works before the tables exist
+    assert main([*db, "migrate"]) == 0 and "applied 0001_catalog" in capsys.readouterr().out
+    assert main([*db, "migrate"]) == 0 and "up to date" in capsys.readouterr().out  # migrations apply once
     assert main([*db, "import", "--dbt", str(DBT)]) == 0
     assert "24 added" in capsys.readouterr().out
     assert main([*db, "add", "project", "churn-model", "--description", "Predict churn"]) == 0
