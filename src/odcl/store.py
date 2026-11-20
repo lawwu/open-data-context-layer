@@ -430,6 +430,11 @@ class Catalog:
             out["built_from"] = sorted(reached, key=lambda n: n["key"])
         return out
 
+    def explain_model(self, name: str, version: str) -> dict:
+        """One model version traced from its training task back to the raw column behind each input field."""
+        from .vertex import explain_model
+        return explain_model(self, name, version)
+
     # ---- query history ---------------------------------------------------------------------------------------
     @staticmethod
     def _job(row: dict) -> dict:

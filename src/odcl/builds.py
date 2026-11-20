@@ -17,6 +17,12 @@ from .store import Catalog, require, stamp
 ACTION_STATES_THAT_WROTE = ("SUCCEEDED",)
 
 
+def reference_key(reference: str) -> str:
+    """A dataset version reference as stored: the table lower-cased, the time as written."""
+    table, at, time = reference.strip().partition("@")
+    return table.lower().removeprefix("table:") + at + time
+
+
 def _zulu(at: datetime) -> str:
     return at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -89,7 +95,7 @@ def record_handoff(catalog: Catalog, invocation: str, target: str, snapshot: dic
 def _version(catalog: Catalog, reference: str) -> dict:
     reference = reference.strip()
     if "@" in reference:
-        row = catalog.db.execute("SELECT * FROM dataset_versions WHERE reference = %s", (reference.lower(),)).fetchone()
+        row = catalog.db.execute("SELECT * FROM dataset_versions WHERE reference = %s", (reference_key(reference),)).fetchone()
     else:
         row = catalog.db.execute("SELECT * FROM dataset_versions WHERE lower(snapshot_table) = lower(%s) ORDER BY snapshot_time DESC LIMIT 1",
                                  (reference.removeprefix("table:"),)).fetchone()

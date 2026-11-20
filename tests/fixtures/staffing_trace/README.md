@@ -10,6 +10,7 @@ Synthetic, sanitized fixtures for the first model trace in [the implementation p
 | `dataform_workflow_invocation.json` | Dataform `workflowInvocations.get` and the actions from `workflowInvocations.query` |
 | `vertex_pipeline_job.json` | Vertex AI `pipelineJobs.get` |
 | `training_manifest.json` | The manifest the training component writes after saving the artifact |
+| `model.bin` | The model artifact itself; the manifest's SHA-256 is this file's |
 | `expected_explain.json` | What `explain_model("staffing-forecast", "v17")` should answer |
 
-`tests/test_dataform.py` reads the BigQuery and Dataform files and checks the dataset half of `expected_explain.json`. The test asserting the whole model trace lands with the code that first satisfies it (change 3 in the plan).
+`tests/test_dataform.py` checks the dataset half of `expected_explain.json`, and `tests/test_vertex.py` checks the whole of it.

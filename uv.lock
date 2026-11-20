@@ -877,6 +877,10 @@ dbt = [
 mcp = [
     { name = "mcp" },
 ]
+vertex = [
+    { name = "google-auth" },
+    { name = "requests" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -887,15 +891,17 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "google-auth", marker = "extra == 'dataform'", specifier = ">=2.20" },
+    { name = "google-auth", marker = "extra == 'vertex'", specifier = ">=2.20" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "requests", marker = "extra == 'dataform'", specifier = ">=2.31" },
+    { name = "requests", marker = "extra == 'vertex'", specifier = ">=2.31" },
     { name = "sounding", marker = "python_full_version >= '3.14' and extra == 'bigquery'", git = "https://github.com/lawwu/sounding?rev=v0.9.1" },
     { name = "sqlglot", marker = "extra == 'bigquery'", specifier = ">=25" },
     { name = "sqlglot", marker = "extra == 'dataform'", specifier = ">=25" },
     { name = "sqlglot", marker = "extra == 'dbt'", specifier = ">=25" },
 ]
-provides-extras = ["dbt", "dataform", "bigquery", "mcp"]
+provides-extras = ["dbt", "dataform", "vertex", "bigquery", "mcp"]
 
 [package.metadata.requires-dev]
 dev = [

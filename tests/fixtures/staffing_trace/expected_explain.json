@@ -11,7 +11,7 @@
   "artifact": {
     "uri": "gs://demo-models/staffing/v17/model.bin",
     "generation": "1788318000000000",
-    "sha256": "cc1182a477095268ad266638ef0143a070a00d22227c6fa30c74dbac93e2e77c"
+    "sha256": "0402ca8883ee82eb2a43dc830b135d7bab998ee92e23f99548af0c878b92c10f"
   },
   "read": {
     "dataset_version": "workforce-demo.frozen.shift_inputs_b042@2026-09-02T02:00:00Z",
