@@ -145,7 +145,8 @@ def import_build(catalog: Catalog, manifest: dict, *, client) -> dict:
             require(existing["manifest_sha256"] == said, "conflict", f"{model} {version} is already recorded from a different manifest; a version is built once")
             return {"model": model, "version": version, "change": "unchanged", "inputs": len(manifest["inputs"]), "artifact_verified": verified}
         if not catalog._head(project):
-            catalog.put("project", {"name": model, "description": f"Model {model}, trained in Vertex AI Pipelines"})
+            catalog.put("project", {"name": model, "description": f"Model {model}, trained in Vertex AI Pipelines",
+                                    "source": {"vertex": {"created_by": "the import of its first model version"}}})
         timing = lambda r, k: _time(r.get(k))  # noqa: E731
         run = _execution(db, {"native_key": manifest["pipeline_run"], "kind": "pipeline_run", "parent_id": None, "state": job.get("state") or "UNKNOWN",
                               "started_at": timing(job, "startTime"), "ended_at": timing(job, "endTime"),

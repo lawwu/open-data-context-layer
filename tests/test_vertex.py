@@ -55,7 +55,8 @@ def test_a_model_version_explains_itself_back_to_the_raw_column(catalog):
     recorded = vertex.import_build(catalog, load("training_manifest.json"), client=FakeVertex())
     assert recorded == {"model": "staffing-forecast", "version": "v17", "change": "added", "inputs": 1, "artifact_verified": "sha256"}
     assert catalog.explain_model("staffing-forecast", "v17") == EXPECTED
-    assert catalog.get("project:staffing-forecast")["kind"] == "project"  # the model family is a project that uses data
+    project = catalog.get("project:staffing-forecast")
+    assert project["kind"] == "project" and "vertex" in project["source"]  # the model family is a project that uses data
 
 
 def test_an_identical_replay_changes_nothing_and_a_different_artifact_for_the_same_version_is_refused(catalog):
