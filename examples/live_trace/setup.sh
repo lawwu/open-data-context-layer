@@ -22,7 +22,12 @@ for name in odcl-dataform-test odcl-vertex-test; do
 done
 
 echo "== Dataform runs as $DF"
-gcloud beta services identity create --service dataform.googleapis.com --project "$P" >/dev/null 2>&1 || true
+# Dataform's own service agent usually exists once the API is on. Only create it if it is missing, and never prompt:
+# `gcloud beta` asks to install its component, which would wait silently for an answer.
+if ! gcloud projects get-iam-policy "$P" --format=json | grep -q "service-$NUMBER@gcp-sa-dataform"; then
+  CLOUDSDK_CORE_DISABLE_PROMPTS=1 gcloud beta services identity create --service dataform.googleapis.com --project "$P" </dev/null >/dev/null 2>&1 \
+    || echo "  could not create Dataform's service agent; run once: gcloud beta services identity create --service dataform.googleapis.com --project $P" >&2
+fi
 # A service account created a moment ago can take a minute or two before IAM accepts grants on it.
 for attempt in 1 2 3 4 5 6 7 8; do
   gcloud iam service-accounts add-iam-policy-binding "$DF" --project "$P" --condition=None --quiet \
