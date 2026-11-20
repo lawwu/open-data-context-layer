@@ -258,3 +258,17 @@ def test_the_command_line_imports_a_build_records_its_handoff_and_explains_it(da
     assert main([*db, "--json", "explain", "dataset", SNAPSHOT]) == 0
     assert json.loads(capsys.readouterr().out)["reference"] == EXPECTED["read"]["dataset_version"]
     assert main([*db, "explain", "dataset", "workforce-demo.frozen.nothing"]) == 1 and "No dataset version" in capsys.readouterr().err
+
+
+def test_a_build_whose_sql_counts_through_ctes_registers_no_table_named_after_a_cte(catalog):
+    compilation = load("dataform_compilation_result.json")
+    compilation["compilationResultActions"][1]["relation"]["selectQuery"] = (
+        "WITH base AS (SELECT employee_id, pay_period_start, worked_minutes_asof FROM `workforce-demo.raw.shift_totals`), "
+        "with_weekend AS (SELECT *, TRUE AS weekend FROM base), "
+        "stats AS (SELECT employee_id, COUNT(*) AS org_shifts FROM with_weekend WHERE worked_minutes_asof > 0 GROUP BY employee_id) "
+        "SELECT employee_id, org_shifts FROM stats")
+    dataform.import_invocation(catalog, INVOCATION, client=FakeDataform(compilation=compilation))
+    assert {t["key"] for t in catalog.find(kind="table")} == {f"table:{RAW}", f"table:{TARGET}"}
+    shifts = catalog.get(f"{TARGET}.org_shifts")
+    assert [d["key"] for d in shifts["derived_from"]] == [f"column:{RAW}.employee_id", f"column:{RAW}.worked_minutes_asof"]
+    assert "lineage:partial" in shifts["tags"]
