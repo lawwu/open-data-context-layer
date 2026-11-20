@@ -34,12 +34,13 @@ def objects(client, root: str) -> list[dict]:
         marker = int(o.get("size") or 0) == 0 and o["name"].rsplit("/", 1)[-1][:1] in ("_", ".")
         if (o["name"] == path or (o["name"].startswith(path.rstrip("/") + "/") and not o["name"].endswith("/"))) and not marker:
             found.append({"uri": _uri(o), "generation": str(o["generation"]), "size": int(o.get("size") or 0),
-                          "crc32c": o.get("crc32c"), "md5": o.get("md5Hash")})
+                          "crc32c": o.get("crc32c"), "md5": o.get("md5Hash"), "created": o.get("timeCreated")})
     return sorted(found, key=lambda o: o["uri"])
 
 
 def schema(client, found: list[dict]) -> tuple[list[tuple[str, str]], str]:
-    """The fields every Parquet object shares, and "read"; or no fields and the reason they could not be read."""
+    """The fields every Parquet object shares, and "read"; or no fields and the reason they could not be read. Each
+    Parquet object's row count is set on it as `rows`."""
     schemas = {}
     for o in found:
         if o["size"] < 12:
@@ -52,7 +53,7 @@ def schema(client, found: list[dict]) -> tuple[list[tuple[str, str]], str]:
         if needed > len(tail):
             tail = client.tail(o["uri"], o["generation"], needed)
         try:
-            schemas[o["uri"]] = parquet.fields(tail)
+            schemas[o["uri"]], o["rows"] = parquet.metadata(tail)
         except ValueError as e:
             return [], f"the Parquet footer of {o['uri']} cannot be read: {e}"
     if not schemas:
@@ -65,12 +66,18 @@ def schema(client, found: list[dict]) -> tuple[list[tuple[str, str]], str]:
 
 
 def record(catalog: Catalog, *, client, pipeline_run: str | None = None, task: str | None = None, output: str | None = None,
-           uris: list[str] | None = None, from_table: str | None = None) -> dict:
+           uris: list[str] | None = None, from_table: str | None = None, export_jobs: list[str] | None = None,
+           find_export_job: bool = False, sql: str = "templates") -> dict:
     """Record the files a task wrote to one of its outputs, or the files under `uris`, as a dataset version.
 
     The reference is the artifact URI and the pipeline job (`gs://…/output_train_dataset@job`); for URIs given
     directly, the first URI and its newest object's generation. Recording the same files again changes nothing; the
-    same reference naming other bytes is refused."""
+    same reference naming other bytes is refused.
+
+    With `export_jobs` (BigQuery jobs as PROJECT:LOCATION.JOB_ID) or `find_export_job`, the file set is also bound to
+    the EXPORT DATA job that wrote it, and each field is traced through the job's SELECT; see `exports`. A file set
+    recorded without a binding can be bound by recording it again with one."""
+    from . import exports
     from .vertex import GCS, SUCCEEDED, record_task, task_detail
     require(bool(pipeline_run) != bool(uris), "files", "Name the files one way: --pipeline-run with --task and --output, or gs:// URIs")
     detail = job = None
@@ -91,6 +98,10 @@ def record(catalog: Catalog, *, client, pipeline_run: str | None = None, task: s
     require(found, "files_not_found", f"No object is stored under {', '.join(roots)}")
     reference = f"{roots[0]}@{pipeline_run.rsplit('/', 1)[1]}" if pipeline_run else f"{roots[0]}@{max(int(o['generation']) for o in found)}"
     fields, said = schema(client, found)
+    if find_export_job:
+        require(pipeline_run, "export_job", "--find-export-job searches the task's run for its export job, so it needs --pipeline-run")
+        export_jobs = [exports.find(client, pipeline_run, detail, roots[0])]
+    binding = exports.evaluate(catalog, client, export_jobs, roots[0], found, [name for name, _ in fields], sql) if export_jobs else None
     table = revision = None
     if from_table:
         table = catalog.resolve(from_table, ("table",))
@@ -107,7 +118,9 @@ def record(catalog: Catalog, *, client, pipeline_run: str | None = None, task: s
             differs = sorted(set(kept.items()) ^ set(now.items()))
             require(not differs, "conflict", f"{reference} is already recorded with other objects ({differs[0][0] if differs else ''}); "
                                              "a file set is recorded once")
-            return {"reference": reference, "change": "unchanged", "objects": len(found), "fields": len(fields), "schema": said}
+            change = exports.store(catalog, existing["id"], binding) if binding else "unchanged"
+            return {"reference": reference, "change": change, "objects": len(found), "fields": len(fields), "schema": said,
+                    **({"exported_by": binding["jobs_named"]} if binding else {})}
         producer = record_task(db, job, detail, pipeline_run, task) if pipeline_run else None
         version = db.execute("""
             INSERT INTO dataset_versions (reference, kind, source_uri, table_key, table_revision, producer_execution, verification, recorded_by)
@@ -118,11 +131,15 @@ def record(catalog: Catalog, *, client, pipeline_run: str | None = None, task: s
                     **({"output": output, "artifact": artifacts[0].get("name")} if pipeline_run else {})}),
              catalog.actor)).fetchone()["id"]
         with db.cursor() as cursor:
-            cursor.executemany("INSERT INTO dataset_version_objects (dataset_version_id, uri, generation, size, crc32c, md5) VALUES (%s, %s, %s, %s, %s, %s)",
-                               [(version, o["uri"], o["generation"], o["size"], o["crc32c"], o["md5"]) for o in found])
+            cursor.executemany("INSERT INTO dataset_version_objects (dataset_version_id, uri, generation, size, crc32c, md5, time_created, num_rows) "
+                               "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                               [(version, o["uri"], o["generation"], o["size"], o["crc32c"], o["md5"], o.get("created"), o.get("rows")) for o in found])
             cursor.executemany("INSERT INTO version_columns (dataset_version_id, field_path, column_key, column_revision, lineage_status, dtype) "
                                "VALUES (%s, %s, NULL, NULL, 'not_claimed', %s)", [(version, name, dtype) for name, dtype in fields])
-    return {"reference": reference, "change": "added", "objects": len(found), "fields": len(fields), "schema": said}
+        if binding:
+            exports.store(catalog, version, binding)
+    return {"reference": reference, "change": "added", "objects": len(found), "fields": len(fields), "schema": said,
+            **({"exported_by": binding["jobs_named"]} if binding else {})}
 
 
 def explain(catalog: Catalog, version: dict) -> dict:
@@ -138,19 +155,48 @@ def explain(catalog: Catalog, version: dict) -> dict:
         exported = {"table": version["table_key"].removeprefix("table:"), "revision": version["table_revision"],
                     "changed_since": bool(head and head["head_revision"] != version["table_revision"])}
     said = version["verification"].get("schema", "read")
-    columns = [{"field": r["field_path"], "dtype": r["dtype"], "lineage": r["lineage_status"]}
-               for r in db.execute("SELECT * FROM version_columns WHERE dataset_version_id = %s ORDER BY field_path", (version["id"],))]
+    from .exports import name
+    jobs = db.execute("SELECT * FROM dataset_version_exports WHERE dataset_version_id = %s ORDER BY created_at, job_id", (version["id"],)).fetchall()
+    sources: dict[str, list[dict]] = {}
+    for r in db.execute("""SELECT s.*, e.head_revision FROM version_column_sources s JOIN entries e ON e.key = s.source_key
+                           WHERE s.dataset_version_id = %s ORDER BY s.field_path, s.source_key""", (version["id"],)):
+        sources.setdefault(r["field_path"], []).append({"column": r["source_key"].removeprefix("column:"), "revision": r["source_revision"],
+                                                       "pinned": r["pinned"], "changed_since": r["source_revision"] != r["head_revision"]})
+    columns = []
+    for r in db.execute("SELECT * FROM version_columns WHERE dataset_version_id = %s ORDER BY field_path", (version["id"],)):
+        column = {"field": r["field_path"], "dtype": r["dtype"], "lineage": r["lineage_status"]}
+        if jobs and r["lineage_status"] != "not_claimed":
+            column |= {"expression": r["expression"], "derived_from": sources.get(r["field_path"], [])}
+        columns.append(column)
+    filters = [r["source_key"].removeprefix("column:") for r in
+               db.execute("SELECT source_key FROM version_row_filters WHERE dataset_version_id = %s ORDER BY source_key", (version["id"],))]
     missing = []
     if task is None:
         missing.append("the producer of these files is not recorded: they were named by URI, not read from a pipeline task's output")
     if exported:
         missing.append(f"the files were exported from {exported['table']}, pinned as that table was defined when the files were recorded; "
                        "the table may have changed between writing the files and recording them")
-    else:
+    elif not jobs:
         missing.append("no table the files were exported from is recorded")
     if said != "read":
         missing.append(f"the fields are not known: {said}")
-    missing.append("column-level lineage below the file set is not claimed: its fields come from the Parquet schema, not from a definition")
+    if not jobs:
+        missing.append("column-level lineage below the file set is not claimed: its fields come from the Parquet schema, not from a definition")
+    else:
+        named = ", ".join(name(j["job_project"], j["job_location"], j["job_id"]) for j in jobs)
+        unpinned = sorted({s["column"].rsplit(".", 1)[0] for found in sources.values() for s in found if s["pinned"] == "at_binding"})
+        for table in unpinned:
+            missing.append(f"{table}'s definition is pinned as it is now, not as it was when {named} ran: the catalog has no revision of it "
+                           "from before then, so the definition may differ")
+        export = version["verification"].get("export") or {}
+        if export and not export.get("own_output"):
+            missing.append(f"the files are not {named}'s own output: it wrote {export.get('exported_files')} file(s) and {export.get('files')} are "
+                           f"recorded; they were rewritten after the export, row count equal ({export.get('rows'):,})")
+        for c in columns:
+            if c["lineage"] == "not_claimed":
+                missing.append(f"{c['field']} is not output by the export job's SELECT, so its lineage is not claimed")
+            elif c["lineage"] != "resolved":
+                missing.append(f"{c['field']}: its lineage is only partly traced from the export job's SQL")
     from .store import stamp
     return {
         "reference": version["reference"], "kind": "gcs_files", "uri": version["source_uri"], "objects": found,
@@ -158,6 +204,11 @@ def explain(catalog: Catalog, version: dict) -> dict:
                         "started": stamp(task["started_at"]) if task["started_at"] else None, "ended": stamp(task["ended_at"]) if task["ended_at"] else None}
         if task else None,
         "exported_from": exported,
+        "exported_by": [{"job": name(j["job_project"], j["job_location"], j["job_id"]), "statement_type": "EXPORT_DATA", "rows": j["row_count"],
+                         "files": j["file_count"], "created": stamp(j["created_at"]), "ended": stamp(j["ended_at"]) if j["ended_at"] else None}
+                        for j in jobs] or None,
+        "row_filter": {"expression": " / ".join(dict.fromkeys(j["row_filter"] for j in jobs if j["row_filter"])) or None, "columns": filters}
+        if jobs else None,
         "columns": columns,
         "checks": {"generations_pinned": True},
         "missing": missing,

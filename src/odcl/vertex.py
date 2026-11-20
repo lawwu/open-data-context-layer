@@ -57,8 +57,26 @@ class Client:
         found, token = [], None
         while True:
             page = self._get(f"https://storage.googleapis.com/storage/v1/b/{bucket}/o", prefix=path,
-                             fields="items(name,bucket,generation,size,crc32c,md5Hash),nextPageToken", **({"pageToken": token} if token else {})).json()
+                             fields="items(name,bucket,generation,size,crc32c,md5Hash,timeCreated),nextPageToken",
+                             **({"pageToken": token} if token else {})).json()
             found += page.get("items") or []
+            token = page.get("nextPageToken")
+            if not token:
+                return found
+
+    def job(self, project: str, location: str, job_id: str) -> dict:
+        """One BigQuery job, with its SQL and statistics (jobs.get)."""
+        return self._get(f"https://bigquery.googleapis.com/bigquery/v2/projects/{quote(project, safe='')}/jobs/{quote(job_id, safe='')}",
+                         location=location).json()
+
+    def jobs(self, project: str, min_ms: int, max_ms: int) -> list[dict]:
+        """Every user's finished jobs in `project` created between two times, with their SQL (jobs.list)."""
+        found, token = [], None
+        while True:
+            page = self._get(f"https://bigquery.googleapis.com/bigquery/v2/projects/{quote(project, safe='')}/jobs", allUsers="true", projection="full",
+                             stateFilter="done", minCreationTime=str(min_ms), maxCreationTime=str(max_ms), maxResults="200",
+                             **({"pageToken": token} if token else {})).json()
+            found += page.get("jobs") or []
             token = page.get("nextPageToken")
             if not token:
                 return found
@@ -226,11 +244,25 @@ def _record_use(catalog: Catalog, build: int) -> None:
                            JOIN version_columns c ON (c.dataset_version_id, c.field_path) = (i.dataset_version_id, i.field_path)
                            WHERE i.build_id = %s AND c.column_key IS NOT NULL ORDER BY c.column_key, i.role""", (build,)).fetchall()
     uses = [(r["column_key"], r["column_revision"], f"{r['role']} in {row['version']}") for r in pinned]
+    # a bound file set's fields pin no column of their own; the source columns the export job computed them from do
+    uses += [(r["source_key"], r["source_revision"], f"{r['role']} in {row['version']}") for r in db.execute("""
+        SELECT i.role, s.source_key, s.source_revision FROM build_inputs i
+        JOIN version_column_sources s ON (s.dataset_version_id, s.field_path) = (i.dataset_version_id, i.field_path)
+        WHERE i.build_id = %s ORDER BY s.source_key, i.role""", (build,))]
     files = db.execute("""SELECT d.table_key, d.table_revision FROM model_builds b JOIN dataset_versions d ON d.id = b.dataset_version_id
                           WHERE b.id = %s AND d.kind = 'gcs_files' AND d.table_key IS NOT NULL""", (build,)).fetchone()
     if files:  # a file set's fields pin no column; the table it was exported from is what the model depends on
         uses.append((files["table_key"], files["table_revision"], f"read as files in {row['version']}"))
     catalog._use_from_model(row["project_key"], uses)
+
+
+def _file_input(i: dict, column: dict, bound: bool) -> dict:
+    """A model input read from a file set: its Parquet type, and when the files are bound to their export job, the
+    expression and source columns the job's SELECT gives it."""
+    out = {"field": i["field"], "role": i["role"], "position": i["position"], "dtype": column.get("dtype"), "lineage": column.get("lineage", "not_claimed")}
+    if bound and "derived_from" in column:
+        out |= {"expression": column.get("expression"), "derived_from": [d["column"] for d in column["derived_from"]]}
+    return out
 
 
 def explain_model(catalog: Catalog, name: str, version: str) -> dict:
@@ -254,9 +286,9 @@ def explain_model(catalog: Catalog, name: str, version: str) -> dict:
             "model": manifest["model"], "version": row["version"], "produced_by": produced, "artifact": artifact,
             "read": {"dataset_version": data["reference"], "kind": "gcs_files", "uri": data["uri"], "objects": len(data["objects"]), "generations_pinned": True,
                      "produced_by": {k: data["produced_by"][k] for k in ("pipeline_run", "task", "state")} if data["produced_by"] else None,
-                     "exported_from": data["exported_from"]},
-            "inputs": [{"field": i["field"], "role": i["role"], "position": i["position"], "dtype": columns.get(i["field_path"], {}).get("dtype"),
-                        "lineage": "not_claimed"}
+                     "exported_from": data["exported_from"],
+                     **({"exported_by": data["exported_by"], "row_filter": data["row_filter"]} if data["exported_by"] else {})},
+            "inputs": [_file_input(i, columns.get(i["field_path"], {}), bool(data["exported_by"]))
                        for i in db.execute("SELECT * FROM build_inputs WHERE build_id = %s ORDER BY position NULLS LAST, role, field", (row["id"],))],
             "missing": data["missing"],
         }
