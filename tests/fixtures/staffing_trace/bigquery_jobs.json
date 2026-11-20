@@ -1,0 +1,22 @@
+[
+  {
+    "creation_time": "2026-09-02T01:58:40Z",
+    "start_time": "2026-09-02T01:58:41Z",
+    "end_time": "2026-09-02T01:59:52Z",
+    "project_id": "workforce-demo",
+    "location": "us-central1",
+    "job_id": "job-042",
+    "parent_job_id": null,
+    "job_type": "QUERY",
+    "statement_type": "CREATE_TABLE_AS_SELECT",
+    "state": "DONE",
+    "error_result": null,
+    "cache_hit": false,
+    "total_bytes_processed": 73400320,
+    "total_bytes_billed": 73400320,
+    "total_slot_ms": 18250,
+    "referenced_tables": [{"project_id": "workforce-demo", "dataset_id": "raw", "table_id": "shift_totals"}],
+    "destination_table": {"project_id": "workforce-demo", "dataset_id": "features", "table_id": "shift_inputs"},
+    "query_info": {"query_hashes": {"normalized_literals": "5b1f0c1d9e6a4a7f8a3f2f0e9d1c7b42"}}
+  }
+]

@@ -1,0 +1,33 @@
+{
+  "name": "projects/workforce-demo/locations/us-central1/pipelineJobs/train-042",
+  "displayName": "staffing-forecast-train",
+  "state": "PIPELINE_STATE_SUCCEEDED",
+  "createTime": "2026-09-02T02:05:00Z",
+  "startTime": "2026-09-02T02:05:10Z",
+  "endTime": "2026-09-02T03:01:30Z",
+  "runtimeConfig": {
+    "parameterValues": {"training_table": "workforce-demo.frozen.shift_inputs_b042", "model_version": "v17"}
+  },
+  "jobDetail": {
+    "taskDetails": [
+      {
+        "taskId": "7301",
+        "taskName": "train",
+        "state": "SUCCEEDED",
+        "startTime": "2026-09-02T02:06:00Z",
+        "endTime": "2026-09-02T03:01:00Z",
+        "execution": {
+          "name": "projects/workforce-demo/locations/us-central1/metadataStores/default/executions/481",
+          "state": "COMPLETE"
+        },
+        "outputs": {
+          "model": {"artifacts": [{
+            "name": "projects/workforce-demo/locations/us-central1/metadataStores/default/artifacts/9917",
+            "uri": "gs://demo-models/staffing/v17/model.bin",
+            "schemaTitle": "system.Model"
+          }]}
+        }
+      }
+    ]
+  }
+}

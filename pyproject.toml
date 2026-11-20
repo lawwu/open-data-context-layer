@@ -1,17 +1,18 @@
 [project]
-name = "fathom-data"
-version = "0.1.0"
+name = "open-data-context-layer"
+version = "0.2.0"
 description = "A data context layer: what data exists, how it connects, and which projects use it."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["psycopg[binary]>=3.2"]
 
 [project.optional-dependencies]
 dbt = ["sqlglot>=25"]
 mcp = ["mcp>=2.0"]
 
 [project.scripts]
-fathom = "fathom_data.cli:main"
+odcl = "odcl.cli:main"
+fathom = "odcl.cli:main"  # temporary alias
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6"]
@@ -21,7 +22,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/fathom_data"]
+packages = ["src/odcl", "src/fathom_data"]
 
 [tool.ruff]
 line-length = 180
