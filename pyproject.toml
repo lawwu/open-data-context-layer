@@ -1,0 +1,34 @@
+[project]
+name = "fathom-data"
+version = "0.1.0"
+description = "A data context layer: what data exists, how it connects, and which projects use it."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dbt = ["sqlglot>=25"]
+mcp = ["mcp>=2.0"]
+
+[project.scripts]
+fathom = "fathom_data.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fathom_data"]
+
+[tool.ruff]
+line-length = 180
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+ignore = ["E731"]

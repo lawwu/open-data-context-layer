@@ -1,0 +1,20 @@
+version: 2
+sources:
+  - name: bronze
+    schema: bronze
+    description: Tables as loaded from the billing, support and auth systems.
+    meta: {layer: bronze}
+    tables:
+      - name: accounts
+        description: One row per account, as billing records it.
+        columns:
+          - {name: account_id, description: Account identifier.}
+          - {name: created_at, description: When the account was opened.}
+          - {name: plan, description: Subscription plan code.}
+          - {name: cancelled_at, description: "When the subscription was cancelled, if it was."}
+      - name: tickets
+        description: One row per support ticket.
+        columns:
+          - {name: ticket_id, description: Ticket identifier.}
+          - {name: account_id, description: The account that opened the ticket.}
+          - {name: opened_at, description: When the ticket was opened.}

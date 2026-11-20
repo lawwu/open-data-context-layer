@@ -1,0 +1,143 @@
+{
+ "metadata": {
+  "dbt_version": "1.12.7"
+ },
+ "nodes": {
+  "model.churn.account_features": {
+   "columns": {
+    "account_id": {
+     "comment": null,
+     "index": 1,
+     "name": "account_id",
+     "type": "INTEGER"
+    },
+    "churned_90d": {
+     "comment": null,
+     "index": 5,
+     "name": "churned_90d",
+     "type": "INTEGER"
+    },
+    "plan_tier": {
+     "comment": null,
+     "index": 3,
+     "name": "plan_tier",
+     "type": "VARCHAR"
+    },
+    "support_tickets_90d": {
+     "comment": null,
+     "index": 4,
+     "name": "support_tickets_90d",
+     "type": "BIGINT"
+    },
+    "tenure_months": {
+     "comment": null,
+     "index": 2,
+     "name": "tenure_months",
+     "type": "BIGINT"
+    }
+   }
+  },
+  "model.churn.stg_accounts": {
+   "columns": {
+    "account_id": {
+     "comment": null,
+     "index": 1,
+     "name": "account_id",
+     "type": "INTEGER"
+    },
+    "cancelled_on": {
+     "comment": null,
+     "index": 4,
+     "name": "cancelled_on",
+     "type": "DATE"
+    },
+    "opened_on": {
+     "comment": null,
+     "index": 2,
+     "name": "opened_on",
+     "type": "DATE"
+    },
+    "plan_code": {
+     "comment": null,
+     "index": 3,
+     "name": "plan_code",
+     "type": "VARCHAR"
+    }
+   }
+  },
+  "model.churn.stg_tickets": {
+   "columns": {
+    "account_id": {
+     "comment": null,
+     "index": 2,
+     "name": "account_id",
+     "type": "INTEGER"
+    },
+    "opened_on": {
+     "comment": null,
+     "index": 3,
+     "name": "opened_on",
+     "type": "DATE"
+    },
+    "ticket_id": {
+     "comment": null,
+     "index": 1,
+     "name": "ticket_id",
+     "type": "INTEGER"
+    }
+   }
+  }
+ },
+ "sources": {
+  "source.churn.bronze.accounts": {
+   "columns": {
+    "account_id": {
+     "comment": null,
+     "index": 1,
+     "name": "account_id",
+     "type": "INTEGER"
+    },
+    "cancelled_at": {
+     "comment": null,
+     "index": 4,
+     "name": "cancelled_at",
+     "type": "TIMESTAMP"
+    },
+    "created_at": {
+     "comment": null,
+     "index": 2,
+     "name": "created_at",
+     "type": "TIMESTAMP"
+    },
+    "plan": {
+     "comment": null,
+     "index": 3,
+     "name": "plan",
+     "type": "VARCHAR"
+    }
+   }
+  },
+  "source.churn.bronze.tickets": {
+   "columns": {
+    "account_id": {
+     "comment": null,
+     "index": 2,
+     "name": "account_id",
+     "type": "INTEGER"
+    },
+    "opened_at": {
+     "comment": null,
+     "index": 3,
+     "name": "opened_at",
+     "type": "TIMESTAMP"
+    },
+    "ticket_id": {
+     "comment": null,
+     "index": 1,
+     "name": "ticket_id",
+     "type": "INTEGER"
+    }
+   }
+  }
+ }
+}

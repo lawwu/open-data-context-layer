@@ -1,0 +1,4 @@
+churn:
+  target: dev
+  outputs:
+    dev: {type: duckdb, path: churn.duckdb, schema: main}

@@ -1,0 +1,28 @@
+version: 2
+models:
+  - name: stg_accounts
+    description: Accounts with dates and plan codes cleaned.
+    columns:
+      - {name: account_id, description: Account identifier.}
+      - {name: opened_on, description: The date the account was opened.}
+      - {name: plan_code, description: "Plan code, lower-cased and trimmed."}
+      - {name: cancelled_on, description: "The date the subscription was cancelled, if it was."}
+  - name: stg_tickets
+    description: Support tickets with the opening date.
+    columns:
+      - {name: opened_on, description: The date the ticket was opened.}
+  - name: account_features
+    description: One row per account as of the 2026-06-30 snapshot, with features and the churn label.
+    meta: {mf: {dataset: accounts-2026, label: churned_90d, keys: [account_id]}}
+    columns:
+      - {name: account_id, description: Account identifier.}
+      - name: tenure_months
+        description: Months since the account was opened.
+        meta: {mf: {known_at: at the snapshot}}
+      - name: plan_tier
+        description: "Plan grouped into free, team, enterprise."
+        meta: {mf: {known_at: at the snapshot}}
+      - {name: support_tickets_90d, description: Support tickets opened in the 90 days before the snapshot.}
+      - name: churned_90d
+        description: The account cancels within 90 days of the snapshot.
+        meta: {mf: {horizon: 90 days, available_at: snapshot + 90 days}}

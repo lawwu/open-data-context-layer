@@ -1,0 +1,479 @@
+{
+ "metadata": {
+  "adapter_type": "duckdb",
+  "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+  "dbt_version": "1.12.7",
+  "project_name": "churn"
+ },
+ "nodes": {
+  "model.churn.account_features": {
+   "alias": "account_features",
+   "columns": {
+    "account_id": {
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "constraints": [],
+     "data_type": null,
+     "description": "Account identifier.",
+     "dimension": null,
+     "doc_blocks": [],
+     "entity": null,
+     "granularity": null,
+     "meta": {},
+     "name": "account_id",
+     "quote": null,
+     "tags": []
+    },
+    "churned_90d": {
+     "config": {
+      "meta": {
+       "mf": {
+        "available_at": "snapshot + 90 days",
+        "horizon": "90 days"
+       }
+      },
+      "tags": []
+     },
+     "constraints": [],
+     "data_type": null,
+     "description": "The account cancels within 90 days of the snapshot.",
+     "dimension": null,
+     "doc_blocks": [],
+     "entity": null,
+     "granularity": null,
+     "meta": {
+      "mf": {
+       "available_at": "snapshot + 90 days",
+       "horizon": "90 days"
+      }
+     },
+     "name": "churned_90d",
+     "quote": null,
+     "tags": []
+    },
+    "plan_tier": {
+     "config": {
+      "meta": {
+       "mf": {
+        "known_at": "at the snapshot"
+       }
+      },
+      "tags": []
+     },
+     "constraints": [],
+     "data_type": null,
+     "description": "Plan grouped into free, team, enterprise.",
+     "dimension": null,
+     "doc_blocks": [],
+     "entity": null,
+     "granularity": null,
+     "meta": {
+      "mf": {
+       "known_at": "at the snapshot"
+      }
+     },
+     "name": "plan_tier",
+     "quote": null,
+     "tags": []
+    },
+    "support_tickets_90d": {
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "constraints": [],
+     "data_type": null,
+     "description": "Support tickets opened in the 90 days before the snapshot.",
+     "dimension": null,
+     "doc_blocks": [],
+     "entity": null,
+     "granularity": null,
+     "meta": {},
+     "name": "support_tickets_90d",
+     "quote": null,
+     "tags": []
+    },
+    "tenure_months": {
+     "config": {
+      "meta": {
+       "mf": {
+        "known_at": "at the snapshot"
+       }
+      },
+      "tags": []
+     },
+     "constraints": [],
+     "data_type": null,
+     "description": "Months since the account was opened.",
+     "dimension": null,
+     "doc_blocks": [],
+     "entity": null,
+     "granularity": null,
+     "meta": {
+      "mf": {
+       "known_at": "at the snapshot"
+      }
+     },
+     "name": "tenure_months",
+     "quote": null,
+     "tags": []
+    }
+   },
+   "compiled_code": "with tickets as (\n    select account_id, count(*) as n_tickets\n    from \"churn\".\"main_silver\".\"stg_tickets\"\n    where opened_on >= date '2026-04-01'\n    group by account_id\n)\nselect\n    a.account_id,\n    date_diff('month', a.opened_on, date '2026-06-30') as tenure_months,\n    case when a.plan_code in ('ent', 'enterprise') then 'enterprise' when a.plan_code = 'team' then 'team' else 'free' end as plan_tier,\n    coalesce(t.n_tickets, 0) as support_tickets_90d,\n    case when a.cancelled_on between date '2026-07-01' and date '2026-09-28' then 1 else 0 end as churned_90d\nfrom \"churn\".\"main_silver\".\"stg_accounts\" a\nleft join tickets t using (account_id)",
+   "config": {
+    "materialized": "table",
+    "meta": {
+     "mf": {
+      "dataset": "accounts-2026",
+      "keys": [
+       "account_id"
+      ],
+      "label": "churned_90d"
+     }
+    },
+    "tags": [
+     "gold"
+    ]
+   },
+   "database": "churn",
+   "depends_on": {
+    "macros": [],
+    "nodes": [
+     "model.churn.stg_tickets",
+     "model.churn.stg_accounts"
+    ]
+   },
+   "description": "One row per account as of the 2026-06-30 snapshot, with features and the churn label.",
+   "meta": {
+    "mf": {
+     "dataset": "accounts-2026",
+     "keys": [
+      "account_id"
+     ],
+     "label": "churned_90d"
+    }
+   },
+   "name": "account_features",
+   "original_file_path": "models/gold/account_features.sql",
+   "relation_name": "\"churn\".\"main_gold\".\"account_features\"",
+   "resource_type": "model",
+   "schema": "main_gold",
+   "tags": [
+    "gold"
+   ],
+   "unique_id": "model.churn.account_features"
+  },
+  "model.churn.stg_accounts": {
+   "alias": "stg_accounts",
+   "columns": {
+    "account_id": {
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "constraints": [],
+     "data_type": null,
+     "description": "Account identifier.",
+     "dimension": null,
+     "doc_blocks": [],
+     "entity": null,
+     "granularity": null,
+     "meta": {},
+     "name": "account_id",
+     "quote": null,
+     "tags": []
+    },
+    "cancelled_on": {
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "constraints": [],
+     "data_type": null,
+     "description": "The date the subscription was cancelled, if it was.",
+     "dimension": null,
+     "doc_blocks": [],
+     "entity": null,
+     "granularity": null,
+     "meta": {},
+     "name": "cancelled_on",
+     "quote": null,
+     "tags": []
+    },
+    "opened_on": {
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "constraints": [],
+     "data_type": null,
+     "description": "The date the account was opened.",
+     "dimension": null,
+     "doc_blocks": [],
+     "entity": null,
+     "granularity": null,
+     "meta": {},
+     "name": "opened_on",
+     "quote": null,
+     "tags": []
+    },
+    "plan_code": {
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "constraints": [],
+     "data_type": null,
+     "description": "Plan code, lower-cased and trimmed.",
+     "dimension": null,
+     "doc_blocks": [],
+     "entity": null,
+     "granularity": null,
+     "meta": {},
+     "name": "plan_code",
+     "quote": null,
+     "tags": []
+    }
+   },
+   "compiled_code": "select\n    account_id,\n    cast(created_at as date) as opened_on,\n    lower(trim(plan)) as plan_code,\n    cast(cancelled_at as date) as cancelled_on\nfrom \"churn\".\"bronze\".\"accounts\"",
+   "config": {
+    "materialized": "view",
+    "meta": {},
+    "tags": [
+     "silver"
+    ]
+   },
+   "database": "churn",
+   "depends_on": {
+    "macros": [],
+    "nodes": [
+     "source.churn.bronze.accounts"
+    ]
+   },
+   "description": "Accounts with dates and plan codes cleaned.",
+   "meta": {},
+   "name": "stg_accounts",
+   "original_file_path": "models/silver/stg_accounts.sql",
+   "relation_name": "\"churn\".\"main_silver\".\"stg_accounts\"",
+   "resource_type": "model",
+   "schema": "main_silver",
+   "tags": [
+    "silver"
+   ],
+   "unique_id": "model.churn.stg_accounts"
+  },
+  "model.churn.stg_tickets": {
+   "alias": "stg_tickets",
+   "columns": {
+    "opened_on": {
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "constraints": [],
+     "data_type": null,
+     "description": "The date the ticket was opened.",
+     "dimension": null,
+     "doc_blocks": [],
+     "entity": null,
+     "granularity": null,
+     "meta": {},
+     "name": "opened_on",
+     "quote": null,
+     "tags": []
+    }
+   },
+   "compiled_code": "select ticket_id, account_id, cast(opened_at as date) as opened_on\nfrom \"churn\".\"bronze\".\"tickets\"",
+   "config": {
+    "materialized": "view",
+    "meta": {},
+    "tags": [
+     "silver"
+    ]
+   },
+   "database": "churn",
+   "depends_on": {
+    "macros": [],
+    "nodes": [
+     "source.churn.bronze.tickets"
+    ]
+   },
+   "description": "Support tickets with the opening date.",
+   "meta": {},
+   "name": "stg_tickets",
+   "original_file_path": "models/silver/stg_tickets.sql",
+   "relation_name": "\"churn\".\"main_silver\".\"stg_tickets\"",
+   "resource_type": "model",
+   "schema": "main_silver",
+   "tags": [
+    "silver"
+   ],
+   "unique_id": "model.churn.stg_tickets"
+  }
+ },
+ "sources": {
+  "source.churn.bronze.accounts": {
+   "columns": {
+    "account_id": {
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "constraints": [],
+     "data_type": null,
+     "description": "Account identifier.",
+     "dimension": null,
+     "doc_blocks": [],
+     "entity": null,
+     "granularity": null,
+     "meta": {},
+     "name": "account_id",
+     "quote": null,
+     "tags": []
+    },
+    "cancelled_at": {
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "constraints": [],
+     "data_type": null,
+     "description": "When the subscription was cancelled, if it was.",
+     "dimension": null,
+     "doc_blocks": [],
+     "entity": null,
+     "granularity": null,
+     "meta": {},
+     "name": "cancelled_at",
+     "quote": null,
+     "tags": []
+    },
+    "created_at": {
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "constraints": [],
+     "data_type": null,
+     "description": "When the account was opened.",
+     "dimension": null,
+     "doc_blocks": [],
+     "entity": null,
+     "granularity": null,
+     "meta": {},
+     "name": "created_at",
+     "quote": null,
+     "tags": []
+    },
+    "plan": {
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "constraints": [],
+     "data_type": null,
+     "description": "Subscription plan code.",
+     "dimension": null,
+     "doc_blocks": [],
+     "entity": null,
+     "granularity": null,
+     "meta": {},
+     "name": "plan",
+     "quote": null,
+     "tags": []
+    }
+   },
+   "database": "churn",
+   "description": "One row per account, as billing records it.",
+   "identifier": "accounts",
+   "meta": {
+    "layer": "bronze"
+   },
+   "name": "accounts",
+   "original_file_path": "models/sources.yml",
+   "relation_name": "\"churn\".\"bronze\".\"accounts\"",
+   "resource_type": "source",
+   "schema": "bronze",
+   "source_meta": {
+    "layer": "bronze"
+   },
+   "source_name": "bronze",
+   "tags": [],
+   "unique_id": "source.churn.bronze.accounts"
+  },
+  "source.churn.bronze.tickets": {
+   "columns": {
+    "account_id": {
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "constraints": [],
+     "data_type": null,
+     "description": "The account that opened the ticket.",
+     "dimension": null,
+     "doc_blocks": [],
+     "entity": null,
+     "granularity": null,
+     "meta": {},
+     "name": "account_id",
+     "quote": null,
+     "tags": []
+    },
+    "opened_at": {
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "constraints": [],
+     "data_type": null,
+     "description": "When the ticket was opened.",
+     "dimension": null,
+     "doc_blocks": [],
+     "entity": null,
+     "granularity": null,
+     "meta": {},
+     "name": "opened_at",
+     "quote": null,
+     "tags": []
+    },
+    "ticket_id": {
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "constraints": [],
+     "data_type": null,
+     "description": "Ticket identifier.",
+     "dimension": null,
+     "doc_blocks": [],
+     "entity": null,
+     "granularity": null,
+     "meta": {},
+     "name": "ticket_id",
+     "quote": null,
+     "tags": []
+    }
+   },
+   "database": "churn",
+   "description": "One row per support ticket.",
+   "identifier": "tickets",
+   "meta": {
+    "layer": "bronze"
+   },
+   "name": "tickets",
+   "original_file_path": "models/sources.yml",
+   "relation_name": "\"churn\".\"bronze\".\"tickets\"",
+   "resource_type": "source",
+   "schema": "bronze",
+   "source_meta": {
+    "layer": "bronze"
+   },
+   "source_name": "bronze",
+   "tags": [],
+   "unique_id": "source.churn.bronze.tickets"
+  }
+ }
+}

@@ -1,0 +1,14 @@
+name: churn
+version: "1.0"
+profile: churn
+model-paths: [models]
+models:
+  churn:
+    silver:
+      +schema: silver
+      +materialized: view
+      +tags: [silver]
+    gold:
+      +schema: gold
+      +materialized: table
+      +tags: [gold]
