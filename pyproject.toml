@@ -22,7 +22,11 @@ odcl = "odcl.cli:main"
 fathom = "odcl.cli:main"  # temporary alias
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = [
+    "pyarrow>=18",
+    "pytest>=8",
+    "ruff>=0.6",
+]
 
 [build-system]
 requires = ["hatchling"]

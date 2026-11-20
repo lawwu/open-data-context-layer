@@ -19,7 +19,10 @@ ACTION_STATES_THAT_WROTE = ("SUCCEEDED",)
 
 def reference_key(reference: str) -> str:
     """A dataset version reference as stored: the table lower-cased, the time as written."""
-    table, at, time = reference.strip().partition("@")
+    reference = reference.strip()
+    if reference.startswith("gs://"):  # object names are case-sensitive
+        return reference
+    table, at, time = reference.partition("@")
     return table.lower().removeprefix("table:") + at + time
 
 
@@ -101,6 +104,9 @@ def _version(catalog: Catalog, reference: str) -> dict:
     reference = reference.strip()
     if "@" in reference:
         row = catalog.db.execute("SELECT * FROM dataset_versions WHERE reference = %s", (reference_key(reference),)).fetchone()
+    elif reference.startswith("gs://"):  # a file set's location: its latest recording
+        row = catalog.db.execute("SELECT * FROM dataset_versions WHERE source_uri = %s ORDER BY recorded_at DESC, id DESC LIMIT 1",
+                                 (reference.rstrip("/"),)).fetchone()
     else:
         row = catalog.db.execute("SELECT * FROM dataset_versions WHERE lower(snapshot_table) = lower(%s) ORDER BY snapshot_time DESC LIMIT 1",
                                  (reference.removeprefix("table:"),)).fetchone()
@@ -115,6 +121,9 @@ def explain_dataset(catalog: Catalog, reference: str) -> dict:
     `reference` is project.dataset.snapshot@time, or just the snapshot table for its latest version. `missing`
     says, in words, every link the catalog could not establish."""
     db, version = catalog.db, _version(catalog, reference)
+    if version["kind"] == "gcs_files":
+        from .filesets import explain
+        return explain(catalog, version)
     action = db.execute("SELECT * FROM executions WHERE id = %s", (version["producer_execution"],)).fetchone()
     invocation = db.execute("SELECT * FROM executions WHERE id = %s", (action["parent_id"],)).fetchone() if action["parent_id"] else None
     evidence, missing = action["evidence"], []

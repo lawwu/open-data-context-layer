@@ -1,0 +1,34 @@
+{
+  "name": "projects/workforce-demo/locations/us-central1/pipelineJobs/train-files-007",
+  "displayName": "staffing-forecast training on exported files",
+  "state": "PIPELINE_STATE_SUCCEEDED",
+  "createTime": "2026-10-05T09:00:00Z",
+  "startTime": "2026-10-05T09:00:20Z",
+  "endTime": "2026-10-05T09:48:00Z",
+  "jobDetail": {
+    "taskDetails": [
+      {
+        "taskId": "7001",
+        "taskName": "load-data",
+        "state": "SUCCEEDED",
+        "startTime": "2026-10-05T09:01:00Z",
+        "endTime": "2026-10-05T09:12:00Z",
+        "execution": {"name": "projects/workforce-demo/locations/us-central1/metadataStores/default/executions/701"},
+        "outputs": {
+          "output_train_dataset": {"artifacts": [{"name": "projects/workforce-demo/locations/us-central1/metadataStores/default/artifacts/8801",
+                                                   "uri": "gs://demo-pipelines/root/train-files-007/load-data-7001/output_train_dataset"}]},
+          "output_val_dataset": {"artifacts": [{"name": "projects/workforce-demo/locations/us-central1/metadataStores/default/artifacts/8802",
+                                                 "uri": "gs://demo-pipelines/root/train-files-007/load-data-7001/output_val_dataset"}]}
+        }
+      },
+      {
+        "taskId": "7002",
+        "taskName": "train",
+        "state": "SUCCEEDED",
+        "startTime": "2026-10-05T09:13:00Z",
+        "endTime": "2026-10-05T09:47:00Z",
+        "execution": {"name": "projects/workforce-demo/locations/us-central1/metadataStores/default/executions/702"}
+      }
+    ]
+  }
+}
