@@ -1,22 +1,26 @@
 [
   {
-    "creation_time": "2026-09-02T01:58:40Z",
-    "start_time": "2026-09-02T01:58:41Z",
-    "end_time": "2026-09-02T01:59:52Z",
-    "project_id": "workforce-demo",
-    "location": "us-central1",
-    "job_id": "job-042",
-    "parent_job_id": null,
-    "job_type": "QUERY",
-    "statement_type": "CREATE_TABLE_AS_SELECT",
-    "state": "DONE",
-    "error_result": null,
-    "cache_hit": false,
-    "total_bytes_processed": 73400320,
-    "total_bytes_billed": 73400320,
-    "total_slot_ms": 18250,
-    "referenced_tables": [{"project_id": "workforce-demo", "dataset_id": "raw", "table_id": "shift_totals"}],
-    "destination_table": {"project_id": "workforce-demo", "dataset_id": "features", "table_id": "shift_inputs"},
-    "query_info": {"query_hashes": {"normalized_literals": "5b1f0c1d9e6a4a7f8a3f2f0e9d1c7b42"}}
+    "jobReference": {"projectId": "workforce-demo", "jobId": "job-042", "location": "us-central1"},
+    "configuration": {
+      "query": {
+        "query": "CREATE OR REPLACE TABLE `workforce-demo.features.shift_inputs` AS SELECT employee_id, pay_period_start, worked_minutes_asof / 60 AS hours_at_cutoff FROM `workforce-demo.raw.shift_totals`",
+        "destinationTable": {"projectId": "workforce-demo", "datasetId": "features", "tableId": "shift_inputs"}
+      },
+      "labels": {"dataform-workflow-invocation": "build-042"}
+    },
+    "statistics": {
+      "creationTime": "1788314320000",
+      "startTime": "1788314321000",
+      "endTime": "1788314392000",
+      "query": {
+        "statementType": "CREATE_TABLE_AS_SELECT",
+        "cacheHit": false,
+        "totalBytesProcessed": "73400320",
+        "totalBytesBilled": "73400320",
+        "totalSlotMs": "18250",
+        "referencedTables": [{"projectId": "workforce-demo", "datasetId": "raw", "tableId": "shift_totals"}]
+      }
+    },
+    "status": {"state": "DONE"}
   }
 ]

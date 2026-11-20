@@ -186,11 +186,11 @@ def test_tables_are_registered_with_nested_columns_and_importing_again_changes_n
     assert bq.import_tables(catalog, ["data-p.frozen.shift_inputs_b042"], client=client) == {"added": 4, "changed": 0, "unchanged": 0}
     table = catalog.get("data-p.frozen.shift_inputs_b042")
     assert (table["system"], table["type"], table["description"]) == ("bigquery", "snapshot", "Frozen inputs for build 042")
-    assert table["source"]["base_table"] == FEATURES and table["source"]["snapshot_time"] == "2026-09-02T02:00:00Z"
+    assert table["source"]["bigquery"]["base_table"] == FEATURES and table["source"]["bigquery"]["snapshot_time"] == "2026-09-02T02:00:00Z"
     assert [(c["key"].rsplit("shift_inputs_b042.", 1)[1], c["dtype"]) for c in table["columns"]] == [
         ("employee_id", "STRING"), ("shift", "RECORD"), ("shift.hours_at_cutoff", "FLOAT")]
     nested = catalog.get("column:data-p.frozen.shift_inputs_b042.shift.hours_at_cutoff")
-    assert nested["description"] == "Hours at the cutoff" and nested["source"]["path"] == "Shift.hours_at_cutoff"  # BigQuery's own spelling
+    assert nested["description"] == "Hours at the cutoff" and nested["source"]["bigquery"]["path"] == "Shift.hours_at_cutoff"  # BigQuery's own spelling
 
     snapshot._properties["numRows"] = "999"  # row counts move without the definition changing
     assert bq.import_tables(catalog, ["data-p.frozen.shift_inputs_b042"], client=client) == {"added": 0, "changed": 0, "unchanged": 4}
