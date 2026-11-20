@@ -64,6 +64,43 @@ function entryLink(key, text) {
   return h("a", { href: entryHref(key) }, text ?? short(key));
 }
 
+// ---- links to the Google Cloud console ------------------------------------------------------------------------
+// Built from the identifiers the catalog already holds; each answers null when the identifier is not one it knows.
+const CONSOLE = "https://console.cloud.google.com";
+const gcs = (uri) => /^gs:\/\/([^/]+)\/?(.*)$/.exec(uri || "");
+const path = (p) => p.split("/").map(enc).join("/");
+const gcp = {
+  table(name) {  // project.dataset.table; a domain-scoped project keeps its dots and colon
+    const parts = String(name || "").replace(/^table:/, "").split(".");
+    if (parts.length < 3) return null;
+    const t = parts.pop(), d = parts.pop(), p = parts.join(".");
+    return `${CONSOLE}/bigquery?project=${enc(p)}&ws=${enc(`!1m5!1m4!4m3!1s${p}!2s${d}!3s${t}`)}`;  // the console's own form; it still accepts p, d and t
+  },
+  job(project, location, id) {
+    return project && id ? `${CONSOLE}/bigquery?project=${enc(project)}&j=${enc(`bq:${location || "US"}:${id}`)}&page=queryresults` : null;
+  },
+  pipelineRun(name) {
+    const m = /^projects\/([^/]+)\/locations\/([^/]+)\/pipelineJobs\/([^/]+)$/.exec(name || "");
+    return m ? `${CONSOLE}/vertex-ai/locations/${enc(m[2])}/pipelines/runs/${enc(m[3])}?project=${enc(m[1])}` : null;
+  },
+  invocation(name) {
+    const m = /^projects\/([^/]+)\/locations\/([^/]+)\/repositories\/([^/]+)\/workflowInvocations\/([^/]+)$/.exec(name || "");
+    return m ? `${CONSOLE}/bigquery/dataform/locations/${enc(m[2])}/repositories/${enc(m[3])}/workflows/${enc(m[4])}?project=${enc(m[1])}` : null;
+  },
+  object(uri) {
+    const m = gcs(uri);
+    return m && m[2] ? `${CONSOLE}/storage/browser/_details/${enc(m[1])}/${path(m[2])}` : null;
+  },
+  folder(uri) {
+    const m = gcs(uri);
+    return m ? `${CONSOLE}/storage/browser/${enc(m[1])}/${path(m[2].replace(/\/?$/, "/"))}` : null;
+  },
+};
+
+function consoleLink(url, text = "Console") {
+  return url ? h("a", { class: "console", href: url, target: "_blank", rel: "noopener noreferrer", title: "Open in the Google Cloud console" }, text, " ↗") : null;
+}
+
 function stateBadge(state) {
   const value = String(state || "UNKNOWN");
   const good = /^(COMPLETE|SUCCEEDED|PIPELINE_STATE_SUCCEEDED|DONE)$/.test(value);
@@ -249,6 +286,9 @@ async function entryPage(key) {
         "This project has recorded no use of data yet."));
   } else {
     const lineage = await api(`/v1/entries/${enc(entry.key)}/lineage?direction=both`);
+    if (lineage.system === "bigquery") {
+      parts[3].append(h("div", { class: "console-row" }, consoleLink(gcp.table(entry.kind === "column" ? entry.table : entry.key), "Open in BigQuery")));
+    }
     parts.push(h("h2", {}, "Lineage"), lineageGraph(lineage), lineageLists(lineage));
     if (entry.kind === "table") {
       parts.push(h("h2", {}, `Columns (${entry.columns.length})`),
@@ -280,7 +320,7 @@ async function historySection(key) {
     const history = await api(`/v1/query-history?table=${enc(short(key))}&since=30d&limit=20`);
     if (!history.jobs.length) return h("div", {});
     return h("div", {}, h("h2", {}, `Query jobs in the last 30 days (${history.totals.jobs})`),
-      table(["Job", "Read or write", "State", "Created"], history.jobs.map((j) => [h("code", {}, j.job_id), j.roles.join(", "), stateBadge(j.state), when(j.created)])),
+      table(["Job", "Read or write", "State", "Created"], history.jobs.map((j) => [[h("code", {}, j.job_id), " ", consoleLink(gcp.job(j.project, j.location, j.job_id))], j.roles.join(", "), stateBadge(j.state), when(j.created)])),
       history.more ? h("p", { class: "muted" }, "More jobs than shown.") : null);
   } catch {
     return h("div", {});
@@ -301,7 +341,7 @@ function filesSteps(files) {
   const exported = files.exported_from;
   return [
     step("Written by", written ? `${written.pipeline_run.split("/").pop()} / task ${written.task}` : "not recorded",
-      written ? written.pipeline_run : "the files were named by URI, not read from a pipeline task's output",
+      written ? h("span", {}, written.pipeline_run, " ", consoleLink(gcp.pipelineRun(written.pipeline_run))) : "the files were named by URI, not read from a pipeline task's output",
       written?.state ? h("span", {}, stateBadge(written.state)) : null),
     step("Exported from", exported ? entryLink(`table:${exported.table}`, exported.table) : "not recorded",
       exported ? h("span", {}, "table-level lineage only, pinned when the files were recorded",
@@ -317,12 +357,12 @@ async function modelPage(name, version) {
     h("h1", {}, `${trace.model} ${trace.version}`),
     h("p", { class: "sub" }, "From the training task back to the raw column behind each input, as pinned when the model was trained."),
     h("ol", { class: "trace" },
-      step("Model artifact", trace.artifact.uri, `generation ${trace.artifact.generation}`, `sha256 ${trace.artifact.sha256}`),
-      step("Trained by", `${p.pipeline_run.split("/").pop()} / task ${p.task}`, p.pipeline_run,
+      step("Model artifact", trace.artifact.uri, `generation ${trace.artifact.generation}`, `sha256 ${trace.artifact.sha256}`, consoleLink(gcp.object(trace.artifact.uri))),
+      step("Trained by", `${p.pipeline_run.split("/").pop()} / task ${p.task}`, h("span", {}, p.pipeline_run, " ", consoleLink(gcp.pipelineRun(p.pipeline_run))),
         p.training_commit ? `training code at commit ${p.training_commit}` : "training code commit not recorded",
         p.prediction_cutoff ? `prediction cutoff ${p.prediction_cutoff}` : null),
       step("Read dataset version", h("a", { href: `#/dataset/${enc(read.dataset_version)}` }, read.dataset_version),
-        h("span", {}, "a snapshot of ", entryLink(`table:${read.snapshot_of}`)))),
+        h("span", {}, "a snapshot of ", entryLink(`table:${read.snapshot_of}`), " ", consoleLink(gcp.table(read.snapshot), "Snapshot in BigQuery")))),
     h("h2", {}, `Inputs (${trace.inputs.length})`),
     trace.inputs.map((i) => h("div", { class: "card", style: null },
       h("div", {}, h("strong", {}, i.field), h("span", { class: "muted" }, ` · ${i.role}${i.position !== null ? ` #${i.position}` : ""}`),
@@ -330,9 +370,10 @@ async function modelPage(name, version) {
       h("ol", { class: "trace", style: null },
         step("Expression", h("code", {}, i.expression ?? "?"), i.column ? h("span", {}, "column ", entryLink(`column:${i.column}`)) : null),
         step("Built by", i.produced_by.dataform_invocation ? i.produced_by.dataform_invocation.split("/").pop() : "?",
-          i.produced_by.dataform_invocation, i.produced_by.state ? h("span", {}, stateBadge(i.produced_by.state)) : null),
+          i.produced_by.dataform_invocation, i.produced_by.state ? h("span", {}, stateBadge(i.produced_by.state), " ", consoleLink(gcp.invocation(i.produced_by.dataform_invocation))) : null),
         step("Executed as", i.executed_as ? i.executed_as.job_id : "an unknown job",
-          i.executed_as ? `BigQuery job in ${i.executed_as.project}, ${i.executed_as.location} · ${i.executed_as.statement_type}` : null),
+          i.executed_as ? h("span", {}, `BigQuery job in ${i.executed_as.project}, ${i.executed_as.location} · ${i.executed_as.statement_type} `,
+            consoleLink(gcp.job(i.executed_as.project, i.executed_as.location, i.executed_as.job_id))) : null),
         step("Defined in", i.defined_in.file || "?", i.defined_in.commit ? `commit ${i.defined_in.commit}` : "no git commit"),
         step("From raw columns", i.derived_from.length ? i.derived_from.map((c, n) => [n ? ", " : "", entryLink(`column:${c}`, c)]) : "?")))),
     ...missingList(trace.missing));
@@ -346,10 +387,11 @@ function modelOnFilesPage(trace) {
     h("p", { class: "sub" }, "Trained on files a pipeline exported, not on a BigQuery snapshot. The files prove the exact bytes the trainer read; "
       + "they do not show which build produced them, so no column lineage is claimed below them."),
     h("ol", { class: "trace" },
-      step("Model artifact", trace.artifact.uri, `generation ${trace.artifact.generation}`, `sha256 ${trace.artifact.sha256}`),
-      step("Trained by", `${p.pipeline_run.split("/").pop()} / task ${p.task}`, p.pipeline_run,
+      step("Model artifact", trace.artifact.uri, `generation ${trace.artifact.generation}`, `sha256 ${trace.artifact.sha256}`, consoleLink(gcp.object(trace.artifact.uri))),
+      step("Trained by", `${p.pipeline_run.split("/").pop()} / task ${p.task}`, h("span", {}, p.pipeline_run, " ", consoleLink(gcp.pipelineRun(p.pipeline_run))),
         p.training_commit ? `training code at commit ${p.training_commit}` : "training code commit not recorded"),
-      step("Read files", h("a", { href: `#/dataset/${enc(read.dataset_version)}` }, read.uri), `${plural(read.objects, "object")}, generations pinned`),
+      step("Read files", h("a", { href: `#/dataset/${enc(read.dataset_version)}` }, read.uri), `${plural(read.objects, "object")}, generations pinned`,
+        consoleLink(gcp.folder(read.uri))),
       ...filesSteps(read)),
     h("h2", {}, `Inputs (${trace.inputs.length})`),
     table(["Field", "Role", "Type", "Lineage"], trace.inputs.map((i) => [h("strong", {}, i.field),
@@ -363,11 +405,11 @@ function filesPage(d) {
     h("h1", {}, d.reference),
     h("p", { class: "sub" }, "Cloud Storage files a training run read, each pinned to the object generation recorded. "
       + "Its fields come from the Parquet schema; column lineage below them is not claimed."),
-    h("ol", { class: "trace" }, step("Files", d.uri, `${plural(d.objects.length, "object")}, generations pinned`), ...filesSteps(d)),
+    h("ol", { class: "trace" }, step("Files", d.uri, `${plural(d.objects.length, "object")}, generations pinned`, consoleLink(gcp.folder(d.uri))), ...filesSteps(d)),
     h("h2", {}, `Fields (${d.columns.length})`),
     table(["Field", "Type"], d.columns.map((c) => [c.field, c.dtype || "?"]), "The fields of these files are not known."),
     h("h2", {}, `Objects (${d.objects.length})`),
-    table(["Object", "Generation", "Size"], d.objects.map((o) => [h("code", {}, o.uri), h("code", {}, o.generation),
+    table(["Object", "Generation", "Size"], d.objects.map((o) => [[h("code", {}, o.uri), " ", consoleLink(gcp.object(o.uri))], h("code", {}, o.generation),
       o.size === null ? "?" : `${o.size.toLocaleString()} bytes`])),
     h("h2", {}, "Recorded"), facts([["By", d.recorded_by], ["When", when(d.recorded_at)]]),
     ...missingList(d.missing));
@@ -381,11 +423,13 @@ async function datasetPage(reference) {
     h("h1", {}, d.reference),
     h("p", { class: "sub" }, "A snapshot handed on by a build, with each field pinned to the definition that build used."),
     h("ol", { class: "trace" },
-      step("Snapshot of", entryLink(`table:${d.snapshot_of}`), `taken ${d.snapshot_time}`),
+      step("Snapshot of", entryLink(`table:${d.snapshot_of}`), `taken ${d.snapshot_time}`, h("span", {}, consoleLink(gcp.table(d.snapshot), "Snapshot in BigQuery"))),
       step("Produced by", d.produced_by.dataform_invocation ? d.produced_by.dataform_invocation.split("/").pop() : "?", d.produced_by.dataform_invocation,
-        h("span", {}, stateBadge(d.produced_by.state), " ", when(d.produced_by.started), " → ", when(d.produced_by.ended))),
+        h("span", {}, stateBadge(d.produced_by.state), " ", when(d.produced_by.started), " → ", when(d.produced_by.ended), " ",
+          consoleLink(gcp.invocation(d.produced_by.dataform_invocation)))),
       step("Executed as", d.executed_as ? d.executed_as.job_id : "an unknown job",
-        d.executed_as ? `BigQuery job in ${d.executed_as.project}, ${d.executed_as.location} · ${d.executed_as.statement_type} · ${(d.executed_as.billed_bytes ?? 0).toLocaleString()} bytes billed` : null),
+        d.executed_as ? h("span", {}, `BigQuery job in ${d.executed_as.project}, ${d.executed_as.location} · ${d.executed_as.statement_type} · ${(d.executed_as.billed_bytes ?? 0).toLocaleString()} bytes billed `,
+          consoleLink(gcp.job(d.executed_as.project, d.executed_as.location, d.executed_as.job_id))) : null),
       step("Defined in", d.defined_in.file || "?", d.defined_in.commit ? `commit ${d.defined_in.commit}` : "no git commit")),
     h("h2", {}, `Fields (${d.columns.length})`),
     table(["Field", "Expression", "From", "Lineage"], d.columns.map((c) => [entryLink(`column:${c.column}`, c.field), h("code", {}, c.expression ?? "?"),
@@ -402,7 +446,8 @@ function modelVersionsTable(models, withModel = true) {
   return table([...(withModel ? ["Model"] : []), "Version", "Trained on", "Artifact", "Recorded"], models.map((m) => [
     ...(withModel ? [entryLink(`project:${m.model}`, m.model)] : []),
     h("a", { href: `#/model/${enc(m.model)}/${enc(m.version)}` }, m.version),
-    h("a", { href: `#/dataset/${enc(m.dataset_version)}` }, m.dataset_version), h("code", {}, m.artifact), [when(m.recorded_at), ` by ${m.recorded_by}`]]),
+    h("a", { href: `#/dataset/${enc(m.dataset_version)}` }, m.dataset_version), [h("code", {}, m.artifact), " ", consoleLink(gcp.object(m.artifact))],
+    [when(m.recorded_at), ` by ${m.recorded_by}`]]),
   "No model version is recorded yet. Import one with odcl import --vertex-manifest.");
 }
 
@@ -459,10 +504,19 @@ async function projectsPage() {
       : h("p", { class: "muted" }, "No project is registered yet. Register one with odcl add project, or import a model version."));
 }
 
+// where a run can be opened: its pipeline run (a Vertex task opens its run), its Dataform invocation, or its BigQuery job
+function runConsole(r) {
+  if (r.system === "vertex") return gcp.pipelineRun(r.kind === "pipeline_run" ? r.run : r.parent);
+  if (r.system === "dataform") return gcp.invocation(r.kind === "invocation" ? r.run : r.parent)
+    || (r.bigquery_job && gcp.job(r.bigquery_job.project, r.bigquery_job.location, r.bigquery_job.job_id));
+  return null;
+}
+
 function runsTable(runs) {
   const keys = (list) => list.map((k, n) => [n ? ", " : "", entryLink(k)]);
   return table(["Run", "System", "State", "Started", "Ended", "Read", "Wrote"], runs.map((r) => [
-    h("span", { title: r.run }, /^projects\//.test(r.job) ? r.job.split("/").pop() : r.job), r.system, stateBadge(r.state), when(r.started), when(r.ended), keys(r.inputs), keys(r.outputs)]), "No run is recorded yet.");
+    [h("span", { title: r.run }, /^projects\//.test(r.job) ? r.job.split("/").pop() : r.job), " ", consoleLink(runConsole(r))],
+    r.system, stateBadge(r.state), when(r.started), when(r.ended), keys(r.inputs), keys(r.outputs)]), "No run is recorded yet.");
 }
 
 async function runsPage(params) {
