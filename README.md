@@ -210,4 +210,4 @@ Without `ODCL_TEST_DATABASE_URL` the database tests are skipped locally and fail
 - A web page.
 - Sign-in and permissions. Today anyone who can reach the database can read and write the catalog.
 
-The distribution is `open-data-context-layer`, the Python package is `odcl`, and the command is `odcl`. The repository is still named `fathom`.
+The distribution is `open-data-context-layer`, the Python package is `odcl`, and the command is `odcl`. The repository is [lawwu/open-data-context-layer](https://github.com/lawwu/open-data-context-layer); it was `lawwu/fathom`, and GitHub redirects the old address.
