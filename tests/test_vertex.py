@@ -129,8 +129,9 @@ def redefine_and_rebuild(catalog):
 
 def train_v18(catalog):
     v18 = json.loads(json.dumps(load("training_manifest.json")).replace("v17", "v18").replace("train-042", "train-049")
-                     .replace("shift_inputs_b042@2026-09-02", "shift_inputs_b049@2026-09-09"))
-    job = json.loads(json.dumps(load("vertex_pipeline_job.json")).replace("train-042", "train-049").replace("2026-09-02T0", "2026-09-09T0"))
+                     .replace("shift_inputs_b042@2026-09-02", "shift_inputs_b049@2026-09-09").replace("executions/481", "executions/489"))
+    job = json.loads(json.dumps(load("vertex_pipeline_job.json")).replace("train-042", "train-049").replace("2026-09-02T0", "2026-09-09T0")
+                     .replace("executions/481", "executions/489"))
     return vertex.import_build(catalog, v18, client=FakeVertex(job=job, objects={"gs://demo-models/staffing/v18/model.bin": (MODEL, "1788318000000000")}))
 
 
@@ -265,3 +266,12 @@ def test_a_project_lists_its_model_versions_and_the_project_list_says_which_are_
     projects = {p["key"]: p for p in catalog.projects()}
     assert projects["project:staffing-forecast"].items() >= {"uses": 1, "latest_version": "v17", "changed_since_used": 0}.items()
     assert projects["project:churn-eda"].items() >= {"uses": 0, "latest_version": None, "owner": "ana"}.items()
+
+
+def test_replaying_a_version_recorded_before_projects_kept_their_uses_fills_them_in(catalog):
+    build(catalog)
+    vertex.import_build(catalog, load("training_manifest.json"), client=FakeVertex())
+    catalog._use_from_model("project:staffing-forecast", [])  # as a version imported by an earlier release left it
+    assert catalog.uses("staffing-forecast")["uses"] == []
+    assert vertex.import_build(catalog, load("training_manifest.json"), client=FakeVertex())["change"] == "unchanged"
+    assert [u["purpose"] for u in catalog.uses("staffing-forecast")["uses"]] == ["feature in v17"]
