@@ -1,0 +1,7 @@
+config {
+  type: "declaration",
+  database: "PROJECT",
+  schema: "odcl_demo_raw",
+  name: "shift_totals",
+  description: "Synthetic shift totals for the catalog's live test"
+}
