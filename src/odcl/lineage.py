@@ -60,22 +60,57 @@ def as_written(column: str, sql: str, dialect) -> str | None:
 def column_parents(column: str, sql: str, dialect, schema: dict) -> tuple[str | None, list[tuple[str, str]], bool]:
     """(the column's expression, [(upstream relation, column)], whether every input was traced) from compiled SQL.
 
-    A row count has no input column. It is traced to the filter and grouping columns of the table it counts, and
-    reported as not fully traced so the entry says so."""
+    Every relation returned is a real table: a column read from one of the query's own CTEs is followed through it,
+    however deeply they nest. A row count has no input column. It is traced to the filter and grouping columns of
+    the table it counts, and reported as not fully traced so the entry says so."""
     from sqlglot import exp
     from sqlglot.lineage import lineage
     node = lineage(column, sql, schema=schema or None, dialect=dialect)
     nodes = list(node.walk())
-    leaves = {(relation(n.source), n.name.split(".")[-1]) for n in nodes if isinstance(n.source, exp.Table)}
+    tree = parse(sql, dialect)
     expression = as_written(column, sql, dialect)
     if expression is None:  # a column reached through `*` has no select item of its own
         expression = node.expression.this.sql(dialect=dialect) if isinstance(node.expression, exp.Alias) else node.expression.sql(dialect=dialect)
+    leaves = {pair for n in nodes if isinstance(n.source, exp.Table) for pair in _real(tree, n.source, n.name.split(".")[-1], dialect, schema)}
     if leaves:
         return expression, sorted(leaves), True
-    for inner in reversed(nodes):  # nothing traced: the deepest select that reads exactly one table
-        source = inner.source
-        tables = list(source.find_all(exp.Table)) if isinstance(source, exp.Select) else []
-        if len(tables) == 1 and not tables[0].find_ancestor(exp.Subquery):
-            used = [c for clause in ("where", "group") if source.args.get(clause) for c in source.args[clause].find_all(exp.Column)]
-            return expression, sorted({(relation(tables[0]), c.name) for c in used}), False
-    return expression, [], False
+    # nothing traced: the select that computes the column from no input column (a COUNT(*)), if it reads one relation
+    computing = next((n.source for n in nodes if isinstance(n.source, exp.Select) and not n.expression.find(exp.Column)), None)
+    read = _relations(computing) if computing is not None else []
+    if len(read) != 1:
+        return expression, [], False
+    used = {c.name.lower() for clause in ("where", "group") if computing.args.get(clause) for c in computing.args[clause].find_all(exp.Column)}
+    return expression, sorted({pair for name in used for pair in _real(tree, read[0], name, dialect, schema)}), False
+
+
+def _relations(select) -> list:
+    """The tables a select reads directly, in its FROM and JOINs: not those read inside its CTEs or subqueries."""
+    from sqlglot import exp
+    sources = [select.args.get("from_") or select.args.get("from"), *(select.args.get("joins") or [])]  # sqlglot 30 names it from_
+    found = [s.this for s in sources if s is not None]
+    return found if all(isinstance(t, exp.Table) and t.name for t in found) else []
+
+
+def _ctes(tree) -> dict:
+    from sqlglot import exp
+    return {cte.alias_or_name.lower(): cte for cte in tree.find_all(exp.CTE)} if tree is not None else {}
+
+
+def _real(tree, table, column: str, dialect, schema, depth: int = 0) -> set[tuple[str, str]]:
+    """The real (relation, column) pairs behind `column` of `table`. A table that names one of the query's CTEs is
+    followed through that CTE to what it reads; a CTE column computed from no table column yields nothing."""
+    from sqlglot import exp
+    from sqlglot.lineage import lineage
+    ctes = _ctes(tree)
+    if table.db or table.catalog or table.name.lower() not in ctes:
+        return {(relation(table), column.lower())}
+    if depth > 20:
+        return set()
+    follow = exp.select(exp.column(column)).from_(exp.to_table(table.name))
+    clause = "with_" if "with_" in exp.Select.arg_types else "with"  # sqlglot 30 renamed it
+    follow.set(clause, ctes[table.name.lower()].parent.copy())  # the WITH that defines it, wherever it sits
+    try:
+        nodes = list(lineage(column, follow, schema=schema or None, dialect=dialect).walk())
+    except Exception:  # noqa: BLE001 - a column that cannot be followed through the CTE is not traced
+        return set()
+    return {pair for n in nodes if isinstance(n.source, exp.Table) for pair in _real(tree, n.source, n.name.split(".")[-1], dialect, schema, depth + 1)}
