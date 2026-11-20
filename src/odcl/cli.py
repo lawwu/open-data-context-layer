@@ -21,6 +21,10 @@ def flag(entry) -> str:
     return "  (changed since)" if entry.get("changed_since") else ""
 
 
+def _defined(defined: dict) -> str:
+    return f"{defined['file']} at commit {defined['commit']}" if defined.get("commit") else f"{defined['file']} (no git commit)"
+
+
 def lines(command: str, result) -> list[str]:
     """A person's view of a result. `--json` prints the result itself."""
     if command == "find":
@@ -43,7 +47,9 @@ def lines(command: str, result) -> list[str]:
                 out += [direction + ":"] + ([f"  {'  ' * (n['depth'] - 1)}{n['key']}" + flag(n) for n in result[direction]] or ["  nothing"])
         return out
     if command == "import" and "model" in result:
-        return [f"{result['model']} {result['version']}  {result['change']}  ({result['inputs']} input(s), artifact checked by {result['artifact_verified']})"]
+        checked = ("already recorded, so the artifact was not read again" if result["artifact_verified"] == "recorded"
+                   else f"artifact checked by {result['artifact_verified']}")
+        return [f"{result['model']} {result['version']}  {result['change']}  ({result['inputs']} input(s), {checked})"]
     if command == "explain" and "model" in result:
         produced, artifact, read = result["produced_by"], result["artifact"], result["read"]
         out = [f"{result['model']} / {result['version']}",
@@ -54,7 +60,7 @@ def lines(command: str, result) -> list[str]:
             out += [f"  {i['role']:<8} {i['field']} = {i['expression'] or '?'}" + ("" if i["lineage"] == "resolved" else f"  ({i['lineage']})"),
                     f"           built by {i['produced_by']['dataform_invocation']}" if i["produced_by"]["dataform_invocation"] else "           built by ?",
                     "           as " + (f"BigQuery job ({i['executed_as']['project']}, {i['executed_as']['location']}, {i['executed_as']['job_id']})"
-                                        if i["executed_as"] else "an unknown job") + f", from {i['defined_in']['file']} at {i['defined_in']['commit']}",
+                                        if i["executed_as"] else "an unknown job") + f", from {_defined(i['defined_in'])}",
                     f"           from {', '.join(i['derived_from']) or '?'}"]
         return out + [f"missing: {m}" for m in result["missing"]]
     if command == "import" and "entries" in result:
@@ -71,7 +77,7 @@ def lines(command: str, result) -> list[str]:
         out = [result["reference"], f"  snapshot of   {result['snapshot_of']}",
                f"  produced by   {produced['dataform_invocation']} / {produced['target']}  {produced['state']}",
                "  executed as   " + (f"BigQuery job ({job['project']}, {job['location']}, {job['job_id']})  {job['statement_type']}" if job else "unknown"),
-               f"  defined in    {defined['file']}" + (f" at commit {defined['commit']}" if defined["commit"] else " (no git commit)")]
+               f"  defined in    {_defined(defined)}"]
         for c in result["columns"]:
             out.append(f"  {c['field']} = {c['expression'] or '?'}" + (f"  from {', '.join(d['column'] for d in c['derived_from'])}" if c["derived_from"] else "")
                        + ("" if c["lineage"] == "resolved" else f"  ({c['lineage']})"))

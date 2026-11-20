@@ -18,6 +18,7 @@ from urllib.parse import quote
 from psycopg.types.json import Jsonb
 
 from .builds import reference_key
+from .gcp import refusal
 from .store import Catalog, CatalogError, require
 
 JOB = re.compile(r"^projects/([^/]+)/locations/([^/]+)/pipelineJobs/([^/]+)$")
@@ -36,7 +37,7 @@ class Client:
     def _get(self, url: str, **params):
         response = self.session.get(url, params=params or None, timeout=120)
         if not response.ok:
-            raise CatalogError("vertex", f"Google refused the request ({getattr(response, 'status_code', '?')}) for {url.split('?')[0]}")
+            raise CatalogError("vertex", f"Google refused the request for {url.split('?')[0]}: {refusal(response)}")
         return response
 
     def get(self, name: str) -> dict:

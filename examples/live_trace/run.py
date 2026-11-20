@@ -8,8 +8,7 @@ takes a uniquely named snapshot of the table it built. `vertex` trains a trivial
 one-step Vertex AI pipeline, which uploads the model and a training manifest. Each prints the `odcl` commands
 that import and explain what it made. The BigQuery work is a few kilobytes; the pipeline runs for a few minutes.
 """
-from __future__ import annotations
-
+# No `from __future__ import annotations`: kfp reads the component's parameter types and takes "str" for an artifact.
 import base64
 import json
 import os
@@ -78,7 +77,7 @@ def dataform() -> None:
     if invocation["state"] != "SUCCEEDED":
         sys.exit(f"The invocation {invocation['state']}")
 
-    build = invocation["name"].rsplit("/", 1)[1][:8]
+    build = invocation["name"].rsplit("/", 1)[1].split("-")[1][:8]  # ids are <seconds>-<uuid>; the uuid is what is unique
     snapshot = f"{PROJECT}.odcl_demo_frozen.shift_inputs_{build}"
     bq.query(f"CREATE SNAPSHOT TABLE `{snapshot}` CLONE `{PROJECT}.odcl_demo_features.shift_inputs`", job_id_prefix="odcl-live-handoff-").result()
     taken = bq.get_table(snapshot)._properties["snapshotDefinition"]["snapshotTime"]

@@ -167,6 +167,8 @@ def test_the_command_line_imports_a_build_and_explains_the_model(database, monke
     path.write_text(json.dumps(load("training_manifest.json")))
     db = ["--database-url", database]
     assert main([*db, "import", "--vertex-manifest", str(path)]) == 0 and "staffing-forecast v17  added" in capsys.readouterr().out
+    assert main([*db, "import", "--vertex-manifest", str(path)]) == 0
+    assert "v17  unchanged  (1 input(s), already recorded, so the artifact was not read again)" in capsys.readouterr().out
     assert main([*db, "--json", "explain", "model", "staffing-forecast", "--version", "v17"]) == 0
     trace = json.loads(capsys.readouterr().out)
     assert trace["inputs"][0]["derived_from"] == EXPECTED["inputs"][0]["derived_from"]
@@ -188,3 +190,18 @@ def test_the_real_client_reads_the_regional_endpoint_and_cloud_storage():
     assert session.get.call_args.args[0] == "https://storage.googleapis.com/storage/v1/b/bucket/o/dir%2Fmodel.bin"
     assert client.read("gs://bucket/dir/model.bin", "5") == b"abc"
     assert session.get.call_args.kwargs["params"] == {"alt": "media", "generation": "5"}
+
+
+def test_a_refusal_says_why_google_refused():
+    from unittest.mock import Mock
+    body = {"error": {"code": 403, "message": "The billing account for the owning project is disabled in state absent",
+                      "errors": [{"reason": "accountDisabled"}]}}
+    session = Mock(get=Mock(return_value=Mock(ok=False, status_code=403, json=Mock(return_value=body))))
+    with pytest.raises(CatalogError) as error:
+        vertex.Client(session, "us-central1").object("gs://bucket/model.bin")
+    assert "billing account for the owning project is disabled" in str(error.value)
+    assert "GOOGLE_CLOUD_QUOTA_PROJECT" in str(error.value)  # the quota project is the usual cause, and the fix is not obvious
+    session.get.return_value.json.side_effect = ValueError("not json")
+    with pytest.raises(CatalogError) as error:
+        vertex.Client(session, "us-central1").object("gs://bucket/model.bin")
+    assert "(403)" in str(error.value)

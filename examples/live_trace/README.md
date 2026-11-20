@@ -30,6 +30,12 @@ uv run --all-extras python examples/live_trace/run.py dataform
 uv run --all-extras --with "kfp>=2.7,<3" python examples/live_trace/run.py vertex PROJECT.odcl_demo_frozen.shift_inputs_BUILD@TIME v1
 ```
 
+**What a first run can trip on.**
+
+- A permission granted moments ago can take a few minutes to apply. If the build fails because Dataform's service agent "does not have permission to generate tokens", wait and run step 2 again.
+- `odcl` reads Google through your Application Default Credentials, and those bill each request to their quota project. If that project has no billing, Cloud Storage refuses with "The billing account for the owning project is disabled". Point the requests at the sandbox for the session with `export GOOGLE_CLOUD_QUOTA_PROJECT=$ODCL_LIVE_PROJECT`.
+- A build compiled from a Dataform workspace has no git commit. The trace says so under `missing`, because the definition's file cannot be pinned to a version. Connect the repository to git and compile from a branch to close that gap.
+
 **4. Clean up.**
 
 ```sh
