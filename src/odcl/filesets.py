@@ -40,7 +40,7 @@ def objects(client, root: str) -> list[dict]:
 
 def schema(client, found: list[dict]) -> tuple[list[tuple[str, str]], str]:
     """The fields every Parquet object shares, and "read"; or no fields and the reason they could not be read. Each
-    Parquet object's row count is set on it as `rows`."""
+    object whose Parquet footer was read is marked `parquet`, with its row count as `rows`."""
     schemas = {}
     for o in found:
         if o["size"] < 12:
@@ -54,6 +54,7 @@ def schema(client, found: list[dict]) -> tuple[list[tuple[str, str]], str]:
             tail = client.tail(o["uri"], o["generation"], needed)
         try:
             schemas[o["uri"]], o["rows"] = parquet.metadata(tail)
+            o["parquet"] = True
         except ValueError as e:
             return [], f"the Parquet footer of {o['uri']} cannot be read: {e}"
     if not schemas:
@@ -118,6 +119,11 @@ def record(catalog: Catalog, *, client, pipeline_run: str | None = None, task: s
             differs = sorted(set(kept.items()) ^ set(now.items()))
             require(not differs, "conflict", f"{reference} is already recorded with other objects ({differs[0][0] if differs else ''}); "
                                              "a file set is recorded once")
+            # a file set recorded before row counts and creation times were kept gets them now, from what was just read
+            with db.cursor() as cursor:
+                cursor.executemany("UPDATE dataset_version_objects SET num_rows = COALESCE(num_rows, %s), time_created = COALESCE(time_created, %s) "
+                                   "WHERE dataset_version_id = %s AND uri = %s",
+                                   [(o.get("rows"), o.get("created"), existing["id"], o["uri"]) for o in found if o.get("rows") is not None or o.get("created")])
             change = exports.store(catalog, existing["id"], binding) if binding else "unchanged"
             return {"reference": reference, "change": change, "objects": len(found), "fields": len(fields), "schema": said,
                     **({"exported_by": binding["jobs_named"]} if binding else {})}
@@ -190,8 +196,11 @@ def explain(catalog: Catalog, version: dict) -> dict:
                            "from before then, so the definition may differ")
         export = version["verification"].get("export") or {}
         if export and not export.get("own_output"):
-            missing.append(f"the files are not {named}'s own output: it wrote {export.get('exported_files')} file(s) and {export.get('files')} are "
-                           f"recorded; they were rewritten after the export, row count equal ({export.get('rows'):,})")
+            missing.append(f"the files are not {named}'s own output: it wrote {export.get('exported_files')} file(s) and {export.get('files')} Parquet "
+                           f"object(s) are recorded; they were rewritten after the export, row count equal ({export.get('rows'):,})")
+        if export.get("not_counted"):
+            missing.append(f"{len(export['not_counted'])} recorded object(s) are not Parquet and were not counted against {named}: "
+                           + ", ".join(u.rsplit("/", 1)[-1] for u in export["not_counted"]) + "; they are pinned, but nothing says what wrote them")
         for c in columns:
             if c["lineage"] == "not_claimed":
                 missing.append(f"{c['field']} is not output by the export job's SELECT, so its lineage is not claimed")
