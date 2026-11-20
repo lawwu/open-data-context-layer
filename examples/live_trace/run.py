@@ -2,10 +2,12 @@
 
     ODCL_LIVE_PROJECT=my-sandbox-project python examples/live_trace/run.py dataform
     ODCL_LIVE_PROJECT=my-sandbox-project uv run --with "kfp>=2.7,<3" python examples/live_trace/run.py vertex SNAPSHOT_REFERENCE VERSION
+    ODCL_LIVE_PROJECT=my-sandbox-project uv run --with "kfp>=2.7,<3" python examples/live_trace/run.py files SNAPSHOT_REFERENCE VERSION
 
 `dataform` writes 20 synthetic rows, runs the Dataform project in `dataform/` once as the test service account, and
 takes a uniquely named snapshot of the table it built. `vertex` trains a trivial model on that snapshot in a
-one-step Vertex AI pipeline, which uploads the model and a training manifest. Each prints the `odcl` commands
+one-step Vertex AI pipeline, which uploads the model and a training manifest. `files` does the same through files: a
+loader task exports the snapshot as Parquet and a second task trains on those files. Each prints the `odcl` commands
 that import and explain what it made. The BigQuery work is a few kilobytes; the pipeline runs for a few minutes.
 """
 # No `from __future__ import annotations`: kfp reads the component's parameter types and takes "str" for an artifact.
@@ -92,7 +94,7 @@ odcl explain dataset {snapshot}""")
 
 
 def vertex(reference: str, version: str) -> None:
-    from kfp import compiler, dsl
+    from kfp import dsl
 
     @dsl.component(base_image="python:3.12-slim", packages_to_install=["google-cloud-bigquery>=3.25", "google-cloud-storage>=2.18"])
     def train(dataset_version: str, model: str, version: str, prediction_cutoff: str, model_uri: str, manifest_uri: str,
@@ -130,17 +132,31 @@ def vertex(reference: str, version: str) -> None:
         train(dataset_version=dataset_version, model=model, version=version, prediction_cutoff=prediction_cutoff, model_uri=model_uri,
               manifest_uri=manifest_uri, pipeline_run=dsl.PIPELINE_JOB_RESOURCE_NAME_PLACEHOLDER, task=dsl.PIPELINE_TASK_NAME_PLACEHOLDER)
 
+    model_uri, manifest_uri = locations(version)
+    submit(pipeline, version, {"dataset_version": reference, "model": "staffing-forecast", "version": version,
+                               "prediction_cutoff": "2026-09-01T00:00:00Z", "model_uri": model_uri, "manifest_uri": manifest_uri})
+    print(f"""
+odcl import --vertex-manifest {manifest_uri}
+odcl explain model staffing-forecast --version {version}""")
+
+
+STAMP = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+
+
+def locations(version: str) -> tuple[str, str]:
+    model_uri = f"gs://{BUCKET}/models/staffing-forecast/{version}-{STAMP}/model.bin"
+    return model_uri, model_uri.rsplit("/", 1)[0] + "/manifest.json"
+
+
+def submit(pipeline, version: str, parameters: dict) -> dict:
+    """Compile a pipeline, run it as the test service account and wait for it to finish."""
+    from kfp import compiler
     spec = Path("/tmp/odcl-live-pipeline.json")
     compiler.Compiler().compile(pipeline, str(spec))
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    model_uri = f"gs://{BUCKET}/models/staffing-forecast/{version}-{stamp}/model.bin"
-    manifest_uri = model_uri.rsplit("/", 1)[0] + "/manifest.json"
     job = call("POST", f"https://{REGION}-aiplatform.googleapis.com/v1/projects/{PROJECT}/locations/{REGION}/pipelineJobs",
-               params={"pipelineJobId": f"odcl-live-{version}-{stamp}"}, json={
+               params={"pipelineJobId": f"odcl-live-{version}-{STAMP}"}, json={
                    "displayName": f"odcl live trace {version}", "pipelineSpec": json.loads(spec.read_text()), "serviceAccount": VERTEX_ACCOUNT,
-                   "runtimeConfig": {"gcsOutputDirectory": f"gs://{BUCKET}/pipeline-root", "parameterValues": {
-                       "dataset_version": reference, "model": "staffing-forecast", "version": version, "prediction_cutoff": "2026-09-01T00:00:00Z",
-                       "model_uri": model_uri, "manifest_uri": manifest_uri}}})
+                   "runtimeConfig": {"gcsOutputDirectory": f"gs://{BUCKET}/pipeline-root", "parameterValues": parameters}})
     print("pipeline job", job["name"], flush=True)
     while job["state"] not in ("PIPELINE_STATE_SUCCEEDED", "PIPELINE_STATE_FAILED", "PIPELINE_STATE_CANCELLED"):
         time.sleep(20)
@@ -148,7 +164,71 @@ def vertex(reference: str, version: str) -> None:
         print(" ", job["state"], flush=True)
     if job["state"] != "PIPELINE_STATE_SUCCEEDED":
         sys.exit(json.dumps(job.get("error"), indent=2))
+    return job
+
+
+def files(snapshot: str, version: str) -> None:
+    """A two-task pipeline that trains on files: `load-data` exports the snapshot as Parquet parts to its
+    output_train_dataset artifact, as a data-loader task does, and `train-on-files` reads those files."""
+    from kfp import dsl
+
+    @dsl.component(base_image="python:3.12-slim", packages_to_install=["google-cloud-bigquery>=3.25", "pyarrow>=18"])
+    def load_data(snapshot: str, output_train_dataset: dsl.Output[dsl.Dataset]):
+        import os
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from google.cloud import bigquery
+
+        table = snapshot.split("@", 1)[0]
+        rows = list(bigquery.Client(project=table.split(".")[0]).list_rows(table))
+        os.makedirs(output_train_dataset.path, exist_ok=True)
+        half = len(rows) // 2
+        for i, part in enumerate((rows[:half], rows[half:])):
+            columns = {name: [row[name] for row in part] for name in ("employee_id", "pay_period_start", "hours_at_cutoff")}
+            pq.write_table(pa.table(columns), os.path.join(output_train_dataset.path, f"part-{i}.parquet"))
+        open(os.path.join(output_train_dataset.path, "_SUCCESS"), "w").close()
+
+    @dsl.component(base_image="python:3.12-slim", packages_to_install=["google-cloud-storage>=2.18", "pyarrow>=18"])
+    def train_on_files(train: dsl.Input[dsl.Dataset], model: str, version: str, model_uri: str, manifest_uri: str, pipeline_run: str, task: str) -> str:
+        """Fit a trivial model on the exported files and write a manifest naming them as a file set."""
+        import hashlib
+        import json
+        import pickle
+
+        import pyarrow.parquet as pq
+        from google.cloud import storage
+
+        matrix = pq.read_table(train.path)  # every part; files starting with _ are not data
+        features = ["hours_at_cutoff"]
+        values = matrix.column("hours_at_cutoff").to_pylist()
+        data = pickle.dumps({"mean": [sum(values) / len(values)], "rows": len(values)})
+
+        def blob(uri):
+            bucket, path = uri.removeprefix("gs://").split("/", 1)
+            return storage.Client().bucket(bucket).blob(path)
+
+        artifact = blob(model_uri)
+        artifact.upload_from_string(data, if_generation_match=0)
+        artifact.reload()
+        manifest = {"schema_version": 1, "model": model, "version": version, "pipeline_run": pipeline_run, "task": task,
+                    "training_commit": None, "prediction_cutoff": None, "dataset_version": f"{train.uri.rstrip('/')}@{pipeline_run.rsplit('/', 1)[1]}",
+                    "inputs": [{"field": f, "role": "feature", "position": i} for i, f in enumerate(features)],
+                    "artifact": {"uri": model_uri, "generation": str(artifact.generation), "sha256": hashlib.sha256(data).hexdigest()}}
+        blob(manifest_uri).upload_from_string(json.dumps(manifest, indent=2), content_type="application/json", if_generation_match=0)
+        return manifest_uri
+
+    @dsl.pipeline(name="odcl-live-files")
+    def pipeline(snapshot: str, model: str, version: str, model_uri: str, manifest_uri: str):
+        loaded = load_data(snapshot=snapshot)
+        train_on_files(train=loaded.outputs["output_train_dataset"], model=model, version=version, model_uri=model_uri, manifest_uri=manifest_uri,
+                       pipeline_run=dsl.PIPELINE_JOB_RESOURCE_NAME_PLACEHOLDER, task=dsl.PIPELINE_TASK_NAME_PLACEHOLDER)
+
+    model_uri, manifest_uri = locations(version)
+    job = submit(pipeline, version, {"snapshot": snapshot, "model": "staffing-forecast", "version": version, "model_uri": model_uri,
+                                     "manifest_uri": manifest_uri})
     print(f"""
+odcl record dataset-files --pipeline-run {job['name']} --task load-data --output output_train_dataset --from-table {PROJECT}.odcl_demo_features.shift_inputs
 odcl import --vertex-manifest {manifest_uri}
 odcl explain model staffing-forecast --version {version}""")
 
@@ -159,5 +239,7 @@ if __name__ == "__main__":
         dataform()
     elif step == "vertex" and len(sys.argv) == 4:
         vertex(sys.argv[2], sys.argv[3])
+    elif step == "files" and len(sys.argv) == 4:
+        files(sys.argv[2], sys.argv[3])
     else:
         sys.exit(__doc__)

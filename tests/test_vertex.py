@@ -368,10 +368,12 @@ def test_a_file_replaced_or_deleted_since_it_was_recorded_is_named_and_nothing_i
     record_loader_output(catalog)
     replaced = exported() | {f"{LOADER_OUT}/part-1.parquet": (exported()[f"{LOADER_OUT}/part-1.parquet"][0], "999")}
     deleted = {k: v for k, v in exported().items() if not k.endswith("part-2.parquet")}
-    for objects, named in ((replaced, "part-1.parquet"), (deleted, "part-2.parquet")):
+    both = {k: v for k, v in replaced.items() if not k.endswith("part-2.parquet")}
+    for objects, said in ((replaced, ["part-1.parquet was replaced"]), (deleted, ["part-2.parquet was deleted"]),
+                          (both, ["part-1.parquet was replaced", "part-2.parquet was deleted"])):  # every change is named, not just the first
         with pytest.raises(CatalogError) as error:
             vertex.import_build(catalog, file_manifest(), client=files_client(objects))
-        assert error.value.code == "dataset_files_changed" and named in str(error.value)
+        assert error.value.code == "dataset_files_changed" and all(s in str(error.value) for s in said)
     assert catalog.db.execute("SELECT count(*) AS n FROM model_builds").fetchone()["n"] == 0
 
 

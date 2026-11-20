@@ -157,12 +157,15 @@ def import_build(catalog: Catalog, manifest: dict, *, client) -> dict:
     require(data, "missing_dependency", f"No dataset version {reference} is recorded. Record the build's handoff (odcl handoff) or the files it read "
                                         "(odcl record dataset-files), then import again")
     if data["kind"] == "gcs_files":  # the files must still be the bytes recorded, or the model cannot be shown to have read them
+        changed = []
         for o in db.execute("SELECT uri, generation FROM dataset_version_objects WHERE dataset_version_id = %s ORDER BY uri", (data["id"],)).fetchall():
             now = client.object(o["uri"], missing_ok=True)
-            what = "deleted" if now is None else f"replaced (it is now generation {now.get('generation')})"
-            require(now is not None and str(now.get("generation")) == o["generation"], "dataset_files_changed",
-                    f"{o['uri']} was {what} after {reference} was recorded at generation {o['generation']}; "
-                    "the files the model read can no longer be shown to be these")
+            if now is None:
+                changed.append(f"{o['uri']} was deleted")
+            elif str(now.get("generation")) != o["generation"]:
+                changed.append(f"{o['uri']} was replaced (generation {o['generation']} is now {now.get('generation')})")
+        require(not changed, "dataset_files_changed", f"Since {reference} was recorded, " + "; ".join(changed)
+                + ". The files the model read can no longer be shown to be these")
     fields = {r["field_path"] for r in db.execute("SELECT field_path FROM version_columns WHERE dataset_version_id = %s", (data["id"],))}
     absent = [i["field"] for i in manifest["inputs"] if i["field"].lower() not in fields]
     reason = data["verification"].get("schema", "read")
