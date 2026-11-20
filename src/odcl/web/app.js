@@ -74,7 +74,7 @@ const gcp = {
     const parts = String(name || "").replace(/^table:/, "").split(".");
     if (parts.length < 3) return null;
     const t = parts.pop(), d = parts.pop(), p = parts.join(".");
-    return `${CONSOLE}/bigquery?project=${enc(p)}&p=${enc(p)}&d=${enc(d)}&t=${enc(t)}&page=table`;
+    return `${CONSOLE}/bigquery?project=${enc(p)}&ws=${enc(`!1m5!1m4!4m3!1s${p}!2s${d}!3s${t}`)}`;  // the console's own form; it still accepts p, d and t
   },
   job(project, location, id) {
     return project && id ? `${CONSOLE}/bigquery?project=${enc(project)}&j=${enc(`bq:${location || "US"}:${id}`)}&page=queryresults` : null;
