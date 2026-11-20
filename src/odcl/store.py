@@ -27,7 +27,7 @@ import os
 import re
 import uuid
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from importlib import resources
 
 import psycopg
@@ -36,7 +36,7 @@ from psycopg.types.json import Jsonb
 
 KINDS = ("table", "column", "project")
 PATH = re.compile(r"^[a-z0-9_][a-z0-9_.\-$]{0,299}$")
-COLUMN = re.compile(r"^[a-z0-9_][a-z0-9_\-$]{0,149}$")
+COLUMN = re.compile(r"^[a-z0-9_][a-z0-9_.\-$]{0,149}$")  # dots separate the levels of a nested field
 NAME = re.compile(r"^[a-z0-9_][a-z0-9_.\-]{0,99}$")
 TEXT = {"table": {"system": 100, "layer": 50, "owner": 200, "type": 50},
         "column": {"dtype": 200, "definition": 4000, "owner": 200},
@@ -80,6 +80,10 @@ def migrate(dsn: str | None = None) -> list[str]:
                 db.execute("INSERT INTO schema_migrations (version, name) VALUES (%s, %s)", (version, name))
                 applied.append(name)
     return applied
+
+
+def now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def stamp(at: datetime) -> str:
@@ -184,7 +188,7 @@ class Catalog:
             elif kind == "column":
                 table = self.resolve(str(p.get("table") or ""), ("table",))
                 name = str(p.get("name") or "").lower()
-                require(COLUMN.match(name), "name", "A column name is letters, digits, _ - or $")
+                require(COLUMN.match(name), "name", "A column name is letters, digits, _ - or $, with dots between the levels of a nested field")
                 key, title = f"column:{table[6:]}.{name}", f"{table[6:]}.{name}"
                 extra = {"table": table, "name": name}
             else:
@@ -412,6 +416,64 @@ class Catalog:
                         reached.append({k: v for k, v in node.items() if k not in ("depth", "via", "changed_since")})
             out["built_from"] = sorted(reached, key=lambda n: n["key"])
         return out
+
+    # ---- query history ---------------------------------------------------------------------------------------
+    @staticmethod
+    def _job(row: dict) -> dict:
+        return {"project": row["execution_project"], "location": row["location"], "job_id": row["job_id"], "parent_job_id": row["parent_job_id"],
+                "created": stamp(row["created_at"]), "ended": stamp(row["ended_at"]) if row["ended_at"] else None, "state": row["state"],
+                "statement_type": row["statement_type"], "error_reason": row["error_reason"], "cache_hit": row["cache_hit"],
+                "processed_bytes": row["processed_bytes"], "billed_bytes": row["billed_bytes"], "slot_ms": row["slot_ms"],
+                "pattern_id": row["pattern_id"], "gaps": row["gaps"]}
+
+    def table_history(self, name: str, since: datetime | timedelta = timedelta(days=7), patterns: bool = False, limit: int = 100) -> dict:
+        """The query jobs that reported reading or writing a table since a time, newest first, from the job
+        history already synced. `name` is the table's key or its BigQuery path; it need not be registered.
+
+        A job is where and when a query ran. It shows the table was used, not which of its fields mattered.
+        With `patterns`, the jobs are also grouped by query shape, most run first."""
+        require(isinstance(name, str) and name.strip(), "key", "Name a table")
+        require(isinstance(limit, int) and 1 <= limit <= 1000, "limit", "limit is between 1 and 1000")
+        table = name.strip().removeprefix("table:")
+        since = now() - since if isinstance(since, timedelta) else since
+        require(isinstance(since, datetime) and since.tzinfo is not None, "since", "since is a span of time or a moment with a time zone")
+        rows = self.db.execute("""
+            SELECT j.*, array_agg(DISTINCT t.role ORDER BY t.role) AS roles
+            FROM query_tables t JOIN query_jobs j USING (execution_project, location, job_id)
+            WHERE lower(t.table_key) = lower(%s) AND j.created_at >= %s
+            GROUP BY j.execution_project, j.location, j.job_id ORDER BY j.created_at DESC, j.job_id""", (table, since)).fetchall()
+        # a script and its statements both carry the bytes: count the statements where both matched
+        parents = {(r["execution_project"], r["parent_job_id"]) for r in rows if r["parent_job_id"]}
+        counted = [r for r in rows if (r["execution_project"], r["job_id"]) not in parents]
+        out = {"table": table, "since": stamp(since), "jobs": [{**self._job(r), "roles": r["roles"]} for r in rows[:limit]],
+               "totals": {"jobs": len(rows), "billed_bytes": sum(r["billed_bytes"] or 0 for r in counted), "slot_ms": sum(r["slot_ms"] or 0 for r in counted)},
+               "more": len(rows) > limit,
+               "synced": [{"project": r["execution_project"], "until": stamp(r["until"])} for r in self.db.execute(
+                   "SELECT execution_project, max(completed_until) AS until FROM sync_cursors WHERE source = 'bigquery.jobs' "
+                   "GROUP BY execution_project ORDER BY execution_project")]}
+        if patterns:
+            groups: dict[int, dict] = {}
+            for r in rows:  # newest first, so the first job seen for a shape is its latest run
+                if r["pattern_id"] is not None:
+                    group = groups.setdefault(r["pattern_id"], {"pattern_id": r["pattern_id"], "executions": 0, "last_run": stamp(r["created_at"]),
+                                                                "example_job": {"project": r["execution_project"], "location": r["location"], "job_id": r["job_id"]}})
+                    group["executions"] += 1
+            for r in self.db.execute("SELECT id, template FROM query_patterns WHERE id = ANY(%s)", (list(groups),)):
+                groups[r["id"]]["template"] = r["template"]
+            out["patterns"] = sorted(groups.values(), key=lambda g: (-g["executions"], g["pattern_id"]))
+        return out
+
+    def query_jobs(self, project: str, since: datetime | None = None, limit: int = 1000) -> list[dict]:
+        """Every job synced for an execution project, newest first, with the tables each reported reading and writing."""
+        rows = self.db.execute("""
+            SELECT j.*,
+              ARRAY(SELECT t.table_key FROM query_tables t WHERE (t.execution_project, t.location, t.job_id) = (j.execution_project, j.location, j.job_id)
+                    AND t.role = 'read' ORDER BY t.table_key) AS reads,
+              ARRAY(SELECT t.table_key FROM query_tables t WHERE (t.execution_project, t.location, t.job_id) = (j.execution_project, j.location, j.job_id)
+                    AND t.role = 'write' ORDER BY t.table_key) AS writes
+            FROM query_jobs j WHERE j.execution_project = %s AND (%s::timestamptz IS NULL OR j.created_at >= %s)
+            ORDER BY j.created_at DESC, j.job_id LIMIT %s""", (project, since, since, limit)).fetchall()
+        return [{**self._job(r), "reads": r["reads"], "writes": r["writes"]} for r in rows]
 
     def overview(self) -> dict:
         counts = {kind: 0 for kind in KINDS}

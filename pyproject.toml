@@ -8,6 +8,11 @@ dependencies = ["psycopg[binary]>=3.2"]
 
 [project.optional-dependencies]
 dbt = ["sqlglot>=25"]
+# BigQuery reads come from Sounding, which needs Python 3.14. Pinned to a commit until Sounding releases sounding.source.
+bigquery = [
+  "sounding @ git+https://github.com/lawwu/sounding@901dd60 ; python_version >= '3.14'",
+  "sqlglot>=25",
+]
 mcp = ["mcp>=2.0"]
 
 [project.scripts]
@@ -20,6 +25,9 @@ dev = ["pytest>=8", "ruff>=0.6"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/odcl", "src/fathom_data"]

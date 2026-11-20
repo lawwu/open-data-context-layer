@@ -3,9 +3,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+from datetime import timedelta
 
-from .store import Catalog, CatalogError, migrate
+from .store import Catalog, CatalogError, migrate, require
+
+
+def span(value: str) -> timedelta:
+    """7d or 12h as a length of time."""
+    found = re.fullmatch(r"(\d{1,4})([dh])", value or "")
+    require(found, "since", f"{value!r} is not a span of time: write days or hours, like 7d or 12h")
+    return timedelta(**{"days" if found.group(2) == "d" else "hours": int(found.group(1))})
 
 
 def flag(entry) -> str:
@@ -35,6 +44,22 @@ def lines(command: str, result) -> list[str]:
         return out
     if command == "import":
         return [f"{result['added']} added, {result['changed']} changed, {result['unchanged']} unchanged"]
+    if command == "sync":
+        return [f"{result['jobs']} jobs read, {result['added']} new, from {result['since']} to {result['until']}"
+                + (f" ({result['excluded']} monitoring jobs left out)" if result["excluded"] else "")
+                + ("" if result["finished"] else f"\nNot recorded as finished: Google could not reach {', '.join(result['unreachable'])}")]
+    if command == "history":
+        totals = result["totals"]
+        out = [f"{result['table']}: {totals['jobs']} job(s) since {result['since']}, {totals['billed_bytes']} bytes billed"]
+        out += [f"  {j['created']}  {'+'.join(j['roles']):<10}  {j['statement_type'] or '?':<24}  {j['project']}/{j['location']}/{j['job_id']}"
+                + (f"  failed: {j['error_reason']}" if j["error_reason"] else "") + ("" if j["state"] == "DONE" else f"  {j['state']}") for j in result["jobs"]]
+        if result["more"]:
+            out.append(f"  ... and {totals['jobs'] - len(result['jobs'])} more")
+        for p in result.get("patterns", []):
+            out += [f"run {p['executions']} time(s), last {p['last_run']}, e.g. {p['example_job']['job_id']}:", f"  {p['template']}"]
+        if not result["synced"]:
+            out.append("No job history has been synced yet: run `odcl sync bigquery-jobs --project PROJECT`")
+        return out
     if command == "migrate":
         return [f"applied {name}" for name in result["applied"]] or ["The database is up to date."]
     if command == "import-sqlite":
@@ -49,8 +74,25 @@ def run(catalog: Catalog, args):
         from .legacy import import_sqlite
         return import_sqlite(catalog, args.path)
     if args.command == "import":
+        require(bool(args.dbt) != bool(args.bigquery), "import", "Import from one place: --dbt PATH or --bigquery TABLE...")
+        if args.bigquery:
+            from . import bigquery
+            client = bigquery.client(args.project)
+            try:
+                return bigquery.import_tables(catalog, args.bigquery, client=client)
+            finally:
+                client.close()
         from .dbt import dbt_entries
         return catalog.apply(dbt_entries(args.dbt, args.select))
+    if args.command == "sync":
+        from . import bigquery
+        client = bigquery.client(args.project)
+        try:
+            return bigquery.sync_jobs(catalog, args.project, client=client, backfill=span(args.backfill), sql=args.sql)
+        finally:
+            client.close()
+    if args.command == "history":
+        return catalog.table_history(args.key, span(args.since), args.patterns, args.limit)
     if args.command == "add":
         fields = {k: v for k, v in vars(args).items() if k in ("path", "table", "name", "description", "system", "layer", "owner", "type", "dtype",
                                                                  "definition", "repository", "status", "derived_from", "tags") and v not in (None, [])}
@@ -83,8 +125,10 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("import-sqlite", help="bring a Fathom SQLite catalog into an empty database, once")
     s.add_argument("path", help="the old SQLite file, e.g. ~/.catalog/catalog.db; it is only read")
 
-    s = sub.add_parser("import", help="read tables, columns and lineage from a dbt project")
-    s.add_argument("--dbt", required=True, metavar="PATH", help="a dbt target folder or its manifest.json")
+    s = sub.add_parser("import", help="read tables and columns from a dbt project or from BigQuery")
+    s.add_argument("--dbt", metavar="PATH", help="a dbt target folder or its manifest.json")
+    s.add_argument("--bigquery", nargs="+", metavar="TABLE", help="BigQuery tables to read, as project.dataset.table")
+    s.add_argument("--project", help="with --bigquery: the project the API calls are made from (default: your credentials' project)")
     s.add_argument("--select", nargs="+", metavar="MODEL", help="only these models and what they are built from")
 
     s = sub.add_parser("add", help="register a table, a column or a project by hand")
@@ -108,6 +152,22 @@ def parser() -> argparse.ArgumentParser:
         k.add_argument("--tags", nargs="+", default=[])
     for k in (t, c):
         k.add_argument("--derived-from", nargs="+", default=[], metavar="KEY", help="what it is built from")
+
+    s = sub.add_parser("sync", help="read new activity from a source into the catalog")
+    kinds = s.add_subparsers(dest="what", required=True)
+    b = kinds.add_parser("bigquery-jobs", help="the query jobs a BigQuery project ran since the last sync")
+    b.add_argument("--project", required=True, help="the project the jobs ran in, which may differ from where the tables live")
+    b.add_argument("--backfill", default="7d", metavar="SPAN", help="how far back the first sync reads (default: 7d)")
+    b.add_argument("--sql", choices=["templates", "none"], default="templates",
+                   help="templates keeps each query's shape without its literals; none does not read SQL at all")
+
+    s = sub.add_parser("history", help="the query jobs that read or wrote something")
+    kinds = s.add_subparsers(dest="what", required=True)
+    h = kinds.add_parser("table")
+    h.add_argument("key", help="a table key or its BigQuery path")
+    h.add_argument("--since", default="7d", metavar="SPAN", help="how far back to look, like 7d or 12h (default: 7d)")
+    h.add_argument("--patterns", action="store_true", help="also group the jobs by query shape")
+    h.add_argument("--limit", type=int, default=100)
 
     s = sub.add_parser("find", help="search tables, columns and projects")
     s.add_argument("words", nargs="*")
