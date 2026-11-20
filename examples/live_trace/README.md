@@ -36,6 +36,14 @@ uv run --all-extras --with "kfp>=2.7,<3" python examples/live_trace/run.py verte
 - `odcl` reads Google through your Application Default Credentials, and those bill each request to their quota project. If that project has no billing, Cloud Storage refuses with "The billing account for the owning project is disabled". Point the requests at the sandbox for the session with `export GOOGLE_CLOUD_QUOTA_PROJECT=$ODCL_LIVE_PROJECT`.
 - A build compiled from a Dataform workspace has no git commit. The trace says so under `missing`, because the definition's file cannot be pinned to a version. Connect the repository to git and compile from a branch to close that gap.
 
+**3b. Train on files instead.** `run.py files` runs a two-task pipeline. `load-data` exports the same snapshot as two Parquet parts and a `_SUCCESS` marker to its `output_train_dataset` artifact. `train-on-files` trains on those files and writes a manifest whose `dataset_version` names them as a file set. The command prints the commands that record the files, import the model and explain it:
+
+```sh
+uv run --all-extras --with "kfp>=2.7,<3" python examples/live_trace/run.py files PROJECT.odcl_demo_frozen.shift_inputs_BUILD@TIME v2
+```
+
+To check that odcl refuses changed files, record some files by URI with `odcl record dataset-files --uri gs://…`, then import a manifest that names them. Overwrite or delete one object and import again: each change is named and nothing is written.
+
 **4. Clean up.**
 
 ```sh
