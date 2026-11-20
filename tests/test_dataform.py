@@ -176,6 +176,29 @@ def test_a_snapshot_must_copy_the_target_after_the_build_and_before_another_writ
     assert catalog.db.execute("SELECT count(*) AS n FROM dataset_versions").fetchone()["n"] == 0
 
 
+def test_the_statements_of_the_build_s_own_script_are_not_another_write(catalog):
+    # Dataform runs an action as a BigQuery script: the action's job is the script, and the CREATE TABLE that writes
+    # the target is a child job of it, as on a live run.
+    statement = copy.deepcopy(load("bigquery_jobs.json")[0])
+    statement["jobReference"]["jobId"] = "script_job_9f_3"
+    statement["statistics"] |= {"creationTime": "1788314390000", "startTime": "1788314390000", "endTime": "1788314391000", "parentJobId": "job-042"}
+    sync_history(catalog, extra=[statement])
+    dataform.import_invocation(catalog, INVOCATION, client=FakeDataform())
+    assert builds.record_handoff(catalog, INVOCATION, TARGET, snapshot_facts())["change"] == "added"
+    assert builds.explain_dataset(catalog, SNAPSHOT)["checks"]["written_again_before_snapshot"] is False
+
+
+def test_a_build_compiled_from_a_workspace_says_it_has_no_commit(catalog):
+    compilation = load("dataform_compilation_result.json")
+    del compilation["compilationResult"]["gitCommitish"], compilation["compilationResult"]["resolvedGitCommitSha"]
+    compilation["compilationResult"]["workspace"] = "projects/workforce-demo/locations/us-central1/repositories/staffing/workspaces/ana"
+    dataform.import_invocation(catalog, INVOCATION, client=FakeDataform(compilation=compilation))
+    builds.record_handoff(catalog, INVOCATION, TARGET, snapshot_facts())
+    trace = builds.explain_dataset(catalog, SNAPSHOT)
+    assert trace["defined_in"]["commit"] is None
+    assert any("no git commit" in m for m in trace["missing"])
+
+
 def test_sql_that_cannot_be_traced_gives_a_partial_trace(catalog):
     compilation = load("dataform_compilation_result.json")
     relation = compilation["compilationResultActions"][1]["relation"]

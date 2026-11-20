@@ -1,0 +1,11 @@
+config {
+  type: "table",
+  schema: "odcl_demo_features",
+  description: "Hours worked per employee and pay period, as known at the prediction cutoff",
+  columns: {
+    hours_at_cutoff: "Hours worked in the pay period, as known at the prediction cutoff"
+  }
+}
+
+SELECT employee_id, pay_period_start, worked_minutes_asof / 60 AS hours_at_cutoff
+FROM ${ref("shift_totals")}

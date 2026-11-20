@@ -1,0 +1,5 @@
+defaultProject: PROJECT
+defaultLocation: US
+defaultDataset: odcl_demo_features
+defaultAssertionDataset: odcl_demo_assertions
+dataformCoreVersion: 3.0.26

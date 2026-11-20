@@ -21,6 +21,10 @@ def flag(entry) -> str:
     return "  (changed since)" if entry.get("changed_since") else ""
 
 
+def _defined(defined: dict) -> str:
+    return f"{defined['file']} at commit {defined['commit']}" if defined.get("commit") else f"{defined['file']} (no git commit)"
+
+
 def lines(command: str, result) -> list[str]:
     """A person's view of a result. `--json` prints the result itself."""
     if command == "find":
@@ -42,6 +46,23 @@ def lines(command: str, result) -> list[str]:
             if direction in result:
                 out += [direction + ":"] + ([f"  {'  ' * (n['depth'] - 1)}{n['key']}" + flag(n) for n in result[direction]] or ["  nothing"])
         return out
+    if command == "import" and "model" in result:
+        checked = ("already recorded, so the artifact was not read again" if result["artifact_verified"] == "recorded"
+                   else f"artifact checked by {result['artifact_verified']}")
+        return [f"{result['model']} {result['version']}  {result['change']}  ({result['inputs']} input(s), {checked})"]
+    if command == "explain" and "model" in result:
+        produced, artifact, read = result["produced_by"], result["artifact"], result["read"]
+        out = [f"{result['model']} / {result['version']}",
+               f"  produced by   {produced['pipeline_run']} / task {produced['task']}",
+               f"  artifact      {artifact['uri']}#{artifact['generation']}  sha256 {artifact['sha256'][:12]}…",
+               f"  read          {read['dataset_version']}, snapshot of {read['snapshot_of']}"]
+        for i in result["inputs"]:
+            out += [f"  {i['role']:<8} {i['field']} = {i['expression'] or '?'}" + ("" if i["lineage"] == "resolved" else f"  ({i['lineage']})"),
+                    f"           built by {i['produced_by']['dataform_invocation']}" if i["produced_by"]["dataform_invocation"] else "           built by ?",
+                    "           as " + (f"BigQuery job ({i['executed_as']['project']}, {i['executed_as']['location']}, {i['executed_as']['job_id']})"
+                                        if i["executed_as"] else "an unknown job") + f", from {_defined(i['defined_in'])}",
+                    f"           from {', '.join(i['derived_from']) or '?'}"]
+        return out + [f"missing: {m}" for m in result["missing"]]
     if command == "import" and "entries" in result:
         counts = result["entries"]
         return ([f"{counts['added']} added, {counts['changed']} changed, {counts['unchanged']} unchanged from {result['compilation_result']}"]
@@ -56,7 +77,7 @@ def lines(command: str, result) -> list[str]:
         out = [result["reference"], f"  snapshot of   {result['snapshot_of']}",
                f"  produced by   {produced['dataform_invocation']} / {produced['target']}  {produced['state']}",
                "  executed as   " + (f"BigQuery job ({job['project']}, {job['location']}, {job['job_id']})  {job['statement_type']}" if job else "unknown"),
-               f"  defined in    {defined['file']} at commit {defined['commit']}"]
+               f"  defined in    {_defined(defined)}"]
         for c in result["columns"]:
             out.append(f"  {c['field']} = {c['expression'] or '?'}" + (f"  from {', '.join(d['column'] for d in c['derived_from'])}" if c["derived_from"] else "")
                        + ("" if c["lineage"] == "resolved" else f"  ({c['lineage']})"))
@@ -91,11 +112,18 @@ def run(catalog: Catalog, args):
         from .legacy import import_sqlite
         return import_sqlite(catalog, args.path)
     if args.command == "import":
-        require(sum(map(bool, (args.dbt, args.bigquery, args.dataform))) == 1, "import",
-                "Import from one place: --dbt PATH, --bigquery TABLE... or --dataform INVOCATION")
+        require(sum(map(bool, (args.dbt, args.bigquery, args.dataform, args.vertex_manifest))) == 1, "import",
+                "Import from one place: --dbt PATH, --bigquery TABLE..., --dataform INVOCATION or --vertex-manifest PATH")
         if args.dataform:
             from . import dataform
             return dataform.import_invocation(catalog, args.dataform, client=dataform.client())
+        if args.vertex_manifest:
+            from . import vertex
+            source = args.vertex_manifest
+            manifest = vertex.read_manifest(source, vertex.client("us-central1") if source.startswith("gs://") else None)
+            location = vertex.JOB.match(manifest.get("pipeline_run") or "")
+            require(location, "manifest", "The manifest's pipeline_run is not a Vertex AI pipeline job name")
+            return vertex.import_build(catalog, manifest, client=vertex.client(location.group(2)))
         if args.bigquery:
             from . import bigquery
             client = bigquery.client(args.project)
@@ -120,6 +148,8 @@ def run(catalog: Catalog, args):
         finally:
             client.close()
         return builds.record_handoff(catalog, args.invocation, args.target, facts)
+    if args.command == "explain" and args.what == "model":
+        return catalog.explain_model(args.name, args.version)
     if args.command == "explain":
         from . import builds
         return builds.explain_dataset(catalog, args.reference)
@@ -163,6 +193,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--bigquery", nargs="+", metavar="TABLE", help="BigQuery tables to read, as project.dataset.table")
     s.add_argument("--dataform", metavar="INVOCATION",
                    help="a Dataform workflow invocation, as projects/P/locations/L/repositories/R/workflowInvocations/I")
+    s.add_argument("--vertex-manifest", metavar="PATH", help="a training manifest, as a local file or gs:// object, written by a Vertex AI training task")
     s.add_argument("--project", help="with --bigquery: the project the API calls are made from (default: your credentials' project)")
 
     s = sub.add_parser("handoff", help="record that a successful build handed on a snapshot of its output")
@@ -175,6 +206,9 @@ def parser() -> argparse.ArgumentParser:
     kinds = s.add_subparsers(dest="what", required=True)
     e = kinds.add_parser("dataset", help="a dataset version: its build, job, definition and each field's inputs")
     e.add_argument("reference", help="project.dataset.snapshot, or project.dataset.snapshot@time")
+    m = kinds.add_parser("model", help="a model version: its training task, artifact, data and each input's lineage")
+    m.add_argument("name")
+    m.add_argument("--version", required=True)
 
     s = sub.add_parser("add", help="register a table, a column or a project by hand")
     kinds = s.add_subparsers(dest="kind", required=True)

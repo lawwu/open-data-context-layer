@@ -17,6 +17,12 @@ from .store import Catalog, require, stamp
 ACTION_STATES_THAT_WROTE = ("SUCCEEDED",)
 
 
+def reference_key(reference: str) -> str:
+    """A dataset version reference as stored: the table lower-cased, the time as written."""
+    table, at, time = reference.strip().partition("@")
+    return table.lower().removeprefix("table:") + at + time
+
+
 def _zulu(at: datetime) -> str:
     return at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -31,13 +37,18 @@ def _action(catalog: Catalog, invocation: str, target: str) -> dict:
 def later_writes(catalog: Catalog, table: str, after: datetime, before: datetime, project: str | None, producer_job: str | None) -> list[str] | None:
     """Jobs other than the producer's that wrote `table` successfully between the build starting and the snapshot.
 
-    An empty list means synced history for the producer's project reaches the snapshot and shows none. None means
-    no synced history reaches it, so another write cannot be ruled out. Writes run from projects that were never
-    synced are not seen."""
+    The producer's job is often a script (Dataform runs every action as one), and the statement that writes the
+    table is a child job of it; the producer's descendants count as the producer. An empty list means synced
+    history for the producer's project reaches the snapshot and shows none. None means no synced history reaches
+    it, so another write cannot be ruled out. Writes run from projects that were never synced are not seen."""
     rows = catalog.db.execute("""
+        WITH RECURSIVE own (job_id) AS (
+            SELECT %(producer)s::text WHERE %(producer)s::text IS NOT NULL
+            UNION SELECT c.job_id FROM query_jobs c JOIN own ON c.parent_job_id = own.job_id WHERE c.execution_project = %(project)s)
         SELECT DISTINCT j.execution_project || '/' || j.job_id AS job FROM query_tables t JOIN query_jobs j USING (execution_project, location, job_id)
-        WHERE lower(t.table_key) = lower(%s) AND t.role = 'write' AND j.created_at > %s AND j.created_at <= %s
-          AND j.job_id IS DISTINCT FROM %s ORDER BY 1""", (table, after, before, producer_job)).fetchall()
+        WHERE lower(t.table_key) = lower(%(table)s) AND t.role = 'write' AND j.created_at > %(after)s AND j.created_at <= %(before)s
+          AND NOT (j.execution_project IS NOT DISTINCT FROM %(project)s AND j.job_id IN (SELECT job_id FROM own)) ORDER BY 1""",
+        {"table": table, "after": after, "before": before, "project": project, "producer": producer_job}).fetchall()
     if rows:
         return [r["job"] for r in rows]
     covered = catalog.db.execute("SELECT 1 FROM sync_cursors WHERE source = 'bigquery.jobs' AND execution_project = %s AND completed_until >= %s",
@@ -89,7 +100,7 @@ def record_handoff(catalog: Catalog, invocation: str, target: str, snapshot: dic
 def _version(catalog: Catalog, reference: str) -> dict:
     reference = reference.strip()
     if "@" in reference:
-        row = catalog.db.execute("SELECT * FROM dataset_versions WHERE reference = %s", (reference.lower(),)).fetchone()
+        row = catalog.db.execute("SELECT * FROM dataset_versions WHERE reference = %s", (reference_key(reference),)).fetchone()
     else:
         row = catalog.db.execute("SELECT * FROM dataset_versions WHERE lower(snapshot_table) = lower(%s) ORDER BY snapshot_time DESC LIMIT 1",
                                  (reference.removeprefix("table:"),)).fetchone()
@@ -117,6 +128,9 @@ def explain_dataset(catalog: Catalog, reference: str) -> dict:
             missing.append(f"job {action['job_id']} is not in the synced query history of {action['job_project']}")
     else:
         missing.append("the action reported no BigQuery job")
+    if not evidence.get("commit"):
+        source = f"the workspace {evidence['workspace']}" if evidence.get("workspace") else "source that names no resolved commit"
+        missing.append(f"the definition was compiled from {source}, with no git commit, so its file cannot be pinned to a version")
     if version["table_revision"] is None:
         missing.append("the definition this build used is not pinned: a newer compilation of the repository was imported first")
 

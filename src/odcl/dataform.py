@@ -16,6 +16,7 @@ from datetime import datetime
 
 from . import lineage
 from .dbt import clean
+from .gcp import refusal
 from .store import Catalog, CatalogError, require
 
 API = "https://dataform.googleapis.com/v1"
@@ -33,8 +34,7 @@ class Client:
     def _get(self, url: str, params=None) -> dict:
         response = self.session.get(url, params=params, timeout=60)
         if not response.ok:
-            status = getattr(response, "status_code", "?")
-            raise CatalogError("dataform", f"Dataform refused the request ({status}). Check the name and that you may read the repository")
+            raise CatalogError("dataform", f"Dataform refused the request for {url}: {refusal(response)}. Check the name and that you may read the repository")
         return response.json()
 
     def get(self, name: str) -> dict:
@@ -241,6 +241,7 @@ def import_invocation(catalog: Catalog, name: str, *, client) -> dict:
                 "job_project": project if job else None, "job_location": location if job else None, "job_id": job,
                 "evidence": Jsonb({"target": target, "canonical_target": fqn(action.get("canonicalTarget")), "file": files.get(target),
                                    "commit": commit, "compilation_result": compilation_name, "repository": repository,
+                                   **({"workspace": compilation["workspace"]} if compilation.get("workspace") else {}),
                                    **({"columns": pinned["columns"]} if pinned else {})})})
             recorded.append({"target": target, "state": action.get("state"), "job_id": job})
     return {"invocation": name, "compilation_result": compilation_name, "commit": commit, "entries": counts,

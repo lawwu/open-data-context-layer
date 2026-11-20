@@ -4,7 +4,7 @@ A data context layer: what data exists, how it connects, and which projects use 
 
 The catalog holds descriptions. It does not store or serve the data itself. Everything it keeps lives in one PostgreSQL database.
 
-The project was called Fathom. The [implementation plan](docs/implementation-plan.md) describes where it is going: a first model trace from BigQuery through Dataform to a Vertex AI Pipelines run. The Postgres port is done; the Google importers are not built yet.
+The project was called Fathom. The [implementation plan](docs/implementation-plan.md) describes where it is going. Its first goal, a model trace from a Vertex AI Pipelines training run back through Dataform and BigQuery to the raw columns, is built and has been run against a real project ([`examples/live_trace/`](examples/live_trace/)).
 
 ## What it keeps
 
@@ -68,6 +68,8 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 | `odcl import --dataform INVOCATION` | Read what a Dataform run compiled and how each action ran |
 | `odcl handoff --invocation INVOCATION --target TABLE --snapshot SNAPSHOT` | Record that a build handed on a snapshot of its output |
 | `odcl explain dataset SNAPSHOT[@TIME]` | Which build, job, file and inputs a dataset version came from |
+| `odcl import --vertex-manifest PATH\|gs://...` | Check a training manifest against Vertex AI and Cloud Storage, and record the model version |
+| `odcl explain model NAME --version V` | Which run, artifact, dataset version and raw columns a model version came from |
 | `odcl overview` | Counts, and data that changed after a project used it |
 | `odcl migrate` | Create or update the catalog's tables |
 | `odcl import-sqlite PATH` | Bring an old Fathom SQLite file across, once |
@@ -167,7 +169,41 @@ workforce-demo.frozen.shift_inputs_b042@2026-09-02T02:00:00Z
   hours_at_cutoff = worked_minutes_asof / 60  from workforce-demo.raw.shift_totals.worked_minutes_asof
 ```
 
-Anything it could not establish is listed under `missing`: a job not yet in synced history, a field traced only in part, history that does not reach the snapshot time. This traces the definition of each field back to its raw columns; it does not keep the raw rows.
+Anything it could not establish is listed under `missing`: a job not yet in synced history, a field traced only in part, history that does not reach the snapshot time, a definition compiled from a workspace rather than a git commit. This traces the definition of each field back to its raw columns; it does not keep the raw rows.
+
+A Dataform action runs as a BigQuery script, and the statement that writes the table is a child job of it. The build's own statements count as the build, not as another write.
+
+## Model versions from Vertex AI Pipelines
+
+The training task writes a manifest after it uploads the model: which pipeline run and task it is, the dataset version it read, the fields of the training matrix in order with each one's role (`feature`, `label`, `cohort_filter`, `join_key`, `weight`), and the artifact's Cloud Storage URI, object generation and SHA-256. [`odcl.manifest`](src/odcl/manifest.py) writes one and has no dependencies, so training code can vendor that file. Take the fields from the matrix as fitted, not from configuration.
+
+```sh
+uv sync --extra vertex
+uv run odcl import --vertex-manifest gs://my-bucket/models/staffing-forecast/v17/manifest.json
+uv run odcl explain model staffing-forecast --version v17
+```
+
+The manifest is the trainer's claim, so the import checks it before writing anything, with free reads (`pipelineJobs.get` and Cloud Storage object reads):
+
+- The pipeline run has the named task and the task succeeded.
+- The artifact is still the object generation the manifest names, and its bytes hash to the manifest's SHA-256 (artifacts over 512 MB are checked by generation only).
+- The dataset version is recorded (by `odcl handoff`), and each field is a column of it. A missing one is named, and nothing is written until it is there.
+- Importing the same manifest again changes nothing. A different manifest for a version already recorded is refused: a model version is written once.
+
+`explain model` follows the pins all the way down:
+
+```text
+staffing-forecast / v17
+  produced by   projects/workforce-demo/locations/us-central1/pipelineJobs/train-042 / task train
+  artifact      gs://demo-models/staffing/v17/model.bin#1788318000000000  sha256 0402ca8883ee…
+  read          workforce-demo.frozen.shift_inputs_b042@2026-09-02T02:00:00Z, snapshot of workforce-demo.features.shift_inputs
+  feature  hours_at_cutoff = worked_minutes_asof / 60
+           built by projects/workforce-demo/.../workflowInvocations/build-042
+           as BigQuery job (workforce-demo, us-central1, job-042), from definitions/shift_inputs.sqlx at commit 91fa3c5be2d04a6c8f7e1b0d9a2c4e6f8a1b3c5d
+           from workforce-demo.raw.shift_totals.worked_minutes_asof
+```
+
+Redefining the feature and training a later version leaves this answer unchanged. `odcl` reads Google with your Application Default Credentials, which bill each request to their quota project. If that project has no billing, Google refuses with a billing error; set `GOOGLE_CLOUD_QUOTA_PROJECT` to one that does.
 
 ## For agents
 
@@ -188,7 +224,7 @@ with Catalog() as catalog:
     catalog.used_by("churn.bronze.accounts.plan")
 ```
 
-`Catalog` is the whole interface: `put`, `apply`, `use`, `find`, `get`, `lineage`, `used_by`, `uses`, `table_history`, `query_jobs`, `overview`. `apply` registers a batch in one transaction: all of it, or none. With `merge=True`, fields a payload leaves out keep what the entry already says. Builds are read and written through `odcl.dataform.import_invocation`, `odcl.builds.record_handoff` and `odcl.builds.explain_dataset`.
+`Catalog` is the whole interface: `put`, `apply`, `use`, `find`, `get`, `lineage`, `used_by`, `uses`, `table_history`, `query_jobs`, `overview`. `apply` registers a batch in one transaction: all of it, or none. With `merge=True`, fields a payload leaves out keep what the entry already says. Builds are read and written through `odcl.dataform.import_invocation`, `odcl.builds.record_handoff` and `odcl.builds.explain_dataset`; model versions through `odcl.vertex.import_build` and `Catalog.explain_model`.
 
 ## Developing
 
@@ -204,10 +240,10 @@ Without `ODCL_TEST_DATABASE_URL` the database tests are skipped locally and fail
 ## Not built yet
 
 - The machine-learning shape on top: training and serving features, labels, training datasets and model cards.
-- The Vertex AI Pipelines importer and the model trace (`odcl explain model`). `tests/fixtures/staffing_trace/` holds the example it must reproduce; the dataset half already does.
+- Discovering Vertex AI pipeline runs; a model version is imported from its manifest for now.
 - OpenLineage events as another source of runs and lineage.
 - Discovering Dataform invocations, and Dataform runs started from the CLI rather than the managed service.
 - A web page.
 - Sign-in and permissions. Today anyone who can reach the database can read and write the catalog.
 
-The distribution is `open-data-context-layer`, the Python package is `odcl`, and the command is `odcl`. The repository is still named `fathom`.
+The distribution is `open-data-context-layer`, the Python package is `odcl`, and the command is `odcl`. The repository is [lawwu/open-data-context-layer](https://github.com/lawwu/open-data-context-layer); it was `lawwu/fathom`, and GitHub redirects the old address.
