@@ -115,6 +115,13 @@ def test_jobs_that_tell_little_are_kept_with_what_is_missing(catalog):
     assert jobs["ctas"]["writes"] == [FEATURES] and jobs["ctas"]["reads"] == ["other-p.raw.shift_totals"] and jobs["ctas"]["gaps"] == []
 
 
+def test_a_table_read_as_of_a_time_or_by_partition_is_still_that_table(catalog):
+    reads = [FEATURES + "@1788314400000", FEATURES + "$20260901", FEATURES]
+    bq.sync_jobs(catalog, "jobs-p", client=client_for([[job("as-of", reads=reads, writes="data-p.features.daily$20260901")]]), until=UNTIL)
+    assert [(j["job_id"], j["reads"], j["writes"]) for j in catalog.query_jobs("jobs-p")] == [("as-of", [FEATURES], ["data-p.features.daily"])]
+    assert catalog.table_history(FEATURES, since=T0 - dt.timedelta(days=1))["totals"]["jobs"] == 1
+
+
 def test_an_interrupted_read_is_not_recorded_as_done_and_a_retry_completes_it(catalog):
     with pytest.raises(ConnectionError):
         bq.sync_jobs(catalog, "jobs-p", client=client_for(week(), fail_after=1), until=UNTIL)

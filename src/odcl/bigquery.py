@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -29,6 +30,7 @@ OVERLAP = timedelta(hours=6)  # the longest a query job may run, so one started 
 HISTORY = timedelta(days=180)  # how long BigQuery keeps jobs
 MONITORING_LABELS = ("sounding_action", "odcl_action")  # jobs a metadata collector ran are not use of the data
 MAX_SQL = 100_000
+DECORATOR = re.compile(r"[@$].*$")  # table@1788314400000 reads the table as of a time; table$20260901 names one partition
 
 
 def client(project: str | None = None):
@@ -129,10 +131,11 @@ def _store_job(db, record: dict, shape: str | None, capture: bool) -> bool:
     if kept is None:
         return False
     job = (record["project"], record["location"], record["job_id"])
-    tables = [(*job, table, "read", "jobs.list referencedTables") for table in record["referenced_tables"]]
+    # a time-travel or partition decorator is how the table was read, not another table
+    tables = [(*job, table, "read", "jobs.list referencedTables") for table in sorted({DECORATOR.sub("", t) for t in record["referenced_tables"]})]
     succeeded = record["state"] == "DONE" and not record["error_reason"]
     if succeeded and record["destination_table"] and not record["destination_temporary"]:
-        tables.append((*job, record["destination_table"], "write", "jobs.list destinationTable"))
+        tables.append((*job, DECORATOR.sub("", record["destination_table"]), "write", "jobs.list destinationTable"))
     db.execute("DELETE FROM query_tables WHERE execution_project = %s AND location = %s AND job_id = %s", job)
     with db.cursor() as cursor:
         cursor.executemany("INSERT INTO query_tables (execution_project, location, job_id, table_key, role, evidence) VALUES (%s, %s, %s, %s, %s, %s)", tables)
