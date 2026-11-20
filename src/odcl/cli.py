@@ -71,7 +71,7 @@ def lines(command: str, result) -> list[str]:
         out = [result["reference"], f"  snapshot of   {result['snapshot_of']}",
                f"  produced by   {produced['dataform_invocation']} / {produced['target']}  {produced['state']}",
                "  executed as   " + (f"BigQuery job ({job['project']}, {job['location']}, {job['job_id']})  {job['statement_type']}" if job else "unknown"),
-               f"  defined in    {defined['file']} at commit {defined['commit']}"]
+               f"  defined in    {defined['file']}" + (f" at commit {defined['commit']}" if defined["commit"] else " (no git commit)")]
         for c in result["columns"]:
             out.append(f"  {c['field']} = {c['expression'] or '?'}" + (f"  from {', '.join(d['column'] for d in c['derived_from'])}" if c["derived_from"] else "")
                        + ("" if c["lineage"] == "resolved" else f"  ({c['lineage']})"))

@@ -241,6 +241,7 @@ def import_invocation(catalog: Catalog, name: str, *, client) -> dict:
                 "job_project": project if job else None, "job_location": location if job else None, "job_id": job,
                 "evidence": Jsonb({"target": target, "canonical_target": fqn(action.get("canonicalTarget")), "file": files.get(target),
                                    "commit": commit, "compilation_result": compilation_name, "repository": repository,
+                                   **({"workspace": compilation["workspace"]} if compilation.get("workspace") else {}),
                                    **({"columns": pinned["columns"]} if pinned else {})})})
             recorded.append({"target": target, "state": action.get("state"), "job_id": job})
     return {"invocation": name, "compilation_result": compilation_name, "commit": commit, "entries": counts,
