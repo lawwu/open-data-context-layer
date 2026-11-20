@@ -35,6 +35,7 @@ def test_a_completed_run_registers_its_datasets_and_their_lineage(catalog):
     up = catalog.lineage("workforce-demo.features.weekly_hours", "up")["upstream"]
     assert [n["key"] for n in up] == ["table:workforce-demo.raw.shift_totals"]
     assert catalog.get("workforce-demo.raw.shift_totals.employee_id")["description"] == "Employee identifier"
+    assert hours["source"] == {"openlineage": {"namespace": "bigquery", "name": "workforce-demo.features.weekly_hours"}}
 
     [run] = catalog.runs(system="openlineage")
     assert run["job"] == "airflow-prod/staffing_daily.build_weekly_hours" and run["state"] == "COMPLETE"

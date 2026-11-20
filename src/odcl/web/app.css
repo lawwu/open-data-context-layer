@@ -50,17 +50,19 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-
 .search input { width: 100%; padding: 7px 12px; border-radius: 8px; border: 1px solid var(--axis); background: var(--page); color: var(--ink); font: inherit; }
 
 main { max-width: 1180px; margin: 0 auto; padding: 24px; outline: none; }
-h1 { font-size: 22px; margin: 0 0 4px; font-weight: 650; word-break: break-word; }
+h1 { font-size: 22px; margin: 0 0 4px; font-weight: 650; overflow-wrap: break-word; }
 h2 { font-size: 15px; margin: 28px 0 10px; font-weight: 650; }
 .sub { color: var(--ink-2); margin: 0 0 16px; }
 .muted { color: var(--muted); }
 .card { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 16px; }
 .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+.card.tile { color: var(--ink); }
+a.card.tile:hover { text-decoration: none; border-color: var(--axis); }
 .tile .value { font-size: 28px; font-weight: 650; }
 .tile .label { color: var(--ink-2); }
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
 .facts dt { color: var(--ink-2); }
-.facts dd { margin: 0; word-break: break-word; }
+.facts dd { margin: 0; overflow-wrap: break-word; }
 
 .kind { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.04em; }
 .kind::before { content: ""; width: 10px; height: 10px; border-radius: 3px; background: var(--swatch, var(--muted)); }
@@ -68,7 +70,7 @@ h2 { font-size: 15px; margin: 28px 0 10px; font-weight: 650; }
 .kind.column { --swatch: var(--column); }
 .kind.project { --swatch: var(--project); }
 
-.status { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; }
+.status { white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; }
 .status.warning { background: color-mix(in srgb, var(--warning) 22%, transparent); color: var(--ink); }
 .status.critical { background: color-mix(in srgb, var(--critical) 18%, transparent); color: var(--ink); }
 .status.good { color: var(--good); }
@@ -76,7 +78,10 @@ h2 { font-size: 15px; margin: 28px 0 10px; font-weight: 650; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
 th { font-weight: 600; color: var(--ink-2); font-size: 13px; }
-td { word-break: break-word; }
+td { overflow-wrap: break-word; }
+td a, td code { overflow-wrap: anywhere; }
+td:first-child a { overflow-wrap: break-word; }
+.nowrap { white-space: nowrap; }
 tbody tr:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
 
 .results li { list-style: none; padding: 10px 0; border-bottom: 1px solid var(--grid); }
@@ -105,15 +110,15 @@ tbody tr:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
 .trace > li::after { content: ""; position: absolute; left: 2px; top: 5px; width: 12px; height: 12px; border-radius: 50%; background: var(--surface);
                      border: 2px solid var(--ink-2); }
 .trace .step { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-2); }
-.trace .what { font-weight: 600; word-break: break-all; }
+.trace .what { font-weight: 600; overflow-wrap: anywhere; }
 .missing { border-left: 3px solid var(--warning); padding: 8px 12px; background: var(--surface); margin: 6px 0; }
 
 .controls { display: flex; gap: 8px; align-items: center; margin: 0 0 12px; }
 select { font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--axis); background: var(--surface); color: var(--ink); }
 .tooltip { position: fixed; z-index: 10; max-width: 360px; background: var(--surface); color: var(--ink); border: 1px solid var(--ring); border-radius: 8px;
            padding: 8px 10px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); font-size: 13px; pointer-events: none; }
-.tooltip .t { font-weight: 600; word-break: break-all; }
+.tooltip .t { font-weight: 600; overflow-wrap: anywhere; }
 .error { border-left: 3px solid var(--critical); padding: 10px 14px; background: var(--surface); }
-pre { white-space: pre-wrap; word-break: break-word; margin: 0; }
+pre { white-space: pre-wrap; overflow-wrap: break-word; margin: 0; }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 @media (max-width: 800px) { .two { grid-template-columns: 1fr; } .top { flex-wrap: wrap; } .search { flex-basis: 100%; } }

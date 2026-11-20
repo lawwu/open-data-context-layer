@@ -47,8 +47,14 @@ const enc = encodeURIComponent;
 const entryHref = (key) => `#/entry/${enc(key)}`;
 const short = (key) => String(key).replace(/^(table|column|project):/, "");
 const kindOf = (key) => String(key).split(":", 1)[0];
-const when = (iso) => (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "—");
-const plural = (n, word) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+function when(iso) {
+  if (!iso) return "—";
+  const at = new Date(iso);
+  const sameYear = at.getFullYear() === new Date().getFullYear();
+  return h("span", { class: "nowrap", title: at.toISOString() },
+    at.toLocaleString(undefined, { month: "short", day: "numeric", ...(sameYear ? {} : { year: "numeric" }), hour: "numeric", minute: "2-digit" }));
+}
+const plural = (n, word, many = `${word}s`) => `${n.toLocaleString()} ${n === 1 ? word : many}`;
 
 function kindBadge(kind) {
   return h("span", { class: `kind ${kind}` }, kind);
@@ -91,8 +97,9 @@ const hideTooltip = () => { tooltip.hidden = true; };
 
 function render(...nodes) {
   hideTooltip();
-  main.replaceChildren(...nodes);
+  main.replaceChildren(...nodes.flat(Infinity).filter((n) => n !== null && n !== undefined && n !== false));
   main.focus({ preventScroll: true });
+  window.scrollTo(0, 0);
 }
 
 function failure(error) {
@@ -144,7 +151,9 @@ function lineageGraph(lineage) {
     edges.push(s("path", { class: `edge${n.changed_since ? " changed" : ""}`, d: `M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}` }));
   }
   const boxes = shown.map((n) => {
-    const label = n.title.length > 34 ? `…${n.title.slice(-33)}` : n.title;
+    // the last two parts name a table (schema.table) or a column (table.column); the whole name is in the tooltip
+    const tail = n.kind === "project" ? n.title : n.title.split(".").slice(-2).join(".");
+    const label = tail.length > 34 ? `${tail.slice(0, 33)}…` : tail;
     const tip = [n.title, `${n.kind}${n.layer ? ` · ${n.layer}` : ""}${n.system ? ` · ${n.system}` : ""}${n.dtype ? ` · ${n.dtype}` : ""}`,
       ...(n.description ? [n.description.length > 200 ? `${n.description.slice(0, 200)}…` : n.description] : []),
       ...(n.changed_since ? ["△ redefined after this link was recorded"] : [])];
@@ -158,7 +167,7 @@ function lineageGraph(lineage) {
     s("text", { x: 14, y: 35 }, label));
   });
   const svg = s("svg", { width, height, viewBox: `0 0 ${width} ${height}`, role: "img",
-    "aria-label": `Lineage of ${lineage.title}: ${plural((lineage.upstream || []).length, "upstream entry")}, ${plural((lineage.downstream || []).length, "downstream entry")}` },
+    "aria-label": `Lineage of ${lineage.title}: ${plural((lineage.upstream || []).length, "upstream entry", "upstream entries")}, ${plural((lineage.downstream || []).length, "downstream entry", "downstream entries")}` },
   edges, boxes);
   return h("div", {},
     h("div", { class: "card graph" }, svg),
@@ -225,8 +234,8 @@ async function entryPage(key) {
       ["Layer", entry.layer], ["System", entry.system], ["Owner", entry.owner], ["Status", entry.status],
       ["Repository", entry.repository],
       ["Tags", (entry.tags || []).join(", ")],
-      ["Revision", `${entry.revision} by ${entry.registered_by}, ${when(entry.at)}`],
-      ["Sources", Object.keys(entry.source || {}).length ? Object.keys(entry.source).filter((k) => typeof entry.source[k] === "object").join(", ") || "registered by hand" : "registered by hand"],
+      ["Revision", [`${entry.revision} by ${entry.registered_by}, `, when(entry.at)]],
+      ["Sources", sources(entry.source)],
     ])),
   ];
   if (entry.kind === "project") {
@@ -252,6 +261,13 @@ async function entryPage(key) {
       h("div", { class: "card" }, h("pre", { class: "mono" }, JSON.stringify(entry.source, null, 2)))));
   }
   render(...parts);
+}
+
+// dbt records {tool: "dbt", ...}; the BigQuery, Dataform and OpenLineage importers each keep their details under their name
+function sources(source) {
+  const named = Object.keys(source || {}).filter((k) => source[k] && typeof source[k] === "object" && k !== "code");
+  const found = [...new Set([...(typeof source?.tool === "string" ? [source.tool] : []), ...named])];
+  return found.length ? found.join(", ") : "registered by hand";
 }
 
 async function historySection(key) {
@@ -313,7 +329,7 @@ async function datasetPage(reference) {
     h("ol", { class: "trace" },
       step("Snapshot of", entryLink(`table:${d.snapshot_of}`), `taken ${d.snapshot_time}`),
       step("Produced by", d.produced_by.dataform_invocation ? d.produced_by.dataform_invocation.split("/").pop() : "?", d.produced_by.dataform_invocation,
-        h("span", {}, stateBadge(d.produced_by.state), ` ${when(d.produced_by.started)} → ${when(d.produced_by.ended)}`)),
+        h("span", {}, stateBadge(d.produced_by.state), " ", when(d.produced_by.started), " → ", when(d.produced_by.ended))),
       step("Executed as", d.executed_as ? d.executed_as.job_id : "an unknown job",
         d.executed_as ? `BigQuery job in ${d.executed_as.project}, ${d.executed_as.location} · ${d.executed_as.statement_type} · ${(d.executed_as.billed_bytes ?? 0).toLocaleString()} bytes billed` : null),
       step("Defined in", d.defined_in.file || "?", d.defined_in.commit ? `commit ${d.defined_in.commit}` : "no git commit")),
@@ -324,7 +340,7 @@ async function datasetPage(reference) {
     h("h2", {}, "Checks"),
     facts([["Snapshot copies the target", d.checks.snapshot_copies_target ? "yes" : "no"], ["Taken after the build ended", d.checks.snapshot_after_build ? "yes" : "no"],
       ["Written again before the snapshot", d.checks.written_again_before_snapshot === null ? "unknown: history does not reach it" : d.checks.written_again_before_snapshot ? "yes" : "no"],
-      ["Recorded", `by ${d.recorded_by}, ${when(d.recorded_at)}`]]),
+      ["Recorded", [`by ${d.recorded_by}, `, when(d.recorded_at)]]]),
     ...missingList(d.missing));
 }
 
@@ -332,14 +348,14 @@ async function modelsPage() {
   const models = await api("/v1/models");
   render(h("h1", {}, "Model versions"), h("p", { class: "sub" }, "Each was recorded from its training manifest after the catalog checked it against Vertex AI and Cloud Storage."),
     table(["Model", "Version", "Trained on", "Artifact", "Recorded"], models.map((m) => [m.model, h("a", { href: `#/model/${enc(m.model)}/${enc(m.version)}` }, m.version),
-      h("a", { href: `#/dataset/${enc(m.dataset_version)}` }, m.dataset_version), h("code", {}, m.artifact), `${when(m.recorded_at)} by ${m.recorded_by}`]),
+      h("a", { href: `#/dataset/${enc(m.dataset_version)}` }, m.dataset_version), h("code", {}, m.artifact), [when(m.recorded_at), ` by ${m.recorded_by}`]]),
     "No model version is recorded yet. Import one with odcl import --vertex-manifest."));
 }
 
 function runsTable(runs) {
   const keys = (list) => list.map((k, n) => [n ? ", " : "", entryLink(k)]);
   return table(["Run", "System", "State", "Started", "Ended", "Read", "Wrote"], runs.map((r) => [
-    h("span", { title: r.run }, r.job), r.system, stateBadge(r.state), when(r.started), when(r.ended), keys(r.inputs), keys(r.outputs)]), "No run is recorded yet.");
+    h("span", { title: r.run }, /^projects\//.test(r.job) ? r.job.split("/").pop() : r.job), r.system, stateBadge(r.state), when(r.started), when(r.ended), keys(r.inputs), keys(r.outputs)]), "No run is recorded yet.");
 }
 
 async function runsPage(params) {

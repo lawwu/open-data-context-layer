@@ -168,13 +168,13 @@ def _entries(inputs: list[_Dataset], outputs: list[_Dataset]) -> list[tuple[str,
     produced = {d.path for d in outputs}
     sources = sorted(f"table:{p}" for p in read)
     ordered = [("table", {**t, "source": t["source"] or None}) for p, t in sorted(tables.items()) if p not in produced]
-    ordered += [("column", {**c, "source": None}) for (p, _), c in sorted(columns.items()) if p not in produced]
+    ordered += [("column", {**c, "source": tables[p]["source"] or None}) for (p, _), c in sorted(columns.items()) if p not in produced]
     for p in sorted(produced):
         ordered.append(("table", {**tables[p], "source": tables[p]["source"] or None,
                                   "derived_from": [s for s in sources if s != f"table:{p}"] or None}))
         for (path, name), c in sorted(columns.items()):
             if path == p:
-                ordered.append(("column", {**c, **derived.get((path, name), {}), "source": None}))
+                ordered.append(("column", {**c, **derived.get((path, name), {}), "source": tables[p]["source"] or None}))
     return ordered
 
 
