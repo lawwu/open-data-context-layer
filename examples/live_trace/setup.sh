@@ -4,6 +4,7 @@
 #
 #   ODCL_LIVE_PROJECT=my-sandbox-project bash examples/live_trace/setup.sh
 set -euo pipefail
+trap 'echo "setup.sh stopped at line $LINENO; fix the error above and run it again (every step is safe to repeat)" >&2' ERR
 P=${ODCL_LIVE_PROJECT:?Set ODCL_LIVE_PROJECT to a sandbox project you own}
 REGION=${ODCL_LIVE_REGION:-us-central1}
 NUMBER=$(gcloud projects describe "$P" --format='value(projectNumber)')
@@ -22,8 +23,13 @@ done
 
 echo "== Dataform runs as $DF"
 gcloud beta services identity create --service dataform.googleapis.com --project "$P" >/dev/null 2>&1 || true
-gcloud iam service-accounts add-iam-policy-binding "$DF" --project "$P" --condition=None --quiet \
-  --member "serviceAccount:service-$NUMBER@gcp-sa-dataform.iam.gserviceaccount.com" --role roles/iam.serviceAccountTokenCreator >/dev/null
+# A service account created a moment ago can take a minute or two before IAM accepts grants on it.
+for attempt in 1 2 3 4 5 6 7 8; do
+  gcloud iam service-accounts add-iam-policy-binding "$DF" --project "$P" --condition=None --quiet \
+    --member "serviceAccount:service-$NUMBER@gcp-sa-dataform.iam.gserviceaccount.com" --role roles/iam.serviceAccountTokenCreator >/dev/null && break
+  [ "$attempt" = 8 ] && false
+  echo "  not accepted yet; retrying in 15s" >&2; sleep 15
+done
 gcloud projects add-iam-policy-binding "$P" --condition=None --quiet --member "serviceAccount:$DF" --role roles/bigquery.jobUser >/dev/null
 
 echo "== Vertex AI training runs as $VX"
