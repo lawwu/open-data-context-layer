@@ -46,6 +46,12 @@ def lines(command: str, result) -> list[str]:
             if direction in result:
                 out += [direction + ":"] + ([f"  {'  ' * (n['depth'] - 1)}{n['key']}" + flag(n) for n in result[direction]] or ["  nothing"])
         return out
+    if command == "import" and "events" in result:
+        events = result["events"]
+        recorded = sum(e["change"] == "recorded" for e in events)
+        runs = {e["run"]: e for e in events if e["run"]}  # each run once, as it stands after its last event
+        return ([f"{len(events)} events: {recorded} recorded, {len(events) - recorded} duplicate"]
+                + [f"  {e['job']}  {e['state']}" for e in runs.values()])
     if command == "import" and "model" in result:
         checked = ("already recorded, so the artifact was not read again" if result["artifact_verified"] == "recorded"
                    else f"artifact checked by {result['artifact_verified']}")
@@ -112,8 +118,11 @@ def run(catalog: Catalog, args):
         from .legacy import import_sqlite
         return import_sqlite(catalog, args.path)
     if args.command == "import":
-        require(sum(map(bool, (args.dbt, args.bigquery, args.dataform, args.vertex_manifest))) == 1, "import",
-                "Import from one place: --dbt PATH, --bigquery TABLE..., --dataform INVOCATION or --vertex-manifest PATH")
+        require(sum(map(bool, (args.dbt, args.bigquery, args.dataform, args.vertex_manifest, args.openlineage))) == 1, "import",
+                "Import from one place: --dbt PATH, --bigquery TABLE..., --dataform INVOCATION, --vertex-manifest PATH or --openlineage FILE")
+        if args.openlineage:
+            from . import openlineage
+            return {"events": [openlineage.ingest(catalog, e) for e in openlineage.read_events(args.openlineage)]}
         if args.dataform:
             from . import dataform
             return dataform.import_invocation(catalog, args.dataform, client=dataform.client())
@@ -194,6 +203,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--dataform", metavar="INVOCATION",
                    help="a Dataform workflow invocation, as projects/P/locations/L/repositories/R/workflowInvocations/I")
     s.add_argument("--vertex-manifest", metavar="PATH", help="a training manifest, as a local file or gs:// object, written by a Vertex AI training task")
+    s.add_argument("--openlineage", metavar="FILE", help="OpenLineage events: one JSON event, a JSON list of them, or JSON Lines")
     s.add_argument("--project", help="with --bigquery: the project the API calls are made from (default: your credentials' project)")
 
     s = sub.add_parser("handoff", help="record that a successful build handed on a snapshot of its output")
@@ -274,6 +284,12 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--upstream", action="store_true", help="also everything that data is built from")
     s.add_argument("--revision", metavar="REV", help="what this older revision of the project had pinned")
 
+    s = sub.add_parser("serve", help="serve the catalog over HTTP, with a web page to browse it")
+    s.add_argument("--host", default="127.0.0.1", help="the address to listen on (default 127.0.0.1: only this machine). There is no sign-in")
+    s.add_argument("--port", type=int, default=8080)
+    s.add_argument("--accept-lineage", action="store_true",
+                   help="accept OpenLineage events at POST /api/v1/lineage; set ODCL_LINEAGE_TOKEN to require it as a bearer token")
+
     s = sub.add_parser("mcp", help="serve the catalog to an assistant over the Model Context Protocol")
     s.add_argument("--allow-writes", action="store_true", help="also offer the tools that register projects and record use")
     return p
@@ -285,6 +301,19 @@ def main(argv=None) -> int:
         if args.command == "migrate":
             result = {"applied": migrate(args.database_url)}
             print(json.dumps(result, indent=2) if args.json else "\n".join(lines(args.command, result)))
+            return 0
+        if args.command == "serve":
+            from .server import make_server
+            server = make_server(args.database_url, host=args.host, port=args.port, actor=args.actor, accept_lineage=args.accept_lineage)
+            host, port = server.server_address[:2]
+            print(f"odcl: serving the catalog at http://{host}:{port}/" + ("  (accepting OpenLineage events at /api/v1/lineage)" if args.accept_lineage else ""),
+                  file=sys.stderr, flush=True)
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+            finally:
+                server.server_close()
             return 0
         with Catalog(args.database_url, args.actor) as catalog:
             if args.command == "mcp":

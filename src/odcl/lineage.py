@@ -5,6 +5,10 @@ sqlglot reads the SQL, so nothing here parses SQL by hand. A column traced to ev
 """
 from __future__ import annotations
 
+import logging
+
+MAX_SQL = 100_000
+
 
 def relation(table) -> str:
     """project.dataset.table for a sqlglot table node, lower-cased."""
@@ -114,3 +118,31 @@ def _real(tree, table, column: str, dialect, schema, depth: int = 0) -> set[tupl
     except Exception:  # noqa: BLE001 - a column that cannot be followed through the CTE is not traced
         return set()
     return {pair for n in nodes if isinstance(n.source, exp.Table) for pair in _real(tree, n.source, n.name.split(".")[-1], dialect, schema, depth + 1)}
+
+
+# ---- query shapes --------------------------------------------------------------------------------------------
+def template(sql: str | None, dialect: str | None = "bigquery") -> str | None:
+    """A query with its comments removed and every literal and parameter replaced by `?`, or None when that
+    cannot be done for certain. Table and field names stay, so the shape still says what it reads."""
+    if not sql or len(sql) > MAX_SQL:
+        return None
+    import sqlglot
+    from sqlglot import exp
+    quiet = logging.getLogger("sqlglot")
+    was, quiet.disabled = quiet.disabled, True  # sqlglot quotes the SQL it cannot read in its warnings
+    try:
+        statements = sqlglot.parse(sql, dialect=dialect)
+        if len(statements) != 1 or statements[0] is None or isinstance(statements[0], exp.Command):
+            return None  # a script, or syntax sqlglot keeps as opaque text
+        tree = statements[0]
+        for node in list(tree.find_all(exp.In)):
+            if node.expressions and all(isinstance(e, (exp.Literal, exp.Neg)) for e in node.expressions):
+                node.set("expressions", [exp.Placeholder()])  # a longer list of values is the same question
+        for node in list(tree.find_all(exp.Literal, exp.RawString, exp.ByteString, exp.HexString, exp.BitString, exp.National, exp.Parameter)):
+            node.replace(exp.Placeholder())
+        out = tree.sql(dialect=dialect, comments=False)
+    except Exception:  # noqa: BLE001 - SQL that cannot be read is kept as metadata only
+        return None
+    finally:
+        quiet.disabled = was
+    return None if "'" in out or '"' in out or len(out) > MAX_SQL else out  # a quote left behind means a literal may be too
