@@ -883,7 +883,7 @@ dev = [
 requires-dist = [
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
-    { name = "sounding", marker = "python_full_version >= '3.14' and extra == 'bigquery'", git = "https://github.com/lawwu/sounding?rev=10e4473c2088d03547379df8aa9ce1c7a3a2b02b" },
+    { name = "sounding", marker = "python_full_version >= '3.14' and extra == 'bigquery'", git = "https://github.com/lawwu/sounding?rev=v0.9.1" },
     { name = "sqlglot", marker = "extra == 'bigquery'", specifier = ">=25" },
     { name = "sqlglot", marker = "extra == 'dbt'", specifier = ">=25" },
 ]
@@ -1759,8 +1759,8 @@ wheels = [
 
 [[package]]
 name = "sounding"
-version = "0.9.0"
-source = { git = "https://github.com/lawwu/sounding?rev=10e4473c2088d03547379df8aa9ce1c7a3a2b02b#10e4473c2088d03547379df8aa9ce1c7a3a2b02b" }
+version = "0.9.1"
+source = { git = "https://github.com/lawwu/sounding?rev=v0.9.1#5f28c562cec04b156a9f97c917bd222aabd18357" }
 dependencies = [
     { name = "duckdb", marker = "python_full_version >= '3.14'" },
     { name = "filelock", marker = "python_full_version >= '3.14'" },

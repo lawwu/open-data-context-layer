@@ -8,9 +8,9 @@ dependencies = ["psycopg[binary]>=3.2"]
 
 [project.optional-dependencies]
 dbt = ["sqlglot>=25"]
-# BigQuery reads come from Sounding, which needs Python 3.14. Pinned to the commit that fixes reading scripts, until Sounding releases it (0.9.0 lacks the fix).
+# BigQuery reads come from Sounding, which needs Python 3.14. It is released on GitHub, not PyPI. 0.9.0 cannot read scripts.
 bigquery = [
-  "sounding @ git+https://github.com/lawwu/sounding@10e4473c2088d03547379df8aa9ce1c7a3a2b02b ; python_version >= '3.14'",
+  "sounding @ git+https://github.com/lawwu/sounding@v0.9.1 ; python_version >= '3.14'",
   "sqlglot>=25",
 ]
 mcp = ["mcp>=2.0"]
