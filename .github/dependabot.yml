@@ -1,0 +1,30 @@
+# Weekly dependency updates. Minor and patch updates arrive as one grouped pull request per ecosystem, and CI merges
+# it once the tests pass (see the dependabot job in workflows/ci.yml). Major updates come one per pull request and wait
+# for a person. A release has to be a week old before it is proposed, so a bad or hijacked one has time to be pulled.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      python:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: deps
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: ci
