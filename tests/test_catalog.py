@@ -159,3 +159,16 @@ def test_a_git_remote_becomes_a_web_address_without_credentials():
     assert web_url("git@github.com:acme/data.git") == "https://github.com/acme/data"
     assert web_url("https://someone@github.com/acme/data.git") == "https://github.com/acme/data"
     assert web_url("/local/path") is None
+
+
+def test_the_table_list_counts_columns_and_users_and_filters_by_layer_and_system(fathom):
+    fathom.put("project", {"name": "churn-model", "description": "Predict churn"})
+    fathom.use("churn-model", [f"{GOLD}.plan_tier"])
+    tables = {t["key"]: t for t in fathom.tables()}
+    assert len(tables) == 5
+    gold = tables[f"table:{GOLD}"]
+    assert gold["layer"] == "gold" and gold["system"] == "duckdb" and gold["columns"] == len(fathom.get(GOLD)["columns"]) and gold["used_by"] == 1
+    assert tables[f"table:{BRONZE}"]["used_by"] == 1  # through what is built from it
+    assert gold["changed"] == fathom.get(GOLD)["at"]
+    assert [t["key"] for t in fathom.tables(layer="bronze")] == ["table:churn.bronze.accounts", "table:churn.bronze.tickets"]
+    assert fathom.tables(system="bigquery") == []

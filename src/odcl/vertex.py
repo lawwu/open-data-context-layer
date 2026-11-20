@@ -160,6 +160,16 @@ def import_build(catalog: Catalog, manifest: dict, *, client) -> dict:
         with db.cursor() as cursor:
             cursor.executemany("INSERT INTO build_inputs (build_id, role, field, position, dataset_version_id, field_path) VALUES (%s, %s, %s, %s, %s, %s)",
                                [(build, i["role"], i["field"], i.get("position"), data["id"], i["field"].lower()) for i in manifest["inputs"]])
+        # the project uses what its newest version was trained on, pinned to the definitions that version used
+        trained = timing(task, "endTime")
+        newest = db.execute("""SELECT NOT EXISTS (SELECT 1 FROM model_builds b JOIN executions t ON t.id = b.producing_execution
+                                                  WHERE b.project_key = %s AND b.id <> %s AND t.ended_at > %s) AS newest""",
+                            (project, build, trained)).fetchone()["newest"] if trained else True
+        if newest:
+            pinned = db.execute("""SELECT i.role, c.column_key, c.column_revision FROM build_inputs i
+                                   JOIN version_columns c ON (c.dataset_version_id, c.field_path) = (i.dataset_version_id, i.field_path)
+                                   WHERE i.build_id = %s ORDER BY c.column_key, i.role""", (build,)).fetchall()
+            catalog._use_from_model(project, [(r["column_key"], r["column_revision"], f"{r['role']} in {version}") for r in pinned])
     return {"model": model, "version": version, "change": "added", "inputs": len(manifest["inputs"]), "artifact_verified": verified}
 
 
