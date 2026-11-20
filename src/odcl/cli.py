@@ -46,6 +46,12 @@ def lines(command: str, result) -> list[str]:
             if direction in result:
                 out += [direction + ":"] + ([f"  {'  ' * (n['depth'] - 1)}{n['key']}" + flag(n) for n in result[direction]] or ["  nothing"])
         return out
+    if command == "import" and "events" in result:
+        events = result["events"]
+        recorded = sum(e["change"] == "recorded" for e in events)
+        runs = {e["run"]: e for e in events if e["run"]}  # each run once, as it stands after its last event
+        return ([f"{len(events)} events: {recorded} recorded, {len(events) - recorded} duplicate"]
+                + [f"  {e['job']}  {e['state']}" for e in runs.values()])
     if command == "import" and "model" in result:
         checked = ("already recorded, so the artifact was not read again" if result["artifact_verified"] == "recorded"
                    else f"artifact checked by {result['artifact_verified']}")
@@ -112,8 +118,11 @@ def run(catalog: Catalog, args):
         from .legacy import import_sqlite
         return import_sqlite(catalog, args.path)
     if args.command == "import":
-        require(sum(map(bool, (args.dbt, args.bigquery, args.dataform, args.vertex_manifest))) == 1, "import",
-                "Import from one place: --dbt PATH, --bigquery TABLE..., --dataform INVOCATION or --vertex-manifest PATH")
+        require(sum(map(bool, (args.dbt, args.bigquery, args.dataform, args.vertex_manifest, args.openlineage))) == 1, "import",
+                "Import from one place: --dbt PATH, --bigquery TABLE..., --dataform INVOCATION, --vertex-manifest PATH or --openlineage FILE")
+        if args.openlineage:
+            from . import openlineage
+            return {"events": [openlineage.ingest(catalog, e) for e in openlineage.read_events(args.openlineage)]}
         if args.dataform:
             from . import dataform
             return dataform.import_invocation(catalog, args.dataform, client=dataform.client())
@@ -194,6 +203,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--dataform", metavar="INVOCATION",
                    help="a Dataform workflow invocation, as projects/P/locations/L/repositories/R/workflowInvocations/I")
     s.add_argument("--vertex-manifest", metavar="PATH", help="a training manifest, as a local file or gs:// object, written by a Vertex AI training task")
+    s.add_argument("--openlineage", metavar="FILE", help="OpenLineage events: one JSON event, a JSON list of them, or JSON Lines")
     s.add_argument("--project", help="with --bigquery: the project the API calls are made from (default: your credentials' project)")
 
     s = sub.add_parser("handoff", help="record that a successful build handed on a snapshot of its output")

@@ -493,6 +493,33 @@ class Catalog:
             ORDER BY j.created_at DESC, j.job_id LIMIT %s""", (project, since, since, limit)).fetchall()
         return [{**self._job(r), "reads": r["reads"], "writes": r["writes"]} for r in rows]
 
+    # ---- runs and models -------------------------------------------------------------------------------------
+    def runs(self, system: str | None = None, limit: int = 100) -> list[dict]:
+        """Recorded runs, newest first: Dataform invocations and actions, Vertex AI pipeline tasks, and runs
+        reported over OpenLineage. `job` is what ran; `inputs` and `outputs` are table keys when the run said."""
+        require(isinstance(limit, int) and 1 <= limit <= 1000, "limit", "limit is between 1 and 1000")
+        rows = self.db.execute("""
+            SELECT e.*, p.native_key AS parent_key FROM executions e LEFT JOIN executions p ON p.id = e.parent_id
+            WHERE %(system)s::text IS NULL OR e.system = %(system)s
+            ORDER BY COALESCE(e.ended_at, e.started_at, e.observed_at) DESC, e.id DESC LIMIT %(limit)s""", {"system": system, "limit": limit}).fetchall()
+        out = []
+        for r in rows:
+            ev = r["evidence"]
+            job = ev.get("job") or ev.get("target") or (f"{ev['pipeline_run'].rsplit('/', 1)[-1]} / {ev['task']}" if ev.get("task") else None) or r["native_key"]
+            outputs = ev.get("outputs") or ([f"table:{ev['target']}"] if ev.get("target") else [])
+            out.append({"system": r["system"], "kind": r["kind"], "run": r["native_key"], "job": job, "state": r["state"],
+                        "started": stamp(r["started_at"]) if r["started_at"] else None, "ended": stamp(r["ended_at"]) if r["ended_at"] else None,
+                        "inputs": ev.get("inputs") or [], "outputs": outputs, "parent": r["parent_key"] or ev.get("parent"), "sql": ev.get("sql"),
+                        "bigquery_job": {"project": r["job_project"], "location": r["job_location"], "job_id": r["job_id"]} if r["job_id"] else None})
+        return out
+
+    def models(self) -> list[dict]:
+        """Every recorded model version, newest first, with the dataset version it read."""
+        return [{"model": r["project_key"].removeprefix("project:"), "version": r["version"], "dataset_version": r["reference"],
+                 "artifact": r["artifact_uri"], "recorded_by": r["recorded_by"], "recorded_at": stamp(r["recorded_at"])}
+                for r in self.db.execute("SELECT b.*, d.reference FROM model_builds b JOIN dataset_versions d ON d.id = b.dataset_version_id "
+                                         "ORDER BY b.recorded_at DESC, b.id DESC")]
+
     def overview(self) -> dict:
         counts = {kind: 0 for kind in KINDS}
         counts.update({r["kind"]: r["n"] for r in self.db.execute("SELECT kind, COUNT(*) AS n FROM entries GROUP BY kind")})

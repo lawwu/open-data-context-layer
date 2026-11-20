@@ -9,12 +9,12 @@ A job reading a table is evidence that the table was queried. It says nothing ab
 from __future__ import annotations
 
 import hashlib
-import logging
 import re
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from . import store
+from .lineage import MAX_SQL, template  # noqa: F401 - the SQL shape is shared with the OpenLineage importer
 from .store import Catalog, CatalogError, require
 
 try:
@@ -29,7 +29,6 @@ BACKFILL = timedelta(days=7)
 OVERLAP = timedelta(hours=6)  # the longest a query job may run, so one started before the last window ended is read again
 HISTORY = timedelta(days=180)  # how long BigQuery keeps jobs
 MONITORING_LABELS = ("sounding_action", "odcl_action")  # jobs a metadata collector ran are not use of the data
-MAX_SQL = 100_000
 DECORATOR = re.compile(r"[@$].*$")  # table@1788314400000 reads the table as of a time; table$20260901 names one partition
 
 
@@ -90,34 +89,6 @@ def snapshot(fqn: str, *, client) -> dict:
 
 
 # ---- query shapes --------------------------------------------------------------------------------------------
-def template(sql: str | None) -> str | None:
-    """A query with its comments removed and every literal and parameter replaced by `?`, or None when that
-    cannot be done for certain. Table and field names stay, so the shape still says what it reads."""
-    if not sql or len(sql) > MAX_SQL:
-        return None
-    import sqlglot
-    from sqlglot import exp
-    quiet = logging.getLogger("sqlglot")
-    was, quiet.disabled = quiet.disabled, True  # sqlglot quotes the SQL it cannot read in its warnings
-    try:
-        statements = sqlglot.parse(sql, dialect="bigquery")
-        if len(statements) != 1 or statements[0] is None or isinstance(statements[0], exp.Command):
-            return None  # a script, or syntax sqlglot keeps as opaque text
-        tree = statements[0]
-        for node in list(tree.find_all(exp.In)):
-            if node.expressions and all(isinstance(e, (exp.Literal, exp.Neg)) for e in node.expressions):
-                node.set("expressions", [exp.Placeholder()])  # a longer list of values is the same question
-        for node in list(tree.find_all(exp.Literal, exp.RawString, exp.ByteString, exp.HexString, exp.BitString, exp.National, exp.Parameter)):
-            node.replace(exp.Placeholder())
-        out = tree.sql(dialect="bigquery", comments=False)
-    except Exception:  # noqa: BLE001 - SQL that cannot be read is kept as metadata only
-        return None
-    finally:
-        quiet.disabled = was
-    return None if "'" in out or '"' in out or len(out) > MAX_SQL else out  # a quote left behind means a literal may be too
-
-
-# ---- job history ---------------------------------------------------------------------------------------------
 def _store_job(db, record: dict, shape: str | None, capture: bool) -> bool:
     """Keep one job. Answers whether it is new. A finished job is never replaced by an unfinished reading of it."""
     gaps = [] if record["referenced_tables"] else ["no_table_references"]
