@@ -73,12 +73,19 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 | `odcl add table\|column\|project ...` | Register by hand |
 | `odcl import --dbt PATH [--select MODEL...]` | Read a dbt project |
 | `odcl import --bigquery TABLE...` | Read tables and their columns from BigQuery |
-| `odcl sync bigquery-jobs --project PROJECT` | Read the query jobs a project ran since the last sync |
+| `odcl sync bigquery-jobs --project PROJECT [--since T --until T \| --pipeline-run JOB [--task T]]` | Read the query jobs a project ran since the last sync, or in one window |
 | `odcl history table KEY [--since 7d] [--patterns]` | Which query jobs read or wrote this table? |
 | `odcl import --dataform INVOCATION` | Read what a Dataform run compiled and how each action ran |
 | `odcl handoff --invocation INVOCATION --target TABLE --snapshot SNAPSHOT` | Record that a build handed on a snapshot of its output |
 | `odcl explain dataset SNAPSHOT[@TIME]` | Which build, job, file and inputs a dataset version came from |
 | `odcl record dataset-files --pipeline-run JOB --task TASK --output NAME [--from-table TABLE] [--export-job P:L.JOB \| --find-export-job]` | Record the files a pipeline task exported as a dataset version, bound to the BigQuery job that wrote them |
+| `odcl import --sql-definitions FILE.jsonl` | Read tables and the SELECT that builds each, from any source |
+| `odcl instances DEFINITION PATTERN...` | Say which tables are copies of a definition, so lineage and users go through them |
+| `odcl privacy set KEY... [--pii] [--data-category] [--retention] [--scrubbing]` | Say which data is personal, how it is scrubbed and kept |
+| `odcl privacy export [--pii-only] [--table T]` | Every column with its privacy fields, as CSV |
+| `odcl discover vertex-runs --project P` | Which pipeline runs have a model version recorded? |
+| `odcl propose vertex-manifest --pipeline-run JOB [--out FILE]` | Draft a run's training manifest for review |
+| `odcl rely MODEL --version V DOCUMENT...` | Record that a model version relied on documents, at the revision it was trained on |
 | `odcl import --vertex-manifest PATH\|gs://...` | Check a training manifest against Vertex AI and Cloud Storage, and record the model version |
 | `odcl explain model NAME --version V` | Which run, artifact, dataset version and raw columns a model version came from |
 | `odcl overview` | Counts, and data that changed after a project used it |
@@ -453,7 +460,7 @@ Without `ODCL_TEST_DATABASE_URL` the database tests are skipped locally and fail
 ## Not built yet
 
 - The machine-learning shape on top: training and serving features, labels, training datasets and model cards.
-- Discovering Vertex AI pipeline runs; a model version is imported from its manifest for now.
+- Proposing manifests for pipelines laid out differently from a trainer with a Model output and a `metadata.json` beside it.
 - Sending the catalog's runs and lineage out as OpenLineage events.
 - Discovering Dataform invocations, and Dataform runs started from the CLI rather than the managed service.
 - Sign-in and permissions. Today anyone who can reach the database can read and write the catalog.
