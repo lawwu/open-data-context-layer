@@ -43,6 +43,11 @@ def _defined(defined: dict) -> str:
     return f"{defined['file']} at commit {defined['commit']}" if defined.get("commit") else f"{defined['file']} (no git commit)"
 
 
+def _relied(documents: list[dict]) -> list[str]:
+    return [f"  {d['document']} at {d['revision']} ({d['pinned_by'].replace('_', ' ')})" + (f"  for: {d['why']}" if d["why"] else "")
+            + ("  (corrected since)" if d["changed_since"] else "") for d in documents]
+
+
 def lines(command: str, result) -> list[str]:
     """A person's view of a result. `--json` prints the result itself."""
     if command == "find":
@@ -109,6 +114,7 @@ def lines(command: str, result) -> list[str]:
             out.append(f"  row filter    {read['row_filter']['expression'] or ', '.join(read['row_filter']['columns'])}")
         out += [f"  {i['role']:<8} {i['field']} = {i['expression'] or '?'}  from {', '.join(i['derived_from']) or '?'}" if "derived_from" in i
                 else f"  {i['role']:<8} {i['field']}  {i['dtype'] or '?'}  (lineage not claimed)" for i in result["inputs"]]
+        out += (["  relied on"] + _relied(result["relied_on"])) if result.get("relied_on") else []
         return out + [f"missing: {m}" for m in result["missing"]]
     if command == "explain" and "model" in result:
         produced, artifact, read = result["produced_by"], result["artifact"], result["read"]
@@ -122,6 +128,7 @@ def lines(command: str, result) -> list[str]:
                     "           as " + (f"BigQuery job ({i['executed_as']['project']}, {i['executed_as']['location']}, {i['executed_as']['job_id']})"
                                         if i["executed_as"] else "an unknown job") + f", from {_defined(i['defined_in'])}",
                     f"           from {', '.join(i['derived_from']) or '?'}"]
+        out += (["  relied on"] + _relied(result["relied_on"])) if result.get("relied_on") else []
         return out + [f"missing: {m}" for m in result["missing"]]
     if command == "import" and "entries" in result:
         counts = result["entries"]
@@ -191,6 +198,8 @@ def lines(command: str, result) -> list[str]:
         return [f"applied {name}" for name in result["applied"]] or ["The database is up to date."]
     if command == "import-sqlite":
         return [f"{result['entries']} entries, {result['revisions']} revisions and {result['links']} pinned links imported from {result['source']}"]
+    if command == "rely":
+        return [f"{result['model']} {result['version']} relied on:"] + _relied(result["relied_on"])
     if command == "instances":
         copies = [f"  copy: {link['to']}" for link in result["links"] if link["relation"] == "instance_of"]
         return [f"{result['key']}  {result['change']}  ({result['revision']})"] + (copies or ["  no table matches yet"])
@@ -273,6 +282,8 @@ def run(catalog: Catalog, args):
         return builds.explain_dataset(catalog, args.reference)
     if args.command == "history":
         return catalog.table_history(args.key, span(args.since), args.patterns, args.limit)
+    if args.command == "rely":
+        return catalog.rely(args.model, args.version, args.documents, args.why)
     if args.command == "instances":
         return catalog.set_instances(args.definition, args.patterns)
     if args.command == "privacy" and args.what == "set":
@@ -387,6 +398,12 @@ def parser() -> argparse.ArgumentParser:
     for k in (t, c):
         k.add_argument("--derived-from", nargs="+", default=[], metavar="KEY", help="what it is built from")
         privacy_flags(k)
+
+    s = sub.add_parser("rely", help="record that a model version relied on documents, such as a finding, at the revision it was trained on")
+    s.add_argument("model")
+    s.add_argument("--version", required=True)
+    s.add_argument("documents", nargs="+", metavar="DOCUMENT")
+    s.add_argument("--why", help="what the model took from them")
 
     s = sub.add_parser("instances", help="say which tables are copies of a definition table, by patterns over their paths")
     s.add_argument("definition", help="the definition table, e.g. core.sales.daily_totals")

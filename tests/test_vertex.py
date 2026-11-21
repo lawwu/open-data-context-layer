@@ -436,3 +436,34 @@ def test_the_command_line_records_files_and_explains_them(database, monkeypatch,
     assert main([*db, "explain", "dataset", FILE_SET]) == 0
     out = capsys.readouterr().out
     assert "3 objects, generations pinned" in out and "load-data" in out and "hours_at_cutoff  DOUBLE" in out
+
+
+def test_a_model_version_pins_the_revision_of_the_finding_it_relied_on_and_a_correction_shows(catalog, capsys):
+    build(catalog)
+    finding = catalog.put("document", {"repository": "kb", "path": "findings/hours.md", "title": "Hours lag a day", "digest": "a" * 64,
+                                       "text": "Hours land a day late."})["key"]
+    catalog.db.execute("UPDATE revisions SET recorded_at = '2026-09-01T00:00:00Z' WHERE entry_key = %s", (finding,))  # read before training
+    old = catalog.get(finding)["revision"]
+    catalog.put("document", {"repository": "kb", "path": "findings/hours.md", "title": "Hours lag two days", "digest": "b" * 64,
+                             "text": "Corrected: two days."})
+    glossary = catalog.put("document", {"repository": "kb", "path": "glossary.md", "digest": "c" * 64})["key"]
+
+    trained = load("training_manifest.json") | {"relied_on": [{"document": finding, "why": "shift the label by a day"},
+                                                               {"document": glossary, "digest": "c" * 64}]}
+    vertex.import_build(catalog, trained, client=FakeVertex())
+    relied = {d["document"]: d for d in catalog.explain_model("staffing-forecast", "v17")["relied_on"]}
+    assert relied[finding] | {} == {"document": finding, "title": "Hours lag two days", "revision": old, "pinned_by": "at_training",
+                                    "why": "shift the label by a day", "changed_since": True}  # it was built on the old text
+    assert (relied[glossary]["pinned_by"], relied[glossary]["changed_since"]) == ("digest", False)
+    assert catalog.overview()["changed_since_relied_on"] == [{"model": "staffing-forecast", "version": "v17", "document": finding}]
+    [by] = catalog.get(finding)["relied_on_by"]
+    assert (by["model"], by["version"], by["revision"], by["changed_since"]) == ("staffing-forecast", "v17", old, True)
+    assert vertex.import_build(catalog, trained, client=FakeVertex())["change"] == "unchanged"
+
+    with pytest.raises(CatalogError, match="Nothing registered as document:kb/missing.md"):
+        vertex.import_build(catalog, load("training_manifest.json") | {"version": "v18", "relied_on": ["document:kb/missing.md"]}, client=FakeVertex())
+    assert not catalog.db.execute("SELECT 1 FROM model_builds WHERE version = 'v18'").fetchone()  # refused before anything was written
+
+    later = catalog.put("document", {"repository": "kb", "path": "runbook.md"})["key"]  # registered after training: pinned as it is now
+    [added] = [d for d in catalog.rely("staffing-forecast", "v17", [later], why="retraining steps")["relied_on"] if d["document"] == later]
+    assert added["pinned_by"] == "current" and added["why"] == "retraining steps"

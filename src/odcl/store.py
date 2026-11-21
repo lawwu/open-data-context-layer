@@ -556,6 +556,10 @@ class Catalog:
             "SELECT id, actor, recorded_at FROM revisions WHERE entry_key = %s ORDER BY recorded_at DESC, seq DESC", (key,))]
         if out["kind"] == "document":
             out["describes"] = self._described(out["revision"])
+            out["relied_on_by"] = [{"model": r["project_key"].removeprefix("project:"), "version": r["version"], "revision": r["document_revision"],
+                                    "pinned_by": r["pinned_by"], "why": r["why"], "changed_since": r["document_revision"] != out["revision"]}
+                                   for r in self.db.execute("""SELECT b.project_key, b.version, d.* FROM build_documents d JOIN model_builds b ON b.id = d.build_id
+                                                               WHERE d.document_key = %s ORDER BY b.recorded_at DESC, b.id DESC""", (key,))]
             return out
         out["documents"] = self.documents(key)
         if out["kind"] == "project":
@@ -628,6 +632,11 @@ class Catalog:
                         reached.append({k: v for k, v in node.items() if k not in ("depth", "via", "changed_since")})
             out["built_from"] = sorted(reached, key=lambda n: n["key"])
         return out
+
+    def rely(self, name: str, version: str, documents: list[str], why: str | None = None) -> dict:
+        """Record that a model version relied on these documents, each at the revision current when it was trained."""
+        from .vertex import rely
+        return rely(self, name, version, documents, why)
 
     def explain_model(self, name: str, version: str) -> dict:
         """One model version traced from its training task back to the raw column behind each input field."""
@@ -795,5 +804,8 @@ class Catalog:
             "SELECT source_key, target_key FROM current_links WHERE relation = 'uses' AND target_revision <> target_head ORDER BY source_key, target_key")]
         described = [{"document": r["source_key"], "key": r["target_key"]} for r in self.db.execute(
             "SELECT source_key, target_key FROM current_links WHERE relation = 'describes' AND target_revision <> target_head ORDER BY source_key, target_key")]
+        relied = [{"model": r["project_key"].removeprefix("project:"), "version": r["version"], "document": r["document_key"]} for r in self.db.execute(
+            """SELECT b.project_key, b.version, d.document_key FROM build_documents d JOIN model_builds b ON b.id = d.build_id
+               JOIN entries e ON e.key = d.document_key WHERE e.head_revision <> d.document_revision ORDER BY b.project_key, b.version, d.document_key""")]
         info = self.db.info
-        return {"counts": counts, "changed_since_used": stale, "changed_since_described": described, "database": f"{info.host}:{info.port}/{info.dbname}"}
+        return {"counts": counts, "changed_since_used": stale, "changed_since_described": described, "changed_since_relied_on": relied, "database": f"{info.host}:{info.port}/{info.dbname}"}
