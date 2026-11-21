@@ -36,11 +36,30 @@ function s(tag, attrs, ...children) {
   return node;
 }
 
-async function api(path) {
-  const response = await fetch(path, { headers: { Accept: "application/json" } });
-  const body = await response.json().catch(() => ({ error: { message: `${response.status} ${response.statusText}` } }));
-  if (!response.ok) throw Object.assign(new Error(body.error?.message || response.statusText), { code: body.error?.code, status: response.status });
-  return body;
+// Who is signed in: with single sign-on, the browser's session cookie; otherwise an API token pasted once and kept
+// for this tab only (sessionStorage), sent as a bearer token.
+const TOKEN = "odcl-token";
+async function api(path, { method = "GET", body, retried = false } = {}) {
+  const token = sessionStorage.getItem(TOKEN);
+  const headers = { Accept: "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                    ...(body !== undefined ? { "Content-Type": "application/json" } : {}) };
+  const response = await fetch(path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "same-origin" });
+  const answer = await response.json().catch(() => ({ error: { message: `${response.status} ${response.statusText}` } }));
+  if (response.status === 401 && !retried) {
+    if (answer.error?.sign_in && !token) {
+      location.href = `${answer.error.sign_in}?next=${enc(location.pathname + location.hash)}`;
+      return new Promise(() => {});  // leaving the page
+    }
+    sessionStorage.removeItem(TOKEN);
+    const given = window.prompt(`${answer.error?.message || "Sign in"}\n\nPaste an odcl API token (odcl users token):`);
+    if (given && given.trim()) {
+      sessionStorage.setItem(TOKEN, given.trim());
+      showAccount();
+      return api(path, { method, body, retried: true });
+    }
+  }
+  if (!response.ok) throw Object.assign(new Error(answer.error?.message || response.statusText), { code: answer.error?.code, status: response.status });
+  return answer;
 }
 
 const enc = encodeURIComponent;
@@ -657,6 +676,60 @@ async function runsPage(params) {
     h("div", { class: "controls" }, select, h("span", { class: "muted" }, plural(runs.length, "run"))), runsTable(runs));
 }
 
+// ---- who is signed in -----------------------------------------------------------------------------------------
+async function showAccount() {
+  const slot = document.getElementById("account");
+  let me = null;
+  try { me = (await api("/v1/me")).user; } catch { /* the page says why where it matters */ }
+  slot.replaceChildren(me ? h("a", { href: "#/account", title: `${me.name}, ${me.role}` }, me.display_name || me.name) : "");
+}
+
+async function signOut() {
+  sessionStorage.removeItem(TOKEN);
+  const answer = await api("/auth/logout", { method: "POST" }).catch(() => ({ next: "/" }));
+  location.href = answer.next || "/";
+}
+
+async function accountPage() {
+  const me = (await api("/v1/me")).user;
+  if (!me) {
+    render(h("h1", {}, "Account"), h("p", {}, "Not signed in. Reading needs no sign-in here; writing needs an API token, which an admin makes with ",
+      h("code", {}, "odcl users token NAME"), "."),
+      h("button", { type: "button", onclick: () => { const t = window.prompt("Paste an odcl API token:"); if (t) { sessionStorage.setItem(TOKEN, t.trim()); showAccount(); route(); } } },
+        "Sign in with a token"));
+    return;
+  }
+  const tokens = await api("/v1/me/tokens");
+  const shown = h("div");
+  const make = async () => {
+    const label = window.prompt("What is this token for? (e.g. laptop, ci)") ?? undefined;
+    const made = await api("/v1/me/tokens", { method: "POST", body: label ? { label } : {} });
+    shown.replaceChildren(h("div", { class: "notice" }, h("p", {}, "Your new token. It is shown this once; keep it secret:"), h("pre", {}, made.token),
+      h("p", { class: "muted" }, "Use it as ODCL_TOKEN for odcl and odcl mcp --server, or as Authorization: Bearer over HTTP.")));
+  };
+  const revoke = async (id) => { await api(`/v1/me/tokens/${enc(id)}/revoke`, { method: "POST" }); route(); };
+  const parts = [h("h1", {}, me.display_name || me.name),
+    h("p", { class: "sub" }, `${me.name} · ${me.role}`, me.email ? ` · ${me.email}` : "", me.single_sign_on ? " · signs in with single sign-on" : ""),
+    h("div", { class: "controls" }, h("button", { type: "button", onclick: make }, "Make an API token"), h("button", { type: "button", onclick: signOut }, "Sign out")),
+    shown, h("h2", {}, "Your tokens"),
+    table(["Token", "For", "Made", "Last used", ""], tokens.map((t) => [h("code", {}, t.id), t.label || "—", when(t.created_at), when(t.last_used_at),
+      h("button", { type: "button", onclick: () => revoke(t.id) }, "Revoke")]), "No tokens.")];
+  if (me.role === "admin") {
+    const everyone = await api("/v1/users");
+    const set = async (name, change) => {
+      try { await api(`/v1/users/${enc(name)}`, { method: "POST", body: change }); } catch (error) { window.alert(error.message); }
+      route();
+    };
+    parts.push(h("h2", {}, "Users"), table(["User", "Role", "Email", "Last sign-in", "Tokens", ""], everyone.map((u) => [
+      [u.display_name || u.name, u.display_name ? h("span", { class: "muted" }, ` ${u.name}`) : ""],
+      u.name === me.name ? u.role : h("select", { "aria-label": `Role of ${u.name}`, onchange: (e) => set(u.name, { role: e.target.value }) },
+        ["reader", "editor", "importer", "admin"].map((r) => h("option", { value: r, selected: r === u.role }, r))),
+      u.email || "—", when(u.last_sign_in_at), u.tokens,
+      u.name === me.name ? "" : h("button", { type: "button", onclick: () => set(u.name, { disabled: !u.disabled }) }, u.disabled ? "Enable" : "Disable")]), "No users."));
+  }
+  render(...parts);
+}
+
 // ---- routing --------------------------------------------------------------------------------------------------
 async function route() {
   const [path, query] = (location.hash.slice(1) || "/").split("?");
@@ -672,6 +745,7 @@ async function route() {
     tables: () => tablesPage(params),
     projects: () => projectsPage(),
     runs: () => runsPage(params),
+    account: () => accountPage(),
   };
   const section = { "": "#/", models: "#/models", model: "#/models", tables: "#/tables", projects: "#/projects", runs: "#/runs" }[parts[0] || ""];
   for (const link of document.querySelectorAll(".top nav a")) {
@@ -695,4 +769,5 @@ document.getElementById("search").addEventListener("submit", (event) => {
   location.hash = `#/search?q=${enc(document.getElementById("q").value.trim())}`;
 });
 window.addEventListener("hashchange", route);
+showAccount();
 route();

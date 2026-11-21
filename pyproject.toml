@@ -18,6 +18,7 @@ bigquery = [
 ]
 mcp = ["mcp>=2.0"]
 docs = ["pyyaml>=6"]
+sso = ["pyjwt[crypto]>=2.8"]
 
 [project.scripts]
 odcl = "odcl.cli:main"

@@ -132,3 +132,7 @@ a.console { font-size: 12px; white-space: nowrap; }
 .markdown h3, .markdown h4, .markdown h5, .markdown h6 { margin: 16px 0 6px; font-size: 15px; }
 .markdown p { margin: 6px 0; }
 .markdown pre.table-text { margin: 0; border: 0; padding: 0 4px; }
+.account a { color: var(--ink-2); white-space: nowrap; }
+.notice { border: 1px solid var(--ring); border-radius: 8px; padding: 8px 16px; margin: 12px 0; background: var(--surface); }
+.notice pre { user-select: all; overflow-x: auto; }
+button { font: inherit; padding: 5px 12px; border-radius: 8px; border: 1px solid var(--axis); background: var(--page); color: var(--ink); cursor: pointer; }

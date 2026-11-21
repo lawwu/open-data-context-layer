@@ -716,6 +716,9 @@ docs = [
 mcp = [
     { name = "mcp" },
 ]
+sso = [
+    { name = "pyjwt", extra = ["crypto"] },
+]
 vertex = [
     { name = "google-auth" },
     { name = "requests" },
@@ -738,6 +741,7 @@ requires-dist = [
     { name = "google-cloud-bigquery", marker = "extra == 'bigquery'", specifier = ">=3.25" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
+    { name = "pyjwt", extras = ["crypto"], marker = "extra == 'sso'", specifier = ">=2.8" },
     { name = "pyyaml", marker = "extra == 'docs'", specifier = ">=6" },
     { name = "requests", marker = "extra == 'dataform'", specifier = ">=2.31" },
     { name = "requests", marker = "extra == 'vertex'", specifier = ">=2.31" },
@@ -746,7 +750,7 @@ requires-dist = [
     { name = "sqlglot", marker = "extra == 'dataform'", specifier = ">=25" },
     { name = "sqlglot", marker = "extra == 'dbt'", specifier = ">=25" },
 ]
-provides-extras = ["dbt", "dataform", "vertex", "bigquery", "mcp", "docs"]
+provides-extras = ["dbt", "dataform", "vertex", "bigquery", "mcp", "docs", "sso"]
 
 [package.metadata.requires-dev]
 dev = [

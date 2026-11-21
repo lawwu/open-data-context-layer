@@ -66,6 +66,7 @@ def record_handoff(catalog: Catalog, invocation: str, target: str, snapshot: dic
     "schema": [field, ...]}. The action must have succeeded, the snapshot must copy the action's target, be taken
     after the action ended, and no other write to the target may be known in between. Recording the same handoff
     again changes nothing; claiming the same snapshot for another run is refused."""
+    catalog.allow("importer")
     target = target.strip().lower().removeprefix("table:")
     action = _action(catalog, invocation, target)
     require(action["state"] in ACTION_STATES_THAT_WROTE, "not_succeeded",
