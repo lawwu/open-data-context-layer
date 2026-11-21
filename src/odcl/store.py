@@ -43,6 +43,7 @@ NAME = re.compile(r"^[a-z0-9_][a-z0-9_.\-]{0,99}$")
 TEXT = {"table": {"system": 100, "layer": 50, "owner": 200, "type": 50},
         "column": {"dtype": 200, "definition": 4000, "owner": 200},
         "project": {"owner": 200, "repository": 500, "status": 50}}
+PRIVACY = {"data_category": 100, "retention": 100, "scrubbing": 200}  # with `pii`, on tables and columns: kept only when said
 HOW = ("direct", "column", "table", "downstream")  # how a project comes to depend on an entry, strongest first
 
 MIGRATIONS_LOCK = 0x6F64636C  # "odcl": one migration run at a time per database
@@ -95,7 +96,9 @@ def stamp(at: datetime) -> str:
 
 def search_text(body: dict) -> str:
     """The words an entry is found by, split the same way a query is."""
-    words = " ".join(str(body.get(f) or "") for f in ("title", "description", "definition", "owner", "layer", "system", "dtype", "doc_kind", "text"))
+    words = " ".join(str(body.get(f) or "") for f in ("title", "description", "definition", "owner", "layer", "system", "dtype", "doc_kind", "text",
+                                                      "data_category"))
+    words += " pii" if body.get("pii") else ""
     words += " " + " ".join(h["text"] for h in body.get("headings") or [])
     return " ".join(TOKEN.findall((words + " " + " ".join(body["tags"])).lower()))
 
@@ -219,6 +222,7 @@ class Catalog:
                 if prior:
                     said = prior["body"]
                     kept = {"description": said["description"] or None, **{f: said.get(f) for f in TEXT[kind]}, "tags": said["tags"],
+                            **({f: said.get(f) for f in ("pii", *PRIVACY)} if kind != "project" else {}),
                             "derived_from": [link["to"] for link in said["links"] if link["relation"] == "derived_from"]}
                     require(isinstance(payload.get("source") or {}, dict), "source", "source is a small object saying where the entry came from")
                     p = {**kept, **{k: v for k, v in payload.items() if v is not None}, "source": {**said["source"], **(payload.get("source") or {})}}
@@ -235,8 +239,21 @@ class Catalog:
             body = {"key": key, "kind": kind, "title": title, **extra,
                     "description": text(p.get("description"), "description", 4000, optional=kind != "project") or "",
                     **{field: text(p.get(field), field, limit, optional=True) for field, limit in TEXT[kind].items()},
+                    **(self._privacy(p) if kind != "project" else {}),
                     "tags": sorted(set(tags)), "source": source, "links": links}
             return self._write(body)
+
+    @staticmethod
+    def _privacy(p: dict) -> dict:
+        """Whether a table or column holds personal data, its data category, how long it is kept and how it is scrubbed.
+        Only what is said is kept, so entries that say none of it read as they did before these fields existed."""
+        pii = p.get("pii")
+        if isinstance(pii, str):
+            require(pii.lower() in ("yes", "no", "true", "false"), "pii", "pii is yes or no")
+            pii = pii.lower() in ("yes", "true")
+        require(pii is None or isinstance(pii, bool), "pii", "pii is yes or no")
+        found = {field: text(p.get(field), field, limit, optional=True) for field, limit in PRIVACY.items()}
+        return {k: v for k, v in {"pii": pii, **found}.items() if v is not None}
 
     @staticmethod
     def _own_tags(p: dict, payload: dict, said: dict | None) -> dict:
@@ -678,6 +695,40 @@ class Catalog:
               AND (%(system)s::text IS NULL OR r.body ->> 'system' = %(system)s) ORDER BY e.key""", {"layer": layer, "system": system}).fetchall()
         return [{**summary, "columns": r["columns"], "changed": stamp(r["recorded_at"])}
                 for r, summary in zip(rows, self._summaries([r["key"] for r in rows], users=True), strict=True)]
+
+    def set_privacy(self, keys: list[str], **fields) -> list[dict]:
+        """Say whether tables or columns hold personal data, how they are scrubbed, their data category or how long they
+        are kept (`pii`, `scrubbing`, `data_category`, `retention`), keeping everything else they say. All, or none."""
+        unknown = set(fields) - {"pii", *PRIVACY}
+        require(not unknown, "privacy", f"Privacy fields are pii, {', '.join(PRIVACY)}")
+        said = {k: v for k, v in fields.items() if v is not None}
+        require(said, "privacy", "Say at least one of pii, data_category, retention or scrubbing")
+        require(keys, "keys", "Name at least one table or column")
+        out = []
+        with self.db.transaction():
+            for name in keys:
+                body = self._head(self.resolve(name, ("table", "column")))["body"]
+                where = {"path": body["path"]} if body["kind"] == "table" else {"table": body["table"], "name": body["name"]}
+                out.append(self.put(body["kind"], {**where, **said}, merge=True))
+        return out
+
+    def privacy(self, pii_only: bool = False, table: str | None = None) -> list[dict]:
+        """Every column with what the catalog says about its privacy: whether it holds personal data, how it is
+        scrubbed, its data category and how long it is kept. A column that names no category or retention of its own
+        takes its table's, and says which it took. With `pii_only`, only columns marked as personal data."""
+        table = self.resolve(table, ("table",)) if table else None
+        out = []
+        for r in self.db.execute("""
+                SELECT c.key, cr.body AS col, tr.body AS tbl FROM entries c JOIN revisions cr ON cr.id = c.head_revision
+                JOIN entries t ON t.key = cr.body ->> 'table' JOIN revisions tr ON tr.id = t.head_revision
+                WHERE c.kind = 'column' AND cr.body ->> 'kind' = 'column' AND (%(table)s::text IS NULL OR cr.body ->> 'table' = %(table)s)
+                  AND (NOT %(pii)s OR (cr.body ->> 'pii')::boolean) ORDER BY c.key""", {"table": table, "pii": pii_only}):
+            col, tbl = r["col"], r["tbl"]
+            inherited = [f for f in ("data_category", "retention") if col.get(f) is None and tbl.get(f) is not None]
+            out.append({"key": r["key"], "table": col["table"], "column": col["name"], "dtype": col.get("dtype"), "pii": col.get("pii"),
+                        "scrubbing": col.get("scrubbing"), **{f: col.get(f) or tbl.get(f) for f in ("data_category", "retention")},
+                        "owner": col.get("owner") or tbl.get("owner"), "table_pii": tbl.get("pii"), "inherited": inherited})
+        return out
 
     def projects(self) -> list[dict]:
         """Every project: how much data it uses, how much of that changed after it was used, and its latest model version."""

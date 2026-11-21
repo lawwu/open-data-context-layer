@@ -276,6 +276,8 @@ async function entryPage(key) {
       ["Layer", entry.layer], ["System", entry.system], ["Owner", entry.owner], ["Status", entry.status],
       ["Repository", entry.repository],
       ["Tags", (entry.tags || []).join(", ")],
+      ["Personal data", entry.pii === true ? "yes" : entry.pii === false ? "no" : null], ["Scrubbing", entry.scrubbing],
+      ["Data category", entry.data_category], ["Retention", entry.retention],
       ["Revision", [`${entry.revision} by ${entry.registered_by}, `, when(entry.at)]],
       ["Sources", sources(entry.source)],
     ])),

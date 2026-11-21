@@ -382,6 +382,18 @@ The web page has a page for each document, with its links grouped by section and
 
 Not built yet: a model version that relied on a document revision (`relied_on`).
 
+## Privacy
+
+Tables and columns can say whether they hold personal data (`pii`), how it is scrubbed (`scrubbing`: hashed, truncated, removed…), their data category (`data_category`) and how long they are kept (`retention`). A column that names no category or retention of its own takes its table's. Only what is said is kept: a column that says nothing about `pii` is unknown, not "no".
+
+```sh
+uv run odcl privacy set warehouse.crm.customers --data-category contact --retention 400d
+uv run odcl privacy set warehouse.crm.customers.email --pii yes --scrubbing hashed
+uv run odcl privacy export --pii-only > privacy.csv        # or --json; --table for one table
+```
+
+`odcl add table|column` take the same flags. A dbt project can say them in `meta` (directly, or under `meta.privacy`) on a source, a model or a column. Imports that merge (BigQuery, Dataform, SQL definitions, OpenLineage) keep what was set; a dbt import says everything about its models, so for those keep the fields in dbt's `meta`. The web page shows them on each entry, and `GET /v1/privacy` answers what `privacy export` does.
+
 ## For agents
 
 ```sh

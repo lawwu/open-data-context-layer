@@ -175,6 +175,18 @@ def lines(command: str, result) -> list[str]:
         if not result["synced"]:
             out.append("No job history has been synced yet: run `odcl sync bigquery-jobs --project PROJECT`")
         return out
+    if command == "privacy" and "entries" in result:
+        return [f"{e['key']}  {e['change']}  ({e['revision']})" for e in result["entries"]]
+    if command == "privacy":
+        import csv
+        import io
+        out = io.StringIO()
+        fields = ["key", "table", "column", "dtype", "pii", "scrubbing", "data_category", "retention", "owner", "table_pii", "inherited"]
+        writer = csv.DictWriter(out, fields, lineterminator="\n")
+        writer.writeheader()
+        for c in result["columns"]:
+            writer.writerow({**c, **{f: {True: "yes", False: "no", None: ""}[c[f]] for f in ("pii", "table_pii")}, "inherited": " ".join(c["inherited"])})
+        return [out.getvalue().rstrip("\n")]
     if command == "migrate":
         return [f"applied {name}" for name in result["applied"]] or ["The database is up to date."]
     if command == "import-sqlite":
@@ -258,9 +270,14 @@ def run(catalog: Catalog, args):
         return builds.explain_dataset(catalog, args.reference)
     if args.command == "history":
         return catalog.table_history(args.key, span(args.since), args.patterns, args.limit)
+    if args.command == "privacy" and args.what == "set":
+        return {"entries": catalog.set_privacy(args.keys, pii=args.pii, data_category=args.data_category, retention=args.retention, scrubbing=args.scrubbing)}
+    if args.command == "privacy":
+        return {"columns": catalog.privacy(args.pii_only, args.table)}
     if args.command == "add":
         fields = {k: v for k, v in vars(args).items() if k in ("path", "table", "name", "description", "system", "layer", "owner", "type", "dtype",
-                                                                 "definition", "repository", "status", "derived_from", "tags") and v not in (None, [])}
+                                                                 "definition", "repository", "status", "derived_from", "tags", "pii", "data_category",
+                                                                 "retention", "scrubbing") and v not in (None, [])}
         return catalog.put(args.kind, fields)
     if args.command == "find":
         return catalog.find(" ".join(args.words), args.kind, args.layer, args.limit)
@@ -278,6 +295,13 @@ def run(catalog: Catalog, args):
     if args.command == "uses":
         return catalog.uses(args.project, args.upstream, args.revision)
     return catalog.overview()
+
+
+def privacy_flags(p) -> None:
+    p.add_argument("--pii", choices=["yes", "no"], help="whether it holds personal data")
+    p.add_argument("--data-category", metavar="CATEGORY", help="e.g. contact, financial, health; a column without one takes its table's")
+    p.add_argument("--retention", metavar="PERIOD", help="how long it is kept, e.g. 400d or 7 years; a column without one takes its table's")
+    p.add_argument("--scrubbing", metavar="HOW", help="how the personal data is scrubbed, e.g. hashed, truncated, removed")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -357,6 +381,16 @@ def parser() -> argparse.ArgumentParser:
         k.add_argument("--tags", nargs="+", default=[])
     for k in (t, c):
         k.add_argument("--derived-from", nargs="+", default=[], metavar="KEY", help="what it is built from")
+        privacy_flags(k)
+
+    s = sub.add_parser("privacy", help="which tables and columns hold personal data, their data category and retention")
+    kinds = s.add_subparsers(dest="what", required=True)
+    v = kinds.add_parser("set", help="say these for tables or columns, keeping what else they say")
+    v.add_argument("keys", nargs="+", metavar="KEY")
+    privacy_flags(v)
+    v = kinds.add_parser("export", help="every column with its privacy fields, as CSV (or --json)")
+    v.add_argument("--pii-only", action="store_true", help="only columns marked as personal data")
+    v.add_argument("--table", help="only this table's columns")
 
     s = sub.add_parser("sync", help="read new activity from a source into the catalog")
     kinds = s.add_subparsers(dest="what", required=True)

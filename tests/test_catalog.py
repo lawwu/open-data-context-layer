@@ -218,3 +218,45 @@ def test_under_merge_each_importer_replaces_only_its_own_tags(database):
         c.put("table", {"path": "p.d.old", "tags": ["a", "b"], "source": {"dataform": {"file": "old.sqlx"}}})
         c.put("table", {"path": "p.d.old", "tags": ["a"], "source": {"dataform": {"file": "old.sqlx"}}}, merge=True)
         assert c.get("p.d.old")["tags"] == ["a"]
+
+
+def test_privacy_fields_are_said_kept_inherited_and_exported(fathom, database, tmp_path, capsys):
+    accounts = fathom.get(BRONZE)
+    fathom.set_privacy([BRONZE], data_category="customer", retention="400d")
+    fathom.set_privacy([f"{BRONZE}.account_id"], pii=True, scrubbing="hashed")
+    kept = fathom.get(BRONZE)
+    assert (kept["data_category"], kept["retention"], kept["description"], kept["layer"]) == ("customer", "400d", accounts["description"], "bronze")
+    assert fathom.get(f"{BRONZE}.account_id")["pii"] is True
+    assert fathom.apply(dbt_entries(DBT), merge=True)["changed"] == 0  # an import that says nothing of privacy keeps it
+
+    columns = {c["column"]: c for c in fathom.privacy(table=BRONZE)}
+    assert columns["account_id"] | {} == {**columns["account_id"], "pii": True, "scrubbing": "hashed", "data_category": "customer",
+                                          "retention": "400d", "inherited": ["data_category", "retention"]}
+    assert columns["plan"]["pii"] is None  # not said is not "no"
+    assert [c["key"] for c in fathom.privacy(pii_only=True)] == [f"column:{BRONZE}.account_id"]
+    assert fathom.find("pii")[0]["key"] == f"column:{BRONZE}.account_id"
+    with pytest.raises(CatalogError, match="pii is yes or no"):
+        fathom.set_privacy([BRONZE], pii="maybe")
+
+    db = ["--database-url", database]
+    assert main([*db, "privacy", "set", f"{BRONZE}.plan", "--pii", "no", "--data-category", "billing"]) == 0
+    capsys.readouterr()
+    assert main([*db, "privacy", "export", "--table", BRONZE]) == 0
+    rows = capsys.readouterr().out.splitlines()
+    assert rows[0].startswith("key,table,column,dtype,pii,scrubbing,data_category,retention")
+    assert f"column:{BRONZE}.plan,table:{BRONZE},plan," in rows[-1] and ",no,,billing,400d," in rows[-1]
+
+
+def test_dbt_meta_says_what_is_personal_data(database, tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    manifest = json.loads((DBT / "manifest.json").read_text())
+    accounts = manifest["sources"]["source.churn.bronze.accounts"]
+    accounts["meta"] |= {"data_category": "customer", "retention": "7 years"}
+    accounts["columns"]["account_id"]["meta"] = {"privacy": {"pii": "yes", "scrubbing": "hashed"}}
+    (target / "manifest.json").write_text(json.dumps(manifest))
+    with Catalog(database, actor="ana") as c:
+        c.apply(dbt_entries(target))
+        assert (c.get(BRONZE)["data_category"], c.get(BRONZE)["retention"]) == ("customer", "7 years")
+        assert (c.get(f"{BRONZE}.account_id")["pii"], c.get(f"{BRONZE}.account_id")["scrubbing"]) == (True, "hashed")
+        assert "pii" not in c.get(f"{BRONZE}.plan")  # only what is said is kept
