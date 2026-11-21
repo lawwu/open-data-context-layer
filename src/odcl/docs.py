@@ -76,11 +76,21 @@ def odcl_block(meta: dict | None, body: str) -> tuple[dict | None, str]:
     block = (meta or {}).get("odcl")
     if isinstance(block, dict):
         return block, body
-    found = COMMENT.search(body)
+    found = next((m for m in COMMENT.finditer(body) if not _fenced(body[:m.start()])), None)  # not an example in a code block
     if not found:
         return None, body
     block = _yaml(found.group(1), "odcl comment")
     return (block if isinstance(block, dict) else None), body[:found.start()] + body[found.end():]
+
+
+def _fenced(before: str) -> bool:
+    """Whether text that follows `before` is inside a fenced code block."""
+    fenced = None
+    for line in before.splitlines():
+        fence = FENCE.match(line)
+        if fence:
+            fenced = None if fenced == fence.group(1) else (fenced or fence.group(1))
+    return fenced is not None
 
 
 def anchor(heading: str) -> str:

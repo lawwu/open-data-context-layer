@@ -177,3 +177,11 @@ def test_a_page_whose_frontmatter_a_linter_owns_puts_the_odcl_block_in_an_html_c
     page.write_text("# No frontmatter at all\n\n<!-- odcl:\ndescribes:\n  - key: table:warehouse.sales.orders\n-->\n")
     docs.import_docs(catalog, [str(page)], repo_url=REPO, commit=COMMIT)
     assert [d["key"] for d in catalog.get("document:example-org/knowledge-base/finding.md")["describes"]] == ["table:warehouse.sales.orders"]
+
+
+def test_an_odcl_comment_shown_as_an_example_in_a_code_block_is_not_the_page_s_block():
+    body = "# How to tag a page\n\n```markdown\n<!-- odcl\nkind: finding\n-->\n```\n\nThat is all.\n"
+    block, kept = docs.odcl_block(None, body)
+    assert block is None and kept == body
+    block, kept = docs.odcl_block(None, body + "\n<!-- odcl\nkind: guide\n-->\n")
+    assert block == {"kind": "guide"} and "kind: finding" in kept

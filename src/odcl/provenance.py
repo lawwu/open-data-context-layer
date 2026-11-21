@@ -43,9 +43,12 @@ def describe(what: str | None, *, kind: str | None = None, command: str | None =
     out: dict = {"command": command, "note": note}
     if what and Path(what).expanduser().is_file():
         path = Path(what).expanduser()
-        ref = code_ref(path) or {}
+        try:
+            ref = code_ref(path) or {}
+        except FileNotFoundError:  # git is not installed: the file is named by itself
+            ref = {}
         out |= {"path": ref.get("path") or path.name, "repository": repo_url or ref.get("repository"), "commit": commit or ref.get("commit"),
-                "url": ref.get("url")}
+                "url": None if commit or repo_url else ref.get("url")}  # a commit or repository named here makes its own link, below
         if ref and _dirty(path):
             out["uncommitted"] = True
     elif what and what.startswith(("http://", "https://")):

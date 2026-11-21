@@ -56,3 +56,9 @@ def test_a_table_says_what_created_it_and_keeps_it_through_imports(database, rep
     db = ["--database-url", database]
     assert main([*db, "created-by", "lake.cohorts.monthly", str(root / "make_features.py"), "--command", "python make_features.py"]) == 0
     assert "created by script make_features.py at" in capsys.readouterr().out
+
+
+def test_a_commit_named_for_a_local_file_makes_the_link_too(repo):
+    root, commit = repo
+    said = describe(str(root / "make_features.py"), commit="abc123")
+    assert said["commit"] == "abc123" and said["url"] == "https://github.com/example-org/analysis/blob/abc123/make_features.py"

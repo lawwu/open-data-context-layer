@@ -399,7 +399,7 @@ uv run odcl import --docs ../knowledge-base/docs
 uv run odcl docs warehouse.sales.orders.status_code
 ```
 
-- **When another tool owns the frontmatter**, such as a linter that allows only its own keys, put the block in an HTML comment anywhere in the page instead. It holds what the `odcl:` key would, and is left out of the page's text:
+- **When another tool owns the frontmatter**, such as a linter that allows only its own keys, put the block in an HTML comment anywhere in the page instead (outside code blocks: one shown as an example in a fence is left alone). It holds what the `odcl:` key would, and is left out of the page's text:
 
   ```markdown
   <!-- odcl
