@@ -64,7 +64,7 @@ def client() -> Client:
 
 def fqn(target: dict | None) -> str | None:
     """project.dataset.table for a Dataform target, lower-cased as the catalog keys tables."""
-    return ".".join(target[k] for k in ("database", "schema", "name")).lower() if target else None
+    return ".".join(target[k] for k in ("database", "schema", "name") if target.get(k)).lower() if target else None
 
 
 def _time(value: str | None) -> datetime | None:
@@ -75,8 +75,9 @@ def _time(value: str | None) -> datetime | None:
 class Definitions:
     """Builds the catalog entries for one compilation result, dependencies before what depends on them."""
 
-    def __init__(self, catalog: Catalog, repository: str):
+    def __init__(self, catalog: Catalog, repository: str, *, importer: str = "dataform", system: str = "bigquery", dialect: str = DIALECT):
         self.catalog, self.repository = catalog, repository
+        self.importer, self.system, self.dialect = importer, system, dialect  # whose name the entries' details are kept under, and the SQL's
         self.entries: list[tuple[str, dict]] = []
         self.tables: set[str] = set()
         self.columns: dict[str, set[str]] = {}  # table fqn -> column names registered in this batch
@@ -89,7 +90,7 @@ class Definitions:
 
     def table(self, table: str, payload: dict | None = None) -> None:
         if payload is not None or (table not in self.tables and not self.catalog._head(f"table:{table}")):
-            self.entries.append(("table", {"path": table, "system": "bigquery", **(payload or {})}))
+            self.entries.append(("table", {"path": table, "system": self.system, **(payload or {})}))
         self.tables.add(table)
 
     def column(self, table: str, name: str, payload: dict | None = None) -> str:
@@ -103,20 +104,20 @@ class Definitions:
     def declaration(self, action: dict) -> None:
         described = (action["declaration"].get("relationDescriptor") or {})
         self.table(fqn(action["target"]), {"description": (described.get("description") or "")[:4000] or None,
-                                           "source": {"dataform": {"repository": self.repository, "file": action.get("filePath"), "declared": True}}})
+                                           "source": {self.importer: {"repository": self.repository, "file": action.get("filePath"), "declared": True}}})
 
     def relation(self, action: dict) -> None:
         relation, target = action["relation"], fqn(action["target"])
         sql = relation.get("selectQuery") or ""
         described = relation.get("relationDescriptor") or {}
         notes = {".".join(c.get("path") or []).lower(): c.get("description") for c in described.get("columns") or []}
-        reads = sorted({*(fqn(t) for t in relation.get("dependencyTargets") or []), *lineage.tables(sql, DIALECT)} - {target})
+        reads = sorted({*(fqn(t) for t in relation.get("dependencyTargets") or []), *lineage.tables(sql, self.dialect)} - {target})
         for table in reads:
             self.table(table)
         self.table(target, {
             "description": (described.get("description") or "")[:4000] or None, "type": (relation.get("relationType") or "table").lower(),
             "derived_from": [f"table:{t}" for t in reads],
-            "source": {"dataform": {"repository": self.repository, "file": action.get("filePath"), "canonical_target": fqn(action.get("canonicalTarget")),
+            "source": {self.importer: {"repository": self.repository, "file": action.get("filePath"), "canonical_target": fqn(action.get("canonicalTarget")),
                                     "query_sha256": hashlib.sha256(sql.encode()).hexdigest()}}})
         schema: dict = {}
         for table in reads:
@@ -127,28 +128,29 @@ class Definitions:
             for part in path:
                 level = level.setdefault(part, {})
             level[name] = {c: "unknown" for c in sorted(self.known_columns(table))}
-        outputs = lineage.selected(sql, DIALECT, schema)
+        outputs = lineage.selected(sql, self.dialect, schema)
         traced: dict[str, str] = {}
         if not outputs:  # SQL nothing can read: whatever the catalog knew of these columns is no longer this definition
             for name in sorted(self.known_columns(target)):
-                self.column(target, name, {"definition": "", "derived_from": [], "tags": ["lineage:partial"], "source": {"dataform": {"file": action.get("filePath")}}})
+                self.column(target, name, {"definition": "", "derived_from": [], "tags": ["lineage:partial"], "source": {self.importer: {"file": action.get("filePath")}}})
         for name in outputs:
             expression, parents, complete = None, [], False
             try:
-                expression, parents, complete = lineage.column_parents(name, sql, DIALECT, schema)
+                expression, parents, complete = lineage.column_parents(name, sql, self.dialect, schema)
             except Exception:  # noqa: BLE001 - a column sqlglot cannot trace is kept, marked as partial
                 pass
             upstream = sorted({self.column(rel, clean(col)) for rel, col in parents if rel and rel != target})
             self.column(target, clean(name), {"definition": (expression or "")[:4000], "derived_from": upstream,
                                               "tags": [] if complete else ["lineage:partial"], "description": (notes.get(name) or "")[:4000] or None,
-                                              "source": {"dataform": {"file": action.get("filePath")}}})
+                                              "source": {self.importer: {"file": action.get("filePath")}}})
             traced[clean(name)] = "resolved" if complete else "partial"
         self.traced[target] = traced
 
 
-def definition_entries(catalog: Catalog, repository: str, compiled: list[dict]) -> Definitions:
-    """Entries for every declaration and table a compilation result defines, each after the tables it reads."""
-    out = Definitions(catalog, repository)
+def definition_entries(catalog: Catalog, repository: str, compiled: list[dict], **options) -> Definitions:
+    """Entries for every declaration and table a compilation result defines, each after the tables it reads. `options`
+    name another importer, system and SQL dialect for definitions in Dataform's shape that come from elsewhere."""
+    out = Definitions(catalog, repository, **options)
     for action in compiled:
         if action.get("declaration") and action.get("target"):
             out.declaration(action)

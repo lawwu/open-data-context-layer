@@ -166,6 +166,21 @@ This reads one workflow invocation and the compilation result it ran, with free 
 
 Import an invocation by name for now. Discovering invocations is not built yet.
 
+## Importing SQL definitions from anywhere
+
+A registry, a hand-kept list of views, or any tool odcl has no importer for can write its definitions as JSON Lines, one table per line, and odcl reads them the way it reads a Dataform compilation: each column is traced through the SELECT, `SELECT *` expands to what the catalog knows of the tables read, and a column traced only in part is tagged `lineage:partial`.
+
+```json
+{"target": "proj.ds.orders", "declaration": true, "description": "Orders, as the billing system loads them"}
+{"target": "proj.ds.by_region", "type": "view", "file": "views/by_region.sql", "description": "Totals by region", "select": "SELECT region, SUM(amount) AS total FROM proj.ds.orders GROUP BY region", "dependencies": [], "columns": {"total": "Order amount, summed"}}
+```
+
+```sh
+uv run odcl import --sql-definitions definitions.jsonl            # --dialect for SQL other than BigQuery's
+```
+
+`target` is required, and so is `select` unless the line is a `declaration` (a source table with no SQL). `dependencies` adds tables the SELECT does not name. Entries merge with what other importers said, under `sql_definitions` in `source`; the whole file is applied together, and a line that cannot be read is refused with its line number before anything is written.
+
 ## Binding data to the build that made it
 
 A table name and its latest successful job do not say which run produced the rows a model read. In the pilot a build hands on a snapshot instead: after the action that writes a table succeeds, and before the next write, it creates a uniquely named [table snapshot](https://docs.cloud.google.com/bigquery/docs/table-snapshots-intro) and records the handoff:

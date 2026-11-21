@@ -128,6 +128,9 @@ def lines(command: str, result) -> list[str]:
         return ([f"{counts['added']} added, {counts['changed']} changed, {counts['unchanged']} unchanged from {result['compilation_result']}"]
                 + (["Definitions not applied: a newer compilation of this repository was imported before"] if result["definitions"] != "applied" else [])
                 + [f"  {a['target']}  {a['state']}" + (f"  job {a['job_id']}" if a["job_id"] else "") for a in result["actions"]])
+    if command == "import" and "definitions" in result:
+        return [f"{result['definitions']} definitions: {result['added']} entries added, {result['changed']} changed, {result['unchanged']} unchanged; "
+                f"{result['columns_traced']} columns traced, {result['columns_partial']} in part"]
     if command == "import":
         return [f"{result['added']} added, {result['changed']} changed, {result['unchanged']} unchanged"]
     if command == "handoff":
@@ -186,8 +189,12 @@ def run(catalog: Catalog, args):
         from .legacy import import_sqlite
         return import_sqlite(catalog, args.path)
     if args.command == "import":
-        require(sum(map(bool, (args.dbt, args.bigquery, args.dataform, args.vertex_manifest, args.openlineage, args.docs))) == 1, "import",
-                "Import from one place: --dbt PATH, --bigquery TABLE..., --dataform INVOCATION, --vertex-manifest PATH, --openlineage FILE or --docs PATH...")
+        require(sum(map(bool, (args.dbt, args.bigquery, args.dataform, args.vertex_manifest, args.openlineage, args.docs, args.sql_definitions))) == 1,
+                "import", "Import from one place: --dbt PATH, --bigquery TABLE..., --dataform INVOCATION, --vertex-manifest PATH, --openlineage FILE, "
+                          "--docs PATH... or --sql-definitions FILE")
+        if args.sql_definitions:
+            from .sqldefs import import_definitions
+            return import_definitions(catalog, args.sql_definitions, dialect=args.dialect)
         if args.docs:
             from .docs import import_docs
             return import_docs(catalog, args.docs, repo_url=args.repo_url, commit=args.commit)
@@ -297,6 +304,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--repo-url", metavar="URL", help="with --docs: the repository's web address, when git cannot say")
     s.add_argument("--commit", metavar="SHA", help="with --docs: the commit the pages were read at, when git cannot say")
     s.add_argument("--openlineage", metavar="FILE", help="OpenLineage events: one JSON event, a JSON list of them, or JSON Lines")
+    s.add_argument("--sql-definitions", metavar="FILE", help="JSON Lines of tables and the SELECT that builds each: target, select, dependencies, "
+                                                             "description, columns, type, file (or declaration: true)")
+    s.add_argument("--dialect", default="bigquery", help="with --sql-definitions: the SQL dialect, as sqlglot names it (default: bigquery)")
     s.add_argument("--project", help="with --bigquery: the project the API calls are made from (default: your credentials' project)")
 
     s = sub.add_parser("handoff", help="record that a successful build handed on a snapshot of its output")
