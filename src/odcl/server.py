@@ -6,6 +6,7 @@ MCP tools answer. It runs on the standard library's threaded HTTP server, with o
     GET  /v1/overview
     GET  /v1/search?q=&kind=&layer=&limit=&retired=
     GET  /v1/entries/{key}                       one entry in full
+    GET  /v1/entries/{key}/diff?since=&until=    what changed, each change labelled cosmetic, additive, semantic or breaking
     GET  /v1/entries/{key}/lineage?direction=    up, down or both
     GET  /v1/entries/{key}/used-by
     GET  /v1/entries/{key}/documents             the documents that describe it
@@ -108,6 +109,7 @@ ROUTES = [
     ("GET", r"/v1/entries/(?P<key>[^/]+)/lineage", "reader", lambda c, m, q, b: c.lineage(m["key"], q.get("direction", "both"))),
     ("GET", r"/v1/entries/(?P<key>[^/]+)/used-by", "reader", lambda c, m, q, b: c.used_by(m["key"])),
     ("GET", r"/v1/entries/(?P<key>[^/]+)/documents", "reader", lambda c, m, q, b: c.documents(m["key"])),
+    ("GET", r"/v1/entries/(?P<key>[^/]+)/diff", "reader", lambda c, m, q, b: c.diff(m["key"], q.get("since") or None, q.get("until") or None)),
     ("GET", r"/v1/projects/(?P<name>[^/]+)/uses", "reader", lambda c, m, q, b: c.uses(m["name"], _flag(q.get("upstream")))),
     ("GET", r"/v1/query-history", "reader", lambda c, m, q, b: c.table_history(q.get("table", ""), _span(q.get("since", "7d")), _flag(q.get("patterns")),
                                                                              _limit(q.get("limit"), 100))),

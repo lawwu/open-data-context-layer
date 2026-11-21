@@ -8,6 +8,11 @@ section says how a release is cut.
 
 ## Unreleased
 
+- `odcl diff` (`GET /v1/entries/{key}/diff`, the `what_changed` MCP tool, `Catalog.diff`): what
+  changed in a table, with its columns, or a column between two revisions or times, each change
+  labelled `cosmetic`, `additive`, `semantic` or `breaking`. What a project uses carries the
+  worst change since the use (`severity`), and a used table now counts as changed when one of
+  its columns changed. Entry pages show what changed.
 - **Users, roles and sign-in.** Users with one role each (`reader`, `editor`, `importer`,
   `admin`) and API tokens (`odcl users ...`; run `odcl migrate` for migration 0011). With
   `$ODCL_TOKEN`, the CLI and `odcl mcp` sign in as that user, record changes under their

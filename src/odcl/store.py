@@ -645,8 +645,14 @@ class Catalog:
         else:
             rows = self.db.execute("SELECT source_key AS other, target_revision, purpose, target_head FROM current_links "
                                    "WHERE target_key = %s AND relation = %s ORDER BY source_key", (key, relation)).fetchall()
-        return [{**summary, "linked_revision": r["target_revision"], "changed_since": r["target_revision"] != r["target_head"],
-                 **({"purpose": r["purpose"]} if relation == "uses" else {})} for r, summary in zip(rows, self._summaries([r["other"] for r in rows]), strict=True)]
+        out = [{**summary, "linked_revision": r["target_revision"], "changed_since": r["target_revision"] != r["target_head"],
+                **({"purpose": r["purpose"]} if relation == "uses" else {})} for r, summary in zip(rows, self._summaries([r["other"] for r in rows]), strict=True)]
+        if relation == "uses" and direction == "up":  # how much what a project used has changed since: see odcl.changes
+            from .changes import severity_since_use
+            for u in out:  # a table also changes when its columns do
+                u["severity"] = severity_since_use(self, key, u["key"], u["linked_revision"]) if u["changed_since"] or u["kind"] == "table" else None
+                u["changed_since"] = u["changed_since"] or u["severity"] is not None
+        return out
 
     def _walk(self, key: str, direction: str) -> list[dict]:
         """Every entry reachable along lineage from `key`, nearest first. One recursive query reads the edges."""
@@ -829,6 +835,12 @@ class Catalog:
             out["built_from"] = sorted(reached, key=lambda n: n["key"])
         return out
 
+    def diff(self, name: str, since=None, until=None) -> dict:
+        """What changed in an entry, and a table's columns, between two revisions or times, each change labelled
+        cosmetic, additive, semantic or breaking. See `odcl.changes`."""
+        from .changes import diff
+        return diff(self, name, since, until)
+
     def rely(self, name: str, version: str, documents: list[str], why: str | None = None) -> dict:
         """Record that a model version relied on these documents, each at the revision current when it was trained."""
         from .vertex import rely
@@ -1004,15 +1016,18 @@ class Catalog:
         gone = [{"project": r["source_key"], "key": r["target_key"]} for r in self.db.execute(
             """SELECT l.source_key, l.target_key FROM current_links l JOIN entries e ON e.key = l.target_key JOIN revisions r ON r.id = e.head_revision
                WHERE l.relation = 'uses' AND r.body ? 'retired' ORDER BY l.source_key, l.target_key""")]
-        stale = [{"project": r["source_key"], "key": r["target_key"]} for r in self.db.execute(
-            "SELECT source_key, target_key FROM current_links WHERE relation = 'uses' AND target_revision <> target_head ORDER BY source_key, target_key")]
+        from .changes import severity_since_use
+        stale = [{"project": r["source_key"], "key": r["target_key"], "severity": severity_since_use(self, r["source_key"], r["target_key"], r["target_revision"])}
+                 for r in self.db.execute("SELECT source_key, target_key, target_revision FROM current_links WHERE relation = 'uses' "
+                                          "AND (target_revision <> target_head OR target_key LIKE 'table:%%') ORDER BY source_key, target_key")]
+        stale = [x for x in stale if x["severity"] is not None or not x["key"].startswith("table:")]  # a used table changed if its columns did
         described = [{"document": r["source_key"], "key": r["target_key"]} for r in self.db.execute(
             "SELECT source_key, target_key FROM current_links WHERE relation = 'describes' AND target_revision <> target_head ORDER BY source_key, target_key")]
         relied = [{"model": r["project_key"].removeprefix("project:"), "version": r["version"], "document": r["document_key"]} for r in self.db.execute(
             """SELECT b.project_key, b.version, d.document_key FROM build_documents d JOIN model_builds b ON b.id = d.build_id
                JOIN entries e ON e.key = d.document_key WHERE e.head_revision <> d.document_revision ORDER BY b.project_key, b.version, d.document_key""")]
         info = self.db.info
-        stale = [x for x in stale if x not in gone]  # a retired entry is listed as gone, not as changed
+        stale = [x for x in stale if {"project": x["project"], "key": x["key"]} not in gone]  # a retired entry is listed as gone, not as changed
         return {"counts": counts, "retired": retired, "changed_since_used": stale, "retired_but_used": gone,
                 "changed_since_described": described, "changed_since_relied_on": relied,
                 "database": f"{info.host}:{info.port}/{info.dbname}"}

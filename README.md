@@ -67,6 +67,7 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 | `odcl find WORDS [--kind] [--layer] [--retired]` | What data is there for this? |
 | `odcl show KEY` | Everything about one entry, with its history |
 | `odcl lineage KEY` | What is it built from, and what is built from it? |
+| `odcl diff KEY [--since REV\|TIME] [--until REV\|TIME]` | What changed, and does it break what uses it? |
 | `odcl used-by KEY` | Which projects depend on it? |
 | `odcl uses PROJECT [--upstream] [--revision REV]` | What did this project use, now or at an older revision of it? |
 | `odcl use PROJECT KEY... [--for TEXT]` | Record that a project used data |
@@ -213,6 +214,24 @@ An import also says what is no longer there. After it registers what it read, wh
 - **What retirement changes.** A retired table or column leaves `odcl find`, `odcl tables` and the counts (`--retired`, or `retired=1` over HTTP, includes it), and a table lists its retired columns apart. A project that used it is listed in `overview` as `retired_but_used` and flagged on the web page. Its history keeps every revision, so what a model version pinned can still be read.
 - **Coming back.** When the importer sees it again, it is registered as usual and no longer retired. A hand edit, such as a description, does not revive it.
 - Importing again changes nothing: what is retired stays retired, and each import's result lists what it `retired` and `withdrawn`.
+
+## What changed, and how much it matters
+
+`odcl diff` compares an entry between two points in its history, and a table's diff includes its columns, since a table's schema is its columns. Each change is labelled by how much it matters to what uses it:
+
+| Severity | Changes |
+| --- | --- |
+| `breaking` | a column's type changed from one stated type to another; a table or column removed or retired |
+| `semantic` | a definition, the inputs it is computed from, a foreign key, the copies of a definition, a privacy field, a document's text |
+| `additive` | a column or table added, or revived |
+| `cosmetic` | a description, owner, tags, layer, a type stated for the first time |
+
+```sh
+uv run odcl diff core.sales.daily_totals                 # its latest change, with its columns'
+uv run odcl diff core.sales.daily_totals --since 7d      # or a revision (rev_...), or a time
+```
+
+What a project uses carries the worst change since it used it (`severity` on `get` of a project, `uses` and `overview`'s `changed_since_used`), measured from when the use was recorded. A used table counts as changed when one of its columns changed, even if the table's own revision did not. The same diff is `GET /v1/entries/{key}/diff?since=&until=`, the `what_changed` MCP tool and `Catalog.diff`, and an entry's page shows it, with "changes since" on each revision in its history.
 
 ## Binding data to the build that made it
 
@@ -521,7 +540,7 @@ uv run odcl privacy export --pii-only > privacy.csv        # or --json; --table 
 uv run odcl mcp
 ```
 
-serves `find_data`, `get_entry`, `trace_lineage`, `documents_for`, `used_by` and `project_uses` over the Model Context Protocol (the official [MCP SDK](https://github.com/modelcontextprotocol/python-sdk)). With `--allow-writes` it also offers `register_project` and `record_use`, to a direct connection or, with `$ODCL_TOKEN`, to an editor or above.
+serves `find_data`, `get_entry`, `trace_lineage`, `documents_for`, `used_by`, `what_changed` and `project_uses` over the Model Context Protocol (the official [MCP SDK](https://github.com/modelcontextprotocol/python-sdk)). With `--allow-writes` it also offers `register_project` and `record_use`, to a direct connection or, with `$ODCL_TOKEN`, to an editor or above.
 
 ```sh
 ODCL_TOKEN=odcl_... uv run odcl mcp --server https://catalog.example.com --allow-writes

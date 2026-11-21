@@ -20,7 +20,7 @@ def test_an_assistant_finds_data_and_records_use_over_mcp(database):
             catalog.apply(dbt_entries(DBT))
             async with Client(build(Tools(catalog))) as reader:
                 names = [t.name for t in (await reader.list_tools()).tools]
-                assert names == ["find_data", "get_entry", "trace_lineage", "documents_for", "used_by", "project_uses"]  # no writes unless allowed
+                assert names == ["find_data", "get_entry", "trace_lineage", "documents_for", "used_by", "what_changed", "project_uses"]  # no writes unless allowed
                 found = json.loads((await reader.call_tool("find_data", {"query": "tenure"})).content[0].text)
                 assert found["results"][0]["key"].endswith("tenure_months")
                 refused = await reader.call_tool("record_use", {"project": "p", "keys": ["x"]})

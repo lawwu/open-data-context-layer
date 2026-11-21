@@ -127,8 +127,38 @@ function stateBadge(state) {
   return h("span", { class: `status ${good ? "good" : bad ? "critical" : ""}` }, good ? "✓ " : bad ? "✕ " : "◷ ", value.replace("PIPELINE_STATE_", ""));
 }
 
-function changedBadge() {
-  return h("span", { class: "status warning", title: "Redefined after this link was recorded" }, "△ changed since");
+function changedBadge(severity) {
+  const title = "Redefined after this link was recorded" + (severity ? `; the worst change is ${severity}` : "");
+  return h("span", { class: `status ${severity === "breaking" ? "critical" : "warning"}`, title }, "△ changed since" + (severity ? ` · ${severity}` : ""));
+}
+
+// cosmetic: what people read; additive: new; semantic: the data may mean something else; breaking: what used it may fail
+function severityBadge(severity) {
+  const cls = { breaking: "status critical", semantic: "status warning" }[severity] || "status";
+  return h("span", { class: cls }, severity);
+}
+
+async function changesSection(key, since) {
+  const box = h("div", {});
+  const show = async (from) => {
+    const d = await api(`/v1/entries/${enc(key)}/diff${from ? `?since=${enc(from)}` : ""}`);
+    box.replaceChildren(
+      h("p", { class: "muted" }, d.from ? ["From ", h("code", {}, d.from.revision), " (", when(d.from.at), ") to ", h("code", {}, d.to.revision), " (", when(d.to.at), ")",
+        d.severity ? [": the worst change is ", severityBadge(d.severity)] : ": nothing changed"] : "Since it was first registered."),
+      d.changes.length ? table(["What", "Change", "Before", "After", ""], d.changes.map((c) => [
+        c.key === key ? "this entry" : entryLink(c.key, c.key.split(".").pop()), c.change,
+        c.added ? (c.removed.length ? c.removed.map(short).join(", ") : "") : fmt(c.before), c.added ? (c.added.length ? c.added.map(short).join(", ") : "") : fmt(c.after),
+        severityBadge(c.severity)])) : null);
+  };
+  await show(since);
+  box.show = show;
+  return box;
+}
+
+function fmt(value) {
+  if (value === null || value === undefined || value === "") return "";
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return text.length > 80 ? h("span", { title: text }, `${text.slice(0, 80)}…`) : text;
 }
 
 function facts(pairs) {
@@ -253,7 +283,7 @@ async function overviewPage() {
       tile(overview.counts.table, "tables", "#/tables"), tile(overview.counts.column, "columns", "#/search?kind=column"),
       tile(overview.counts.project, "projects", "#/projects"), tile(models.length, "model versions", "#/models")),
     h("h2", {}, "Changed after a project used it"),
-    table(["Project", "Uses", ""], overview.changed_since_used.map((c) => [entryLink(c.project), entryLink(c.key), changedBadge()]),
+    table(["Project", "Uses", ""], overview.changed_since_used.map((c) => [entryLink(c.project), entryLink(c.key), changedBadge(c.severity)]),
       "Every project uses data as it is defined now."),
     h("h2", {}, "Gone from its source while a project uses it"),
     table(["Project", "Uses", ""], (overview.retired_but_used || []).map((c) => [entryLink(c.project), entryLink(c.key), retiredBadge()]),
@@ -324,7 +354,7 @@ async function entryPage(key) {
     }
     parts.push(h("h2", {}, "Uses"),
       isModel ? h("p", { class: "muted" }, "What its newest model version was trained on is recorded here at import, pinned to the definitions that version used.") : null,
-      table(["Entry", "Kind", "For", ""], entry.uses.map((u) => [entryLink(u.key, u.title), kindBadge(u.kind), u.purpose || "", u.changed_since ? changedBadge() : ""]),
+      table(["Entry", "Kind", "For", ""], entry.uses.map((u) => [entryLink(u.key, u.title), kindBadge(u.kind), u.purpose || "", u.changed_since ? changedBadge(u.severity) : ""]),
         "This project has recorded no use of data yet."));
   } else {
     const lineage = await api(`/v1/entries/${enc(entry.key)}/lineage?direction=both`);
@@ -347,7 +377,14 @@ async function entryPage(key) {
     if (entry.kind === "table") parts.push(await historySection(entry.key));
   }
   parts.push(documentedIn(entry));
-  parts.push(h("h2", {}, "History"), table(["Revision", "By", "When"], entry.history.map((r) => [h("code", {}, r.revision), r.registered_by, when(r.at)])));
+  if (entry.kind === "table" || entry.kind === "column") {
+    const changes = await changesSection(entry.key);
+    parts.push(h("h2", {}, "What changed"), changes,
+      h("h2", {}, "History"), table(["Revision", "By", "When", ""], entry.history.map((r, n) => [h("code", {}, r.revision), r.registered_by, when(r.at),
+        n ? h("button", { type: "button", class: "link", onclick: () => changes.show(r.revision) }, "changes since") : ""])));
+  } else {
+    parts.push(h("h2", {}, "History"), table(["Revision", "By", "When"], entry.history.map((r) => [h("code", {}, r.revision), r.registered_by, when(r.at)])));
+  }
   if (Object.keys(entry.source || {}).length) {
     parts.push(h("details", {}, h("summary", { class: "muted" }, "Where this came from, as the importers recorded it"),
       h("div", { class: "card" }, h("pre", { class: "mono" }, JSON.stringify(entry.source, null, 2)))));

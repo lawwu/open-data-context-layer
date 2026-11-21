@@ -185,7 +185,7 @@ def test_a_model_version_records_what_its_project_uses_pinned_as_it_was_trained(
 
     redefine_and_rebuild(catalog)  # the feature changed after v17 was trained on it
     assert catalog.uses("staffing-forecast")["uses"][0]["changed_since"]
-    assert {"project": "project:staffing-forecast", "key": FEATURE} in catalog.overview()["changed_since_used"]
+    assert {"project": "project:staffing-forecast", "key": FEATURE, "severity": "semantic"} in catalog.overview()["changed_since_used"]
 
     train_v18(catalog)  # retraining on the new definition clears it
     [used] = catalog.uses("staffing-forecast")["uses"]
