@@ -33,10 +33,10 @@ def selected(sql: str, dialect, schema: dict | None = None) -> list[str]:
 def parse(sql: str, dialect, *, as_keyed: bool = True):
     """The query sqlglot reads from `sql`, or None when it is not one query sqlglot can read.
 
-    Table names, and the table part of column names, are lower-cased as the catalog keys tables, unless `as_keyed`
-    is False. sqlglot compares BigQuery table names case-sensitively, so `FROM Proj.DS.Orders` would otherwise
-    miss the columns the catalog knows for proj.ds.orders: a `*` would expand to nothing and lineage would stop
-    there."""
+    Every name (tables, columns, aliases, CTEs, quoted or not) is lower-cased as the catalog keys tables and columns,
+    unless `as_keyed` is False. sqlglot compares BigQuery table names, and quoted names in any dialect, by case, so
+    `FROM Proj.DS.Orders` or a column `"CreatedAt"` would otherwise miss what the catalog knows of proj.ds.orders and
+    createdat: a `*` would expand to nothing and lineage would stop there."""
     import sqlglot
     from sqlglot import exp
     try:
@@ -45,12 +45,9 @@ def parse(sql: str, dialect, *, as_keyed: bool = True):
         return None
     if not isinstance(tree, exp.Query):
         return None
-    if as_keyed:
-        for node in tree.find_all(exp.Table, exp.Column):
-            for part in ("catalog", "db", "this") if isinstance(node, exp.Table) else ("catalog", "db", "table"):
-                name = node.args.get(part)
-                if isinstance(name, exp.Identifier):
-                    name.set("this", name.name.lower())
+    if as_keyed:  # every name: tables, columns, aliases and CTEs, quoted or not, as the catalog keys them
+        for name in tree.find_all(exp.Identifier):
+            name.set("this", name.name.lower())
     return tree
 
 

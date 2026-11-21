@@ -73,6 +73,7 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 | `odcl add table\|column\|project ...` | Register by hand |
 | `odcl import --dbt PATH [--select MODEL...]` | Read a dbt project |
 | `odcl import --bigquery TABLE...` | Read tables and their columns from BigQuery |
+| `odcl import --postgres URL [--schema S...]` | Read a PostgreSQL database's tables, views, view lineage and foreign keys |
 | `odcl sync bigquery-jobs --project PROJECT [--since T --until T \| --pipeline-run JOB [--task T]]` | Read the query jobs a project ran since the last sync, or in one window |
 | `odcl history table KEY [--since 7d] [--patterns]` | Which query jobs read or wrote this table? |
 | `odcl import --dataform INVOCATION` | Read what a Dataform run compiled and how each action ran |
@@ -158,6 +159,20 @@ A job shows that a table was queried. It does not show which fields a model was 
 **SQL.** By default each query is kept only as its shape: comments removed and every literal and parameter replaced by `?`, so two lookups for different employees are one example. The original SQL is not stored. A script, or SQL that cannot be read for certain, is kept without a shape (`template_unavailable`). `--sql none` does not ask BigQuery for SQL at all. Error messages and user emails are never read.
 
 Grouping uses the catalog's own digest of the shape. BigQuery's normalized query hash is only in `INFORMATION_SCHEMA`, which costs a query to read.
+
+## Importing from PostgreSQL
+
+odcl reads a PostgreSQL database's own catalog: its tables (ordinary, partitioned and foreign), views and materialized views, their columns, and their foreign keys. It reads no rows.
+
+```sh
+uv run odcl import --postgres postgresql://reader@db.internal/shop --schema public sales
+```
+
+- **Keys** are `database.schema.table` (`--database-name` to key them by another name), lower-cased, like every key. The URL, and any password in it, is not kept.
+- **Descriptions** are the tables' and columns' comments; each column keeps its type, position and whether it may be null.
+- **View lineage.** Each view's SQL is read with every table it reads named by its schema, and each of its columns is traced through it as a Dataform definition is, in PostgreSQL's dialect: through CTEs and `SELECT *`, from views to the tables under them, and tagged `lineage:partial` when only partly traced. Quoted mixed-case names match their lower-cased keys.
+- **Foreign keys** become `references` links. A key to a schema not read is named in `skipped`, as is a name the catalog cannot key.
+- Entries merge with what other importers said, under `postgres` in `source`, and are applied together. Importing again changes nothing unless the database changed.
 
 ## Importing from Dataform
 

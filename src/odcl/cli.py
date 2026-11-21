@@ -77,7 +77,7 @@ def lines(command: str, result) -> list[str]:
             if direction in result:
                 out += [direction + ":"] + ([f"  {'  ' * (n['depth'] - 1)}{n['key']}" + flag(n) for n in result[direction]] or ["  nothing"])
         return out
-    if command == "import" and "skipped" in result:
+    if command == "import" and "documents" in result:
         c = result["documents"]
         out = [f"{c['added'] + c['changed'] + c['unchanged']} documents: {c['added']} added, {c['changed']} changed, {c['unchanged']} unchanged, "
                f"{c['retired']} retired; {result['skipped']} files without an odcl block skipped"]
@@ -144,6 +144,10 @@ def lines(command: str, result) -> list[str]:
         return ([f"{counts['added']} added, {counts['changed']} changed, {counts['unchanged']} unchanged from {result['compilation_result']}"]
                 + (["Definitions not applied: a newer compilation of this repository was imported before"] if result["definitions"] != "applied" else [])
                 + [f"  {a['target']}  {a['state']}" + (f"  job {a['job_id']}" if a["job_id"] else "") for a in result["actions"]])
+    if command == "import" and "views_traced" in result:
+        return ([f"{result['relations']} relations from {result['database']}: {result['added']} entries added, {result['changed']} changed, "
+                 f"{result['unchanged']} unchanged; {result['views_traced']} views traced, {result['foreign_keys']} foreign keys"]
+                + [f"  skipped: {s}" for s in result["skipped"]])
     if command == "import" and "definitions" in result:
         return [f"{result['definitions']} definitions: {result['added']} entries added, {result['changed']} changed, {result['unchanged']} unchanged; "
                 f"{result['columns_traced']} columns traced, {result['columns_partial']} in part"]
@@ -238,9 +242,13 @@ def run(catalog: Catalog, args):
         from .legacy import import_sqlite
         return import_sqlite(catalog, args.path)
     if args.command == "import":
-        require(sum(map(bool, (args.dbt, args.bigquery, args.dataform, args.vertex_manifest, args.openlineage, args.docs, args.sql_definitions))) == 1,
-                "import", "Import from one place: --dbt PATH, --bigquery TABLE..., --dataform INVOCATION, --vertex-manifest PATH, --openlineage FILE, "
-                          "--docs PATH... or --sql-definitions FILE")
+        require(sum(map(bool, (args.dbt, args.bigquery, args.dataform, args.vertex_manifest, args.openlineage, args.docs, args.sql_definitions,
+                               args.postgres))) == 1,
+                "import", "Import from one place: --dbt PATH, --bigquery TABLE..., --postgres URL, --dataform INVOCATION, --vertex-manifest PATH, "
+                          "--openlineage FILE, --docs PATH... or --sql-definitions FILE")
+        if args.postgres:
+            from .postgres import import_database
+            return import_database(catalog, args.postgres, schemas=args.schema, database=args.database_name)
         if args.sql_definitions:
             from .sqldefs import import_definitions
             return import_definitions(catalog, args.sql_definitions, dialect=args.dialect)
@@ -391,6 +399,10 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--repo-url", metavar="URL", help="with --docs: the repository's web address, when git cannot say")
     s.add_argument("--commit", metavar="SHA", help="with --docs: the commit the pages were read at, when git cannot say")
     s.add_argument("--openlineage", metavar="FILE", help="OpenLineage events: one JSON event, a JSON list of them, or JSON Lines")
+    s.add_argument("--postgres", metavar="URL", help="a PostgreSQL database to read tables, views, view lineage and foreign keys from, "
+                                                     "e.g. postgresql://reader@host/dbname (the URL is not kept)")
+    s.add_argument("--schema", nargs="+", metavar="SCHEMA", help="with --postgres: only these schemas (default: all but the system's)")
+    s.add_argument("--database-name", metavar="NAME", help="with --postgres: the name to key its tables by (default: the database's own)")
     s.add_argument("--sql-definitions", metavar="FILE", help="JSON Lines of tables and the SELECT that builds each: target, select, dependencies, "
                                                              "description, columns, type, file (or declaration: true)")
     s.add_argument("--dialect", default="bigquery", help="with --sql-definitions: the SQL dialect, as sqlglot names it (default: bigquery)")
