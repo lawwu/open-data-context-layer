@@ -69,6 +69,7 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 | `odcl lineage KEY` | What is it built from, and what is built from it? |
 | `odcl diff KEY [--since REV\|TIME] [--until REV\|TIME]` | What changed, and does it break what uses it? |
 | `odcl import --quality FILE.jsonl` or `--dbt-tests TARGET`; `odcl quality KEY [--at TIME]` | Was it passing its tests, now or then? |
+| `odcl term add`, `odcl domain add`, `odcl means`, `odcl in-domain`, `odcl glossary` | What does this column mean in the business's words, and whose is it? |
 | `odcl alerts subscribe\|list\|remove\|send` | Tell the people behind a project when data it uses changes or goes |
 | `odcl used-by KEY` | Which projects depend on it? |
 | `odcl uses PROJECT [--upstream] [--revision REV]` | What did this project use, now or at an older revision of it? |
@@ -234,6 +235,22 @@ uv run odcl diff core.sales.daily_totals --since 7d      # or a revision (rev_..
 ```
 
 What a project uses carries the worst change since it used it (`severity` on `get` of a project, `uses` and `overview`'s `changed_since_used`), measured from when the use was recorded. A used table counts as changed when one of its columns changed, even if the table's own revision did not. The same diff is `GET /v1/entries/{key}/diff?since=&until=`, the `what_changed` MCP tool and `Catalog.diff`, and an entry's page shows it, with "changes since" on each revision in its history.
+
+## Glossary terms and domains
+
+A **term** is a word the business uses, with its definition: `net-revenue`, "revenue after refunds and discounts". A **domain** is a part of the business that owns data, projects and terms: `sales`. Both are entries, with revisions and history like any other, and both can be described by documents.
+
+```sh
+uv run odcl domain add sales --description "Selling, from quote to cash" --owner ana
+uv run odcl term add net-revenue --definition "Revenue after refunds and discounts" --synonym "net sales" --domain sales --status approved
+uv run odcl means core.sales.daily_totals.amount net-revenue      # what a table or column means; no terms clears them
+uv run odcl in-domain core.sales.daily_totals sales               # a table, project or term; no domain takes it out
+uv run odcl glossary [--domain sales]
+```
+
+- A column or table `means` terms; a table, project or term is `in_domain` one domain. A term's page lists what means it; a domain's page lists its tables, projects and terms; search finds a term by its synonyms. The web page has a Glossary.
+- These links are said beside what importers say, so an import, merged or not, keeps them. A change to them is `cosmetic` in `odcl diff`.
+- Over HTTP: `GET /v1/glossary`, and as an editor `POST /v1/terms`, `/v1/domains`, `/v1/entries/{key}/terms`, `/v1/entries/{key}/domain`. `find_data` searches terms and domains.
 
 ## Data quality
 

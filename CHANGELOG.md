@@ -8,6 +8,11 @@ section says how a release is cut.
 
 ## Unreleased
 
+- **Glossary terms and domains**: two new kinds of entry. Columns and tables `means` terms;
+  tables, projects and terms are `in_domain` a domain (`odcl term add`, `odcl domain add`,
+  `odcl means`, `odcl in-domain`, `odcl glossary`, `/v1/glossary`, `/v1/terms`, `/v1/domains`).
+  Imports keep them; search finds terms by synonym; documents can describe them; the web page
+  has a Glossary. `overview` counts now include `term` and `domain`.
 - **Data-quality results** (`odcl import --quality FILE.jsonl` or `--dbt-tests TARGET`,
   `odcl quality KEY [--at]`, `/v1/entries/{key}/quality`, `POST /v1/quality`): test outcomes
   kept once each and pinned to the revision current when the test ran. Entries show their

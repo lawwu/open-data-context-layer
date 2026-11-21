@@ -32,7 +32,7 @@ TOOLS = [
     tool("find_data", "Search tables, columns and projects by the words in their name, description, definition, owner or tags. "
          "Each result says its layer, its owner and how many projects use it. Start here to find the right data.",
          {"query": {"type": "string", "description": "Words every result must contain. Empty lists everything."},
-          "kind": {"type": "string", "enum": ["table", "column", "project", "document"]},
+          "kind": {"type": "string", "enum": ["table", "column", "project", "document", "term", "domain"]},
           "layer": {"type": "string", "description": "Only data of this layer, e.g. bronze, silver or gold."},
           "limit": {"type": "integer", "minimum": 1, "maximum": 200}}),
     tool("get_entry", "One table, column or project in full: its description and definition, what it is built from, what is built from "

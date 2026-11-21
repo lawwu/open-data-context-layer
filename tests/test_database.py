@@ -9,7 +9,7 @@ def test_a_batch_registers_whole_or_not_at_all(database):
     with Catalog(database, actor="ana") as catalog:
         with pytest.raises(CatalogError):
             catalog.apply([("table", {"path": "a.b"}), ("column", {"table": "a.b", "name": "x"}), ("table", {"path": "Has Spaces"})])
-        assert catalog.overview()["counts"] == {"table": 0, "column": 0, "project": 0, "document": 0}
+        assert catalog.overview()["counts"] == {"table": 0, "column": 0, "project": 0, "document": 0, "term": 0, "domain": 0}
         assert catalog.apply([("table", {"path": "a.b"}), ("column", {"table": "a.b", "name": "x"})]) == {"added": 2, "changed": 0, "unchanged": 0}
 
 
