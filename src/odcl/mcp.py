@@ -44,6 +44,11 @@ TOOLS = [
          "described it.", {**KEY}, ["key"]),
     tool("used_by", "Which projects depend on a table or column: directly, through its table or columns, or through data built from it. "
          "Use this before changing or dropping data.", {**KEY}, ["key"]),
+    tool("what_changed", "What changed in a table or column between two points: each change (a type, a definition, a column added, removed "
+         "or retired, a description) labelled cosmetic, additive, semantic or breaking. With no points, its latest change. A project's "
+         "use pins a revision: pass it as `since` to see what changed after the project used it.",
+         {**KEY, "since": {"type": "string", "description": "A revision (rev_…), a time (ISO 8601) or a span back from now such as 7d."},
+          "until": {"type": "string", "description": "As since; default now."}}, ["key"]),
     tool("project_uses", "What data a project used, and whether any of it changed after the project used it.",
          {**PROJECT, "upstream": {"type": "boolean", "description": "Also list everything that data is built from."}}, ["project"]),
     tool("register_project", "Register a project: anything that uses data, such as an analysis or a model.",
@@ -103,6 +108,9 @@ class Remote:
     def documents(self, key):
         return self._call("GET", f"/v1/entries/{self._key(key)}/documents")
 
+    def diff(self, key, since=None, until=None):
+        return self._call("GET", f"/v1/entries/{self._key(key)}/diff", {"since": since, "until": until})
+
     def uses(self, project, upstream=False):
         return self._call("GET", f"/v1/projects/{self._key(project)}/uses", {"upstream": upstream})
 
@@ -152,6 +160,8 @@ class Tools:
             return f.used_by(args["key"])
         if name == "documents_for":
             return {"documents": f.documents(args["key"])}
+        if name == "what_changed":
+            return f.diff(args["key"], args.get("since"), args.get("until"))
         if name == "project_uses":
             return f.uses(args["project"], bool(args.get("upstream")))
         if name == "register_project":

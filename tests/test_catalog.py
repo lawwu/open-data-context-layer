@@ -75,7 +75,7 @@ def test_which_projects_use_this_column_and_what_did_this_project_use(catalog):
 
     # the plan column is redefined after the project used it: the project is told, until it records use again
     catalog.put("column", {"table": GOLD, "name": "plan_tier", "description": "Plan tier, with trials counted as free", "derived_from": [f"column:{SILVER}.plan_code"]})
-    assert catalog.overview()["changed_since_used"] == [{"project": "project:churn-model", "key": f"column:{GOLD}.plan_tier"}]
+    assert catalog.overview()["changed_since_used"] == [{"project": "project:churn-model", "key": f"column:{GOLD}.plan_tier", "severity": "semantic"}]
     assert [u["changed_since"] for u in catalog.uses("churn-model")["uses"]] == [True, False]
     catalog.use("churn-model", [f"{GOLD}.plan_tier"])
     assert catalog.overview()["changed_since_used"] == []

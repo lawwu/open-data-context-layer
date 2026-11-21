@@ -45,6 +45,21 @@ def moment(value: str, name: str):
     return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
 
 
+def short(key: str) -> str:
+    return key.split(":", 1)[-1]
+
+
+def _was(change: dict) -> str:
+    """Before -> after, for a field whose values are short enough to read on one line."""
+    if change.get("added") is not None:
+        return "".join([f"  +{', '.join(map(short, change['added']))}" if change["added"] else "",
+                        f"  -{', '.join(map(short, change['removed']))}" if change["removed"] else ""])
+    before, after = change.get("before"), change.get("after")
+    if change["field"] is None or len(f"{before}{after}") > 120:
+        return ""
+    return f": {before if before not in (None, '') else '(none)'} -> {after if after not in (None, '') else '(none)'}"
+
+
 def flag(entry) -> str:
     return "  (changed since)" if entry.get("changed_since") else ""
 
@@ -76,6 +91,10 @@ def lines(command: str, result) -> list[str]:
         return [f"{r['key']}" + (f"  [{r['layer']}]" if r.get("layer") else "") + (f"  used by {r['used_by']}" if r.get("used_by") else "")
                 + ("  (retired)" if r.get("retired") else "")
                 + (f"\n    {r['description']}" if r["description"] else "") for r in result] or ["Nothing found."]
+    if command == "diff":
+        head = (f"{result['key']}: {result['severity'] or 'no change'}"
+                + (f"  ({result['from']['revision'] if result['from'] else 'not registered'} -> {result['to']['revision']})"))
+        return [head] + [f"  {c['severity']:<9} {short(c['key'])}: {c['change']}" + _was(c) for c in result["changes"]]
     if command == "used-by":
         return [f"{result['key']} is used by {len(result['projects'])} project(s)"] + [
             f"  {p['project']}  {p['how']}" + (f" through {p['through']}" if p["how"] != "direct" else "")
@@ -406,6 +425,8 @@ def run(catalog: Catalog, args):
         return {"key": catalog.resolve(args.key, DESCRIBED), "documents": catalog.documents(args.key)}
     if args.command == "show":
         return catalog.get(args.key)
+    if args.command == "diff":
+        return catalog.diff(args.key, args.since, args.until)
     if args.command == "lineage":
         return catalog.lineage(args.key, args.direction)
     if args.command == "use":
@@ -593,6 +614,11 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("show", help="one entry in full")
     s.add_argument("key")
+
+    s = sub.add_parser("diff", help="what changed in a table (with its columns) or a column, each change labelled by how much it matters")
+    s.add_argument("key")
+    s.add_argument("--since", help="a revision (rev_...), a time, or a span back from now such as 7d (default: its previous revision)")
+    s.add_argument("--until", help="as --since (default: now)")
 
     s = sub.add_parser("lineage", help="what a table or column is built from, and what is built from it")
     s.add_argument("key")
