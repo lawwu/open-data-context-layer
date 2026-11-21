@@ -131,7 +131,7 @@ class Catalog:
     `find`, `get`, `lineage`, `used_by` and `uses` answer questions. `migrate` prepares the database first."""
 
     def __init__(self, dsn: str | None = None, actor: str | None = None):
-        self.actor = (actor or os.environ.get("ODCL_USER") or os.environ.get("FATHOM_USER") or getpass.getuser())[:200]
+        self.actor = (actor or os.environ.get("ODCL_USER") or getpass.getuser())[:200]
         self.db = connect(dsn, autocommit=True)
         try:
             version = self.db.execute("SELECT max(version) AS version FROM schema_migrations").fetchone()["version"] or 0
