@@ -128,6 +128,16 @@ def reference_entries(catalog, foreign_keys, registering: set[str]) -> tuple[lis
     return [("column", {"table": f"table:{t}", "name": c, "references": sorted(set(targets))}) for (t, c), targets in sorted(wanted.items())], unresolved
 
 
+def said_by(body: dict, importer: str) -> dict | None:
+    """What `importer` said of an entry, from its `source`: its part under its name, or the whole source for an
+    importer that keeps it flat, naming itself as `tool` (dbt)."""
+    source = body.get("source") or {}
+    if source.get("tool") == importer:
+        return source
+    mine = source.get(importer)
+    return mine if isinstance(mine, dict) else None
+
+
 class CatalogError(Exception):
     """A request the catalog refuses, with a short code a caller can branch on."""
 
@@ -317,7 +327,8 @@ class Catalog:
                     **(self._privacy(p) if kind != "project" else {}), **({"instances": instances} if instances else {}),
                     **({"created_by": created} if kind == "table" and (created := self._created_by(p)) else {}),
                     "tags": sorted(set(tags)), "source": source, "links": links}
-            written = self._write(body)
+            # a hand edit annotates a retired entry; only its source seeing it again revives it
+            written = self._write(body, keep_retired=not payload.get("source") and payload.get("retired") is not False)
             if kind == "table" and written["change"] == "added":
                 if self._new_tables is not None:
                     self._new_tables.append(key)
@@ -422,14 +433,18 @@ class Catalog:
                 "links": [] if retired else [links[k] for k in sorted(links)]}  # a retired page describes nothing now; its history still does
         return self._write(body)
 
-    def apply(self, entries, merge: bool = False) -> dict:
+    def apply(self, entries, merge: bool = False, withdraw: dict | None = None) -> dict:
         """Register many (kind, payload) entries in order, as an importer produces them. All of them, or none.
 
         Every entry lock is taken first, so imports never deadlock one another. Tables first registered here that are
         copies of a definition are linked to it at the end, so a definition gets one new revision per import, not
-        one per copy."""
+        one per copy.
+
+        `withdraw` names what the import read, so what it said before and no longer sees is withdrawn in the same
+        transaction (see `withdraw`): {"importer": name, "scope": fn(said, body) -> bool, "tables": bool}."""
         self.allow("importer")
         counts = {"added": 0, "changed": 0, "unchanged": 0}
+        seen: set[str] = set()
         outer = self._new_tables is None
         with self.db.transaction():
             self._lock_all()
@@ -438,9 +453,13 @@ class Catalog:
                 self._new_tables = []
             try:
                 for kind, payload in entries:
-                    counts[self.put(kind, payload, merge)["change"]] += 1
+                    written = self.put(kind, payload, merge)
+                    counts[written["change"]] += 1
+                    seen.add(written["key"])
                 if outer:
                     self._link_to_definitions(self._new_tables)
+                if withdraw:
+                    counts |= self.withdraw(withdraw["importer"], seen, withdraw["scope"], tables=withdraw.get("tables", True))
             finally:
                 self._importing -= 1
                 if outer:
@@ -476,17 +495,19 @@ class Catalog:
             body["links"] = [kept[k] for k in sorted(kept)]
             return self._write(body)
 
-    def _write(self, body: dict) -> dict:
+    def _write(self, body: dict, keep_retired: bool = False) -> dict:
         """Store a revision unless it says what the head says. A lineage link's pinned revision is not part of what
         an entry says, so re-registering a table does not ripple down everything built from it; a `uses` link's is,
         because recording use again means the project has seen the current definition. Returning to an older
-        wording is a new revision: only the head is compared."""
-        said = {**body, "links": [{k: v for k, v in link.items() if k != "revision" or link["relation"] == "uses"} for link in body["links"]]}
-        digest = hashlib.sha256(json.dumps(said, sort_keys=True).encode()).hexdigest()
+        wording is a new revision: only the head is compared. With `keep_retired`, a retired head stays retired."""
         self.allow("editor")
         with self.db.transaction():
             self._lock(body["key"])
             head = self._head(body["key"])
+            if keep_retired and head and head["body"].get("retired") and body["kind"] in ("table", "column"):
+                body = {**body, "retired": True, "retired_by": head["body"].get("retired_by")}
+            said = {**body, "links": [{k: v for k, v in link.items() if k != "revision" or link["relation"] == "uses"} for link in body["links"]]}
+            digest = hashlib.sha256(json.dumps(said, sort_keys=True).encode()).hexdigest()
             if head and head["digest"] == digest:
                 return {**self._view(head), "change": "unchanged"}
             revision, at = "rev_" + uuid.uuid4().hex[:16], datetime.now(timezone.utc).replace(microsecond=0)
@@ -507,9 +528,50 @@ class Catalog:
                                 for link in body["links"]])
 
     # ---- reads -----------------------------------------------------------------------------------------------
-    def _columns(self, table: str) -> list[str]:
+    def withdraw(self, importer: str, seen: set[str], scope, tables: bool = True) -> dict:
+        """After an import, withdraw what `importer` said before, within what it read, and did not say this time.
+
+        `scope(said, body)` says whether a table the importer described (`said` is its part of the table's `source`)
+        is within what this import read: a database's schemas, a repository, a dbt project, the tables named. Such a
+        table not in `seen` is withdrawn, unless `tables` is False, and so is each column of such a table that the
+        importer described and did not see. Withdrawing removes the importer's part of an entry. An entry nothing
+        else says is retired instead: a new revision marked retired, with no links, so it leaves lists and search,
+        what used it shows it changed, and its history keeps what it was. An entry the importer sees again is revived.
+        Entries registered only because a query named them are left alone: they say nothing about what was read."""
+        out = {"retired": [], "withdrawn": []}
+        rows = self.db.execute("""SELECT e.key, r.body FROM entries e JOIN revisions r ON r.id = e.head_revision
+                                  WHERE e.kind = 'table' AND (r.body -> 'source' ? %s OR r.body -> 'source' ->> 'tool' = %s) ORDER BY e.key""",
+                               (importer, importer)).fetchall()
+        for r in rows:
+            said = said_by(r["body"], importer)
+            if said is None or said.get("named_by_query") or not scope(said, r["body"]):
+                continue
+            if tables and r["key"] not in seen and not r["body"].get("retired"):
+                self._withdraw_one(r["body"], importer, out)
+            for c in self.db.execute("""SELECT r.body FROM entries e JOIN revisions r ON r.id = e.head_revision
+                                        WHERE e.kind = 'column' AND r.body ->> 'kind' = 'column' AND r.body ->> 'table' = %s ORDER BY e.key""",
+                                     (r["key"],)).fetchall():
+                column = c["body"]
+                mine = said_by(column, importer)
+                if mine is not None and not mine.get("named_by_query") and column["key"] not in seen and not column.get("retired"):
+                    self._withdraw_one(column, importer, out)
+        return out
+
+    def _withdraw_one(self, body: dict, importer: str, out: dict) -> None:
+        source = body.get("source") or {}
+        others = {} if source.get("tool") == importer else {k: v for k, v in source.items() if k != importer}
+        if others:  # another importer still says it: only this one's part goes, its own tags with it
+            mine = said_by(body, importer) or {}
+            self._write({**body, "source": others, "tags": sorted(set(body["tags"]) - set(mine.get("tags") or []))})
+            out["withdrawn"].append(body["key"])
+        else:
+            self._write({**body, "retired": True, "retired_by": importer, "links": []})
+            out["retired"].append(body["key"])
+
+    def _columns(self, table: str, retired: bool = True) -> list[str]:
         rows = self.db.execute("SELECT e.key FROM entries e JOIN revisions r ON r.id = e.head_revision "
-                               "WHERE e.kind = 'column' AND r.body ->> 'kind' = 'column' AND r.body ->> 'table' = %s ORDER BY e.key", (table,))
+                               "WHERE e.kind = 'column' AND r.body ->> 'kind' = 'column' AND r.body ->> 'table' = %s "
+                               "AND (%s OR NOT (r.body ? 'retired')) ORDER BY e.key", (table, retired))
         return [r["key"] for r in rows]
 
     def _summary(self, key: str, users=False) -> dict:
@@ -536,6 +598,8 @@ class Catalog:
                 summary |= {"doc_kind": body.get("doc_kind"), "retired": body.get("retired", False)}
             elif body["kind"] != "project":
                 summary.update(layer=table.get("layer"), system=table.get("system"), dtype=body.get("dtype"))
+                if body.get("retired"):
+                    summary["retired"] = True
                 if users:
                     summary["used_by"] = counts[key]
             out.append(summary)
@@ -634,8 +698,9 @@ class Catalog:
                                               "changed_since": r["target_revision"] != r["target_head"]}
         return [found[k] for k in sorted(found, key=lambda k: (HOW.index(found[k]["how"]), k))]
 
-    def find(self, query: str = "", kind: str | None = None, layer: str | None = None, limit: int = 50) -> list[dict]:
-        """Entries whose name, description, definition, owner or tags hold every word, best match first."""
+    def find(self, query: str = "", kind: str | None = None, layer: str | None = None, limit: int = 50, retired: bool = False) -> list[dict]:
+        """Entries whose name, description, definition, owner or tags hold every word, best match first. Retired
+        tables and columns only with `retired`."""
         require(kind is None or kind in KINDS, "kind", f"kind is one of: {', '.join(KINDS)}")
         require(isinstance(query, str) and len(query) <= 300, "query", "Search with at most 300 characters")
         words = TOKEN.findall(query.lower())
@@ -645,8 +710,8 @@ class Catalog:
         else:
             rows = self.db.execute("SELECT key FROM entries WHERE (%s::text IS NULL OR kind = %s) ORDER BY key LIMIT 2000", (kind, kind)).fetchall()
         keys = [r["key"] for r in rows]
-        if layer:
-            keys = [s["key"] for s in self._summaries(keys) if s.get("layer") == layer]
+        if layer or not retired:
+            keys = [s["key"] for s in self._summaries(keys) if (not layer or s.get("layer") == layer) and (retired or not s.get("retired"))]
         return self._summaries(keys[:limit], users=True)
 
     def get(self, name: str) -> dict:
@@ -670,7 +735,9 @@ class Catalog:
             return out
         out.update(derived_from=self._linked(key, "derived_from", "up"), feeds=self._linked(key, "derived_from", "down"), used_by=self._users(key))
         if out["kind"] == "table":
-            out["columns"] = self._summaries(self._columns(key))
+            columns = self._summaries(self._columns(key))
+            out["columns"] = [c for c in columns if not c.get("retired")]
+            out["retired_columns"] = [c for c in columns if c.get("retired")]
             out["copies"] = self._linked(key, "instance_of", "up")         # what this definition is copied to
             out["copy_of"] = self._linked(key, "instance_of", "down")      # the definitions this table is a copy of
             out["foreign_keys"], out["referenced_by"] = self._foreign_keys(key)
@@ -859,16 +926,17 @@ class Catalog:
                                          "WHERE %(key)s::text IS NULL OR b.project_key = %(key)s ORDER BY b.recorded_at DESC, b.id DESC", {"key": key})]
 
     # ---- lists -----------------------------------------------------------------------------------------------
-    def tables(self, layer: str | None = None, system: str | None = None) -> list[dict]:
+    def tables(self, layer: str | None = None, system: str | None = None, retired: bool = False) -> list[dict]:
         """Every table, by key: its layer and system, how many columns it has, how many projects depend on it, and
-        when it last changed."""
+        when it last changed. Retired tables only with `retired`; retired columns are not counted."""
         rows = self.db.execute("""
             SELECT e.key, r.recorded_at, coalesce(c.n, 0) AS columns
             FROM entries e JOIN revisions r ON r.id = e.head_revision
             LEFT JOIN (SELECT cr.body ->> 'table' AS tbl, count(*) AS n FROM entries c JOIN revisions cr ON cr.id = c.head_revision
-                       WHERE c.kind = 'column' AND cr.body ->> 'kind' = 'column' GROUP BY 1) c ON c.tbl = e.key
+                       WHERE c.kind = 'column' AND cr.body ->> 'kind' = 'column' AND NOT (cr.body ? 'retired') GROUP BY 1) c ON c.tbl = e.key
             WHERE e.kind = 'table' AND (%(layer)s::text IS NULL OR r.body ->> 'layer' = %(layer)s)
-              AND (%(system)s::text IS NULL OR r.body ->> 'system' = %(system)s) ORDER BY e.key""", {"layer": layer, "system": system}).fetchall()
+              AND (%(system)s::text IS NULL OR r.body ->> 'system' = %(system)s) AND (%(retired)s OR NOT (r.body ? 'retired'))
+            ORDER BY e.key""", {"layer": layer, "system": system, "retired": retired}).fetchall()
         return [{**summary, "columns": r["columns"], "changed": stamp(r["recorded_at"])}
                 for r, summary in zip(rows, self._summaries([r["key"] for r in rows], users=True), strict=True)]
 
@@ -928,7 +996,14 @@ class Catalog:
 
     def overview(self) -> dict:
         counts = {kind: 0 for kind in KINDS}
-        counts.update({r["kind"]: r["n"] for r in self.db.execute("SELECT kind, COUNT(*) AS n FROM entries GROUP BY kind")})
+        counts.update({r["kind"]: r["n"] for r in self.db.execute(
+            "SELECT e.kind, COUNT(*) AS n FROM entries e JOIN revisions r ON r.id = e.head_revision WHERE NOT (r.body ? 'retired' AND e.kind IN ('table', 'column')) "
+            "GROUP BY e.kind")})
+        retired = self.db.execute("SELECT COUNT(*) AS n FROM entries e JOIN revisions r ON r.id = e.head_revision "
+                                            "WHERE e.kind IN ('table', 'column') AND r.body ? 'retired'").fetchone()["n"]
+        gone = [{"project": r["source_key"], "key": r["target_key"]} for r in self.db.execute(
+            """SELECT l.source_key, l.target_key FROM current_links l JOIN entries e ON e.key = l.target_key JOIN revisions r ON r.id = e.head_revision
+               WHERE l.relation = 'uses' AND r.body ? 'retired' ORDER BY l.source_key, l.target_key""")]
         stale = [{"project": r["source_key"], "key": r["target_key"]} for r in self.db.execute(
             "SELECT source_key, target_key FROM current_links WHERE relation = 'uses' AND target_revision <> target_head ORDER BY source_key, target_key")]
         described = [{"document": r["source_key"], "key": r["target_key"]} for r in self.db.execute(
@@ -937,5 +1012,7 @@ class Catalog:
             """SELECT b.project_key, b.version, d.document_key FROM build_documents d JOIN model_builds b ON b.id = d.build_id
                JOIN entries e ON e.key = d.document_key WHERE e.head_revision <> d.document_revision ORDER BY b.project_key, b.version, d.document_key""")]
         info = self.db.info
-        return {"counts": counts, "changed_since_used": stale, "changed_since_described": described, "changed_since_relied_on": relied,
+        stale = [x for x in stale if x not in gone]  # a retired entry is listed as gone, not as changed
+        return {"counts": counts, "retired": retired, "changed_since_used": stale, "retired_but_used": gone,
+                "changed_since_described": described, "changed_since_relied_on": relied,
                 "database": f"{info.host}:{info.port}/{info.dbname}"}

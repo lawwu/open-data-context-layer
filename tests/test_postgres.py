@@ -130,3 +130,44 @@ def test_importing_a_view_over_a_schema_not_read_again_changes_nothing(database,
         again = import_database(c, url, schemas=[s], database="db")
         assert (again["added"], again["changed"]) == (0, 0) and again["skipped"] == first["skipped"]
         assert [d["key"] for d in c.get(f"db.{s}.cross_v.v")["derived_from"]] == [f"column:db.{other}.x.v"]
+
+
+def test_what_the_database_no_longer_has_is_retired_and_comes_back_when_it_returns(database):
+    base = os.environ["ODCL_TEST_DATABASE_URL"]
+    s, kept = f"ret_{uuid.uuid4().hex[:8]}", f"kept_{uuid.uuid4().hex[:8]}"
+    run = lambda sql: psycopg.connect(base, autocommit=True).execute(sql)
+    run(f"CREATE SCHEMA {s}; CREATE TABLE {s}.orders (id int, amount int, note text); CREATE TABLE {s}.old (id int);"
+        f"CREATE SCHEMA {kept}; CREATE TABLE {kept}.other (id int)")
+    try:
+        with Catalog(database, actor="ana") as c:
+            import_database(c, base, schemas=[s, kept], database="db")
+            c.put("project", {"name": "report", "description": "Monthly report"})
+            c.use("report", [f"db.{s}.orders.note"])
+            c.put("table", {"path": f"db.{s}.orders", "source": {"bigquery": {"mirror": True}}}, merge=True)  # another importer says it too
+
+            run(f"ALTER TABLE {s}.orders DROP COLUMN note; DROP TABLE {s}.old")
+            result = import_database(c, base, schemas=[s], database="db")  # only one schema read: the other is not touched
+            assert sorted(result["retired"]) == [f"column:db.{s}.old.id", f"column:db.{s}.orders.note", f"table:db.{s}.old"]
+            assert result["withdrawn"] == []
+            note = c.get(f"db.{s}.orders.note")
+            assert note["retired"] is True and note["retired_by"] == "postgres" and len(note["history"]) == 2  # kept, with what it was
+            assert [x["key"] for x in c.get(f"db.{s}.orders")["retired_columns"]] == [f"column:db.{s}.orders.note"]
+            assert f"table:db.{s}.old" not in {t["key"] for t in c.tables()} and f"table:db.{s}.old" in {t["key"] for t in c.tables(retired=True)}
+            assert not c.find("old", kind="table") and c.find("old", kind="table", retired=True)
+            assert c.get(f"table:db.{kept}.other").get("retired") is None
+            assert c.overview()["retired_but_used"] == [{"project": "project:report", "key": f"column:db.{s}.orders.note"}]
+            assert c.overview()["retired"] == 3
+            assert (import_database(c, base, schemas=[s], database="db")["changed"], c.overview()["retired"]) == (0, 3)  # again: nothing changes
+
+            c.put("column", {"table": f"db.{s}.orders", "name": "note", "description": "Free text"}, merge=True)  # a hand note keeps it retired
+            assert c.get(f"db.{s}.orders.note")["retired"] is True
+            run(f"ALTER TABLE {s}.orders ADD COLUMN note text")
+            back = import_database(c, base, schemas=[s], database="db")
+            assert back["retired"] == [] and "retired" not in c.get(f"db.{s}.orders.note")
+
+            run(f"DROP TABLE {s}.orders")  # still said by another importer: only the postgres part goes
+            gone = import_database(c, base, schemas=[s], database="db")
+            orders = c.get(f"db.{s}.orders")
+            assert f"table:db.{s}.orders" in gone["withdrawn"] and "retired" not in orders and set(orders["source"]) == {"bigquery"}
+    finally:
+        run(f"DROP SCHEMA {s} CASCADE; DROP SCHEMA {kept} CASCADE")

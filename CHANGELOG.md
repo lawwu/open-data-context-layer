@@ -27,7 +27,12 @@ section says how a release is cut.
   above.
 - Docs: [Working with several people](docs/working-with-several-people.md): importers run
   centrally under a service user, and people annotate as themselves.
-
+- Imports retire what is gone from their source. A Postgres, SQL-definitions, Dataform, dbt or
+  BigQuery import withdraws what it registered before, within what it read, and no longer saw;
+  an entry nothing else still says is retired: kept with its history, left out of `find`,
+  `tables` and the counts (`--retired` includes it), and listed in `overview` as
+  `retired_but_used` when a project uses it. It comes back when its source has it again.
+  Import results now always carry `retired` and `withdrawn` lists.
 - **Breaking: Python 3.14 or later is required**, as Sounding, which the BigQuery commands
   read through, requires it.
 - The tables page and column lists answer in a few queries instead of several per row

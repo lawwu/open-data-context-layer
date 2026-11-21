@@ -4,12 +4,12 @@ Every read delegates to the `Catalog` operation of the same name, so the API ans
 MCP tools answer. It runs on the standard library's threaded HTTP server, with one database connection per request.
 
     GET  /v1/overview
-    GET  /v1/search?q=&kind=&layer=&limit=
+    GET  /v1/search?q=&kind=&layer=&limit=&retired=
     GET  /v1/entries/{key}                       one entry in full
     GET  /v1/entries/{key}/lineage?direction=    up, down or both
     GET  /v1/entries/{key}/used-by
     GET  /v1/entries/{key}/documents             the documents that describe it
-    GET  /v1/tables?layer=&system=                every table, with its columns and users counted
+    GET  /v1/tables?layer=&system=&retired=       every table, with its columns and users counted (retired ones with retired=1)
     GET  /v1/privacy?pii_only=&table=             every column's personal-data flag, scrubbing, data category and retention
     GET  /v1/projects                            every project, with its uses and latest model version
     GET  /v1/projects/{name}/uses?upstream=
@@ -102,7 +102,8 @@ PROJECT = ("name", "description", "owner", "repository", "status", "tags")
 # when the server asks for sign-in; any other role always needs a signed-in user with that role or above.
 ROUTES = [
     ("GET", r"/v1/overview", "reader", lambda c, m, q, b: c.overview()),
-    ("GET", r"/v1/search", "reader", lambda c, m, q, b: c.find(q.get("q", ""), q.get("kind") or None, q.get("layer") or None, _limit(q.get("limit"), 50))),
+    ("GET", r"/v1/search", "reader", lambda c, m, q, b: c.find(q.get("q", ""), q.get("kind") or None, q.get("layer") or None, _limit(q.get("limit"), 50),
+                                                                     retired=_flag(q.get("retired")))),
     ("GET", r"/v1/entries/(?P<key>[^/]+)", "reader", lambda c, m, q, b: c.get(m["key"])),
     ("GET", r"/v1/entries/(?P<key>[^/]+)/lineage", "reader", lambda c, m, q, b: c.lineage(m["key"], q.get("direction", "both"))),
     ("GET", r"/v1/entries/(?P<key>[^/]+)/used-by", "reader", lambda c, m, q, b: c.used_by(m["key"])),
@@ -111,7 +112,7 @@ ROUTES = [
     ("GET", r"/v1/query-history", "reader", lambda c, m, q, b: c.table_history(q.get("table", ""), _span(q.get("since", "7d")), _flag(q.get("patterns")),
                                                                              _limit(q.get("limit"), 100))),
     ("GET", r"/v1/datasets/(?P<reference>[^/]+)/trace", "reader", lambda c, m, q, b: _explain_dataset(c, m["reference"])),
-    ("GET", r"/v1/tables", "reader", lambda c, m, q, b: c.tables(q.get("layer") or None, q.get("system") or None)),
+    ("GET", r"/v1/tables", "reader", lambda c, m, q, b: c.tables(q.get("layer") or None, q.get("system") or None, retired=_flag(q.get("retired")))),
     ("GET", r"/v1/projects", "reader", lambda c, m, q, b: c.projects()),
     ("GET", r"/v1/privacy", "reader", lambda c, m, q, b: c.privacy(_flag(q.get("pii_only")), q.get("table") or None)),
     ("GET", r"/v1/models", "reader", lambda c, m, q, b: c.models(q.get("project") or None)),

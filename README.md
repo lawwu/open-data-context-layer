@@ -64,7 +64,7 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 
 | Command | Answers |
 |---|---|
-| `odcl find WORDS [--kind] [--layer]` | What data is there for this? |
+| `odcl find WORDS [--kind] [--layer] [--retired]` | What data is there for this? |
 | `odcl show KEY` | Everything about one entry, with its history |
 | `odcl lineage KEY` | What is it built from, and what is built from it? |
 | `odcl used-by KEY` | Which projects depend on it? |
@@ -196,6 +196,23 @@ uv run odcl import --sql-definitions definitions.jsonl            # --dialect fo
 `target` is required, and so is `select` unless the line is a `declaration` (a source table with no SQL). `dependencies` adds tables the SELECT does not name. Entries merge with what other importers said, under `sql_definitions` in `source`; the whole file is applied together, and a line that cannot be read is refused with its line number before anything is written.
 
 The result names what could not be linked rather than failing: `unresolved`, the tables read that are neither defined in the file nor registered (registered by name only), and `untraced`, the targets whose SQL sqlglot cannot read. A Dataform import reports the same two lists.
+
+## When something is gone from its source
+
+An import also says what is no longer there. After it registers what it read, whatever the same importer registered before, within what it read this time, and did not see is withdrawn, in the same transaction:
+
+| Import | What it read, so what it can retire |
+| --- | --- |
+| `--postgres` | the database's schemas it read (all of them, without `--schema`): tables, views and their columns |
+| `--sql-definitions FILE` | the definitions from that file (or `--repository`), and their columns |
+| `--dataform` | the repository's declarations and tables, when its definitions are applied |
+| `--dbt` | the dbt project's models and sources; nothing with `--select`, which reads only part |
+| `--bigquery TABLE…` | the columns of the tables named; never a table, since only those are read |
+
+- **Withdrawn or retired.** Withdrawing removes the importer's part of an entry, under its name in `source`, with the tags it set. If another importer still says the entry (BigQuery and Dataform describe the same tables), that is all. If nothing else does, the entry is **retired**: a new revision marked `retired`, with no links. Tables and columns registered only because a query named them are left alone.
+- **What retirement changes.** A retired table or column leaves `odcl find`, `odcl tables` and the counts (`--retired`, or `retired=1` over HTTP, includes it), and a table lists its retired columns apart. A project that used it is listed in `overview` as `retired_but_used` and flagged on the web page. Its history keeps every revision, so what a model version pinned can still be read.
+- **Coming back.** When the importer sees it again, it is registered as usual and no longer retired. A hand edit, such as a description, does not revive it.
+- Importing again changes nothing: what is retired stays retired, and each import's result lists what it `retired` and `withdrawn`.
 
 ## Binding data to the build that made it
 
@@ -523,7 +540,7 @@ with Catalog() as catalog:
     catalog.used_by("churn.bronze.accounts.plan")
 ```
 
-`Catalog` is the whole interface: `put`, `apply`, `use`, `find`, `get`, `lineage`, `used_by`, `uses`, `table_history`, `query_jobs`, `tables`, `projects`, `runs`, `models`, `overview`. `apply` registers a batch in one transaction: all of it, or none. It takes every entry lock first (512 stripes that keys hash to, in order), so an import of any size fits PostgreSQL's lock table and two imports run one after the other rather than deadlock. With `merge=True`, fields a payload leaves out keep what the entry already says, and the tags a payload sends belong to the one importer named in its `source`, so they replace only that importer's earlier tags. Without `merge` a payload says the whole entry, except what is said beside it by its own commands: copies (`instances`), `created_by`, a column's `references` and the privacy fields are kept when the payload leaves them out, and cleared when it sets them to null. So a dbt import, which does not merge, keeps them. Builds are read and written through `odcl.dataform.import_invocation`, `odcl.builds.record_handoff` and `odcl.builds.explain_dataset`; model versions through `odcl.vertex.import_build` and `Catalog.explain_model`; OpenLineage events through `odcl.openlineage.ingest`. `odcl.server.make_server` returns the HTTP server. `Catalog(token=...)` signs in as an API token's user and checks their role on every write; `odcl.users` manages users and tokens.
+`Catalog` is the whole interface: `put`, `apply`, `use`, `find`, `get`, `lineage`, `used_by`, `uses`, `table_history`, `query_jobs`, `tables`, `projects`, `runs`, `models`, `overview`. `apply` registers a batch in one transaction: all of it, or none; with `withdraw` it also withdraws what that importer said before within what it read and no longer saw (`Catalog.withdraw`). It takes every entry lock first (512 stripes that keys hash to, in order), so an import of any size fits PostgreSQL's lock table and two imports run one after the other rather than deadlock. With `merge=True`, fields a payload leaves out keep what the entry already says, and the tags a payload sends belong to the one importer named in its `source`, so they replace only that importer's earlier tags. Without `merge` a payload says the whole entry, except what is said beside it by its own commands: copies (`instances`), `created_by`, a column's `references` and the privacy fields are kept when the payload leaves them out, and cleared when it sets them to null. So a dbt import, which does not merge, keeps them. Builds are read and written through `odcl.dataform.import_invocation`, `odcl.builds.record_handoff` and `odcl.builds.explain_dataset`; model versions through `odcl.vertex.import_build` and `Catalog.explain_model`; OpenLineage events through `odcl.openlineage.ingest`. `odcl.server.make_server` returns the HTTP server. `Catalog(token=...)` signs in as an API token's user and checks their role on every write; `odcl.users` manages users and tokens.
 
 ## Developing
 
@@ -591,5 +608,6 @@ The tag starts `release.yml`, which refuses a tag that isn't on `main`, whose ve
 - Discovering Dataform invocations, and Dataform runs started from the CLI rather than the managed service.
 - Permissions finer than a role, such as who may change which tables. Whoever holds the database's credentials can still do anything.
 - The CLI through `odcl serve` (as `odcl mcp --server` does), so people annotate from the command line without database credentials.
+- Retiring what an OpenLineage producer stopped emitting: events say what a run touched, not everything that exists.
 
 The distribution is `open-data-context-layer`, the Python package is `odcl`, and the command is `odcl`. The repository is [lawwu/open-data-context-layer](https://github.com/lawwu/open-data-context-layer).

@@ -183,7 +183,7 @@ def test_tables_are_registered_with_nested_columns_and_importing_again_changes_n
         "baseTableReference": ref(FEATURES), "snapshotTime": "2026-09-02T02:00:00Z"}}
     client = Mock(get_table=Mock(return_value=snapshot))
 
-    assert bq.import_tables(catalog, ["data-p.frozen.shift_inputs_b042"], client=client) == {"added": 4, "changed": 0, "unchanged": 0}
+    assert bq.import_tables(catalog, ["data-p.frozen.shift_inputs_b042"], client=client) == {"added": 4, "changed": 0, "unchanged": 0, "retired": [], "withdrawn": []}
     table = catalog.get("data-p.frozen.shift_inputs_b042")
     assert (table["system"], table["type"], table["description"]) == ("bigquery", "snapshot", "Frozen inputs for build 042")
     assert table["source"]["bigquery"]["base_table"] == FEATURES and table["source"]["bigquery"]["snapshot_time"] == "2026-09-02T02:00:00Z"
@@ -193,7 +193,7 @@ def test_tables_are_registered_with_nested_columns_and_importing_again_changes_n
     assert nested["description"] == "Hours at the cutoff" and nested["source"]["bigquery"]["path"] == "Shift.hours_at_cutoff"  # BigQuery's own spelling
 
     snapshot._properties["numRows"] = "999"  # row counts move without the definition changing
-    assert bq.import_tables(catalog, ["data-p.frozen.shift_inputs_b042"], client=client) == {"added": 0, "changed": 0, "unchanged": 4}
+    assert bq.import_tables(catalog, ["data-p.frozen.shift_inputs_b042"], client=client) == {"added": 0, "changed": 0, "unchanged": 4, "retired": [], "withdrawn": []}
 
 
 def test_the_command_line_syncs_and_shows_a_tables_history(database, monkeypatch, capsys):
@@ -268,3 +268,15 @@ def test_an_end_in_the_future_reads_and_records_only_up_to_now(catalog):
     recorded = catalog.db.execute("SELECT completed_until FROM sync_cursors").fetchone()["completed_until"]
     assert recorded <= store.now() and dt.datetime.fromisoformat(result["until"]) <= store.now()
     bq.sync_jobs(catalog, "jobs-p", client=client_for(week()))  # the next regular sync is not refused as already read
+
+
+def test_a_column_a_table_no_longer_has_is_retired_and_tables_not_read_are_left_alone(catalog):
+    def table(fqn, fields):
+        return gbq.Table(fqn, schema=[gbq.SchemaField(f, "STRING") for f in fields])
+    tables = {"p.s.a": table("p.s.a", ["id", "gone"]), "p.s.b": table("p.s.b", ["id"])}
+    client = Mock(get_table=Mock(side_effect=lambda r: tables[f"{r.project}.{r.dataset_id}.{r.table_id}"]))
+    bq.import_tables(catalog, ["p.s.a", "p.s.b"], client=client)
+    tables["p.s.a"] = table("p.s.a", ["id"])
+    result = bq.import_tables(catalog, ["p.s.a"], client=client)
+    assert result["retired"] == ["column:p.s.a.gone"] and catalog.get("p.s.a.gone")["retired"] is True
+    assert "retired" not in catalog.get("p.s.b") and "retired" not in catalog.get("p.s.a")

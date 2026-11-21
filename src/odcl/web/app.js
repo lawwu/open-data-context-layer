@@ -241,6 +241,8 @@ function lineageLists(lineage) {
 }
 
 // ---- pages ----------------------------------------------------------------------------------------------------
+const retiredBadge = () => h("span", { class: "status warning", title: "No longer at its source" }, "retired");
+
 async function overviewPage() {
   const [overview, models, runs] = await Promise.all([api("/v1/overview"), api("/v1/models"), api("/v1/runs?limit=8")]);
   const tile = (value, label, href) => h(href ? "a" : "div", { class: "card tile", href }, h("div", { class: "value" }, value.toLocaleString()), h("div", { class: "label" }, label));
@@ -253,6 +255,9 @@ async function overviewPage() {
     h("h2", {}, "Changed after a project used it"),
     table(["Project", "Uses", ""], overview.changed_since_used.map((c) => [entryLink(c.project), entryLink(c.key), changedBadge()]),
       "Every project uses data as it is defined now."),
+    h("h2", {}, "Gone from its source while a project uses it"),
+    table(["Project", "Uses", ""], (overview.retired_but_used || []).map((c) => [entryLink(c.project), entryLink(c.key), retiredBadge()]),
+      `Nothing a project uses has been retired.${overview.retired ? ` ${plural(overview.retired, "table or column", "tables and columns")} retired in all.` : ""}`),
     h("h2", {}, "Redefined after a document described it"),
     table(["Document", "Describes", ""], (overview.changed_since_described || []).map((c) => [entryLink(c.document), entryLink(c.key), changedBadge()]),
       "Every document describes data as it is defined now."),
@@ -280,7 +285,7 @@ async function searchPage(params) {
     results.length ? h("ul", { class: "results" }, results.map((r) => h("li", {},
       h("div", {}, kindBadge(r.kind), " ", h("a", { class: "title", href: entryHref(r.key) }, r.title),
         r.layer ? h("span", { class: "muted" }, ` · ${r.layer}`) : null, r.dtype ? h("span", { class: "muted" }, ` · ${r.dtype}`) : null,
-        r.used_by ? h("span", { class: "muted" }, ` · used by ${plural(r.used_by, "project")}`) : null),
+        r.used_by ? h("span", { class: "muted" }, ` · used by ${plural(r.used_by, "project")}`) : null, r.retired ? [" ", retiredBadge()] : null),
       r.description ? h("p", {}, r.description) : null))) : h("p", { class: "muted" }, "Nothing matches every word."));
 }
 
@@ -289,8 +294,9 @@ async function entryPage(key) {
   if (entry.kind === "document") return documentPage(entry);
   const isModel = entry.kind === "project" && entry.model_versions.length > 0;
   const parts = [
-    h("div", {}, kindBadge(entry.kind), isModel ? [" ", h("span", { class: "badge" }, "model")] : null),
+    h("div", {}, kindBadge(entry.kind), isModel ? [" ", h("span", { class: "badge" }, "model")] : null, entry.retired ? [" ", retiredBadge()] : null),
     h("h1", {}, entry.title),
+    entry.retired ? h("div", { class: "missing" }, `△ No longer at its source: ${entry.retired_by || "its importer"} did not find it at its last import. What it was is kept in its history.`) : null,
     entry.description ? h("p", { class: "sub" }, entry.description) : h("p", { class: "sub muted" }, "No description yet."),
     h("div", { class: "card" }, facts([
       ["Key", h("code", {}, entry.key)],
@@ -323,13 +329,17 @@ async function entryPage(key) {
   } else {
     const lineage = await api(`/v1/entries/${enc(entry.key)}/lineage?direction=both`);
     if (lineage.system === "bigquery") {
-      parts[3].append(h("div", { class: "console-row" }, consoleLink(gcp.table(entry.kind === "column" ? entry.table : entry.key), "Open in BigQuery")));
+      parts[4].append(h("div", { class: "console-row" }, consoleLink(gcp.table(entry.kind === "column" ? entry.table : entry.key), "Open in BigQuery")));
     }
     parts.push(h("h2", {}, "Lineage"), lineageGraph(lineage), lineageLists(lineage));
     if (entry.kind === "table") {
       parts.push(h("h2", {}, `Columns (${entry.columns.length})`),
         table(["Column", "Type", "Description"], entry.columns.map((c) => [entryLink(c.key, c.title.split(".").pop()), c.dtype || "", c.description || ""]),
           "No columns are registered."));
+      if ((entry.retired_columns || []).length) {
+        parts.push(h("details", {}, h("summary", { class: "muted" }, `${plural(entry.retired_columns.length, "column")} no longer at the source`),
+          table(["Column", "Type", "Description"], entry.retired_columns.map((c) => [entryLink(c.key, c.title.split(".").pop()), c.dtype || "", c.description || ""]))));
+      }
     }
     parts.push(h("h2", {}, "Used by"),
       table(["Project", "How", "Through", "For", ""], entry.used_by.map((u) => [entryLink(u.project), u.how, u.through === entry.key ? "this entry" : entryLink(u.through),

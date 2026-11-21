@@ -87,3 +87,16 @@ def test_a_malformed_line_is_refused_by_name(catalog, tmp_path, line):
 def test_the_system_follows_the_dialect_unless_named(catalog, tmp_path):
     import_definitions(catalog, write(tmp_path, [{"target": "w.s.t", "select": "SELECT 1 AS x"}]), dialect="postgres")
     assert catalog.get("w.s.t")["system"] == "postgres"
+
+
+def test_a_definition_removed_from_the_file_is_retired_and_other_files_are_left_alone(catalog, tmp_path):
+    first = tmp_path / "a.jsonl"
+    first.write_text("\n".join(json.dumps(x) for x in [{"target": "w.s.keep", "select": "SELECT 1 AS x"}, {"target": "w.s.drop", "select": "SELECT 2 AS y"}]))
+    other = tmp_path / "b.jsonl"
+    other.write_text(json.dumps({"target": "w.s.elsewhere", "select": "SELECT 3 AS z"}))
+    import_definitions(catalog, str(first))
+    import_definitions(catalog, str(other))
+    first.write_text(json.dumps({"target": "w.s.keep", "select": "SELECT 1 AS x"}))
+    result = import_definitions(catalog, str(first))
+    assert result["retired"] == ["table:w.s.drop", "column:w.s.drop.y"]
+    assert "retired" not in catalog.get("w.s.elsewhere") and "retired" not in catalog.get("w.s.keep")
