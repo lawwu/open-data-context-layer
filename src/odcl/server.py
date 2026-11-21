@@ -28,6 +28,10 @@ Who is asking, and what they may do (see `odcl.users`):
     POST /v1/me/tokens/{id}/revoke
     GET  /v1/users, POST /v1/users               admin: every user; make one (a person, or a service user for importers)
     POST /v1/users/{name}                        admin: change a user's role, or disable them
+    GET  /v1/alerts/subscriptions                your alert subscriptions (an admin's: all of them)
+    POST /v1/alerts/subscriptions                editor: {project | owner | all, channel, address, min_severity}
+    POST /v1/alerts/subscriptions/{id}/remove    editor
+    POST /v1/alerts/send                         importer: send what is new ({"dry_run": true} to only say)
     POST /v1/users/{name}/tokens                 admin: a token for a user, such as a service user
     POST /v1/projects                            editor: register a project
     POST /v1/projects/{name}/uses                editor: record that a project used tables or columns
@@ -53,6 +57,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
+from . import alerts
 from . import sso as single_sign_on
 from . import users
 from .store import Catalog, CatalogError, require
@@ -97,6 +102,12 @@ def _privacy(c: Catalog, b) -> list[dict]:
     return c.set_privacy(b["keys"], **{k: v for k, v in b.items() if k != "keys"})
 
 
+def _subscribe(c: Catalog, b) -> dict:
+    b = _fields(b, ("project", "owner", "all", "channel", "address", "min_severity"), ("channel", "address"))
+    return alerts.subscribe(c, project=b.get("project"), owner=b.get("owner"), everything=bool(b.get("all")), channel=b["channel"],
+                            address=b["address"], min_severity=b.get("min_severity") or "semantic")
+
+
 PROJECT = ("name", "description", "owner", "repository", "status", "tags")
 
 # (method, pattern, role, handler(catalog, match, query, body)). `anyone` needs no sign-in; `reader` needs one only
@@ -129,6 +140,11 @@ ROUTES = [
     ("POST", r"/v1/users", "admin", lambda c, m, q, b: users.add(c, **_fields(b, ("name", "role", "display_name", "email"), ("name", "role")))),
     ("POST", r"/v1/users/(?P<name>[^/]+)", "admin", lambda c, m, q, b: users.update(c, m["name"], **_fields(b, ("role", "disabled")))),
     ("POST", r"/v1/users/(?P<name>[^/]+)/tokens", "admin", lambda c, m, q, b: users.make_token(c, m["name"], _fields(b, ("label",)).get("label"))),
+    # alerts
+    ("GET", r"/v1/alerts/subscriptions", "reader", lambda c, m, q, b: alerts.subscriptions(c)),
+    ("POST", r"/v1/alerts/subscriptions", "editor", lambda c, m, q, b: _subscribe(c, b)),
+    ("POST", r"/v1/alerts/subscriptions/(?P<id>\d+)/remove", "editor", lambda c, m, q, b: alerts.unsubscribe(c, int(m["id"]))),
+    ("POST", r"/v1/alerts/send", "importer", lambda c, m, q, b: alerts.send(c, bool(_fields(b or {}, ("dry_run",)).get("dry_run")))),
     # annotations
     ("POST", r"/v1/projects", "editor", lambda c, m, q, b: c.put("project", _fields(b, PROJECT, ("name", "description")))),
     ("POST", r"/v1/projects/(?P<name>[^/]+)/uses", "editor",
