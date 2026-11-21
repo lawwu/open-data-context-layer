@@ -8,6 +8,9 @@ MCP tools answer. It runs on the standard library's threaded HTTP server, with o
     GET  /v1/entries/{key}                       one entry in full
     GET  /v1/entries/{key}/diff?since=&until=    what changed, each change labelled cosmetic, additive, semantic or breaking
     GET  /v1/entries/{key}/quality?at=           the newest result of each data-quality test, as of a time
+    GET  /v1/glossary?domain=                    every glossary term
+    POST /v1/terms, POST /v1/domains             editor: add or change a term {name, description, synonyms, domain, owner, status} or a domain
+    POST /v1/entries/{key}/terms, /domain        editor: {terms: [...]} a table or column means; {domain} of a table, project or term
     POST /v1/quality                             importer: {source, results: [{entry, test, status, failures, observed_at, run, kind, message}]}
     GET  /v1/entries/{key}/lineage?direction=    up, down or both
     GET  /v1/entries/{key}/used-by
@@ -143,6 +146,12 @@ ROUTES = [
     ("POST", r"/v1/users", "admin", lambda c, m, q, b: users.add(c, **_fields(b, ("name", "role", "display_name", "email"), ("name", "role")))),
     ("POST", r"/v1/users/(?P<name>[^/]+)", "admin", lambda c, m, q, b: users.update(c, m["name"], **_fields(b, ("role", "disabled")))),
     ("POST", r"/v1/users/(?P<name>[^/]+)/tokens", "admin", lambda c, m, q, b: users.make_token(c, m["name"], _fields(b, ("label",)).get("label"))),
+    ("GET", r"/v1/glossary", "reader", lambda c, m, q, b: c.glossary(q.get("domain") or None)),
+    ("POST", r"/v1/terms", "editor", lambda c, m, q, b: c.put("term", _fields(b, ("name", "description", "owner", "status", "synonyms", "domain"),
+                                                                              ("name", "description")), merge=True)),
+    ("POST", r"/v1/domains", "editor", lambda c, m, q, b: c.put("domain", _fields(b, ("name", "description", "owner"), ("name", "description")), merge=True)),
+    ("POST", r"/v1/entries/(?P<key>[^/]+)/terms", "editor", lambda c, m, q, b: c.set_terms(m["key"], _fields(b, ("terms",)).get("terms") or [])),
+    ("POST", r"/v1/entries/(?P<key>[^/]+)/domain", "editor", lambda c, m, q, b: c.set_domain(m["key"], _fields(b, ("domain",)).get("domain"))),
     ("POST", r"/v1/quality", "importer", lambda c, m, q, b: quality.record(c, _fields(b, ("source", "results"), ("source", "results"))["results"], b["source"])),
     # alerts
     ("GET", r"/v1/alerts/subscriptions", "reader", lambda c, m, q, b: alerts.subscriptions(c)),

@@ -70,6 +70,8 @@ a.card.tile:hover { text-decoration: none; border-color: var(--axis); }
 .kind.column { --swatch: var(--column); }
 .kind.project { --swatch: var(--project); }
 .kind.document { --swatch: var(--muted); }
+.kind.term { --swatch: var(--warning); }
+.kind.domain { --swatch: var(--ink-2); }
 
 .status { white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; }
 .status.warning { background: color-mix(in srgb, var(--warning) 22%, transparent); color: var(--ink); }

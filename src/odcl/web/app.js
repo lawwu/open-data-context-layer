@@ -64,7 +64,7 @@ async function api(path, { method = "GET", body, retried = false } = {}) {
 
 const enc = encodeURIComponent;
 const entryHref = (key) => `#/entry/${enc(key)}`;
-const short = (key) => String(key).replace(/^(table|column|project):/, "");
+const short = (key) => String(key).replace(/^(table|column|project|term|domain):/, "");
 const kindOf = (key) => String(key).split(":", 1)[0];
 function when(iso) {
   if (!iso) return "—";
@@ -273,6 +273,19 @@ function lineageLists(lineage) {
 // ---- pages ----------------------------------------------------------------------------------------------------
 const retiredBadge = () => h("span", { class: "status warning", title: "No longer at its source" }, "retired");
 
+async function glossaryPage() {
+  const terms = await api("/v1/glossary");
+  const byDomain = new Map();
+  for (const t of terms) byDomain.set(t.domain || "", [...(byDomain.get(t.domain || "") || []), t]);
+  render(
+    h("h1", {}, "Glossary"),
+    h("p", { class: "sub" }, "The business's words for its data, what each means, and which tables and columns mean it."),
+    terms.length ? [...byDomain].sort(([a], [b]) => (a || "~").localeCompare(b || "~")).map(([domain, list]) => [
+      h("h2", {}, domain ? entryLink(domain) : "No domain"),
+      table(["Term", "Definition", "Also called", "Meant by", "Status"], list.map((t) => [entryLink(t.key, t.title), t.definition, t.synonyms.join(", "),
+        plural(t.meant_by, "entry", "entries"), t.status || ""]))]) : h("p", { class: "muted" }, "No glossary term yet. Add one with odcl term add."));
+}
+
 async function overviewPage() {
   const [overview, models, runs] = await Promise.all([api("/v1/overview"), api("/v1/models"), api("/v1/runs?limit=8")]);
   const tile = (value, label, href) => h(href ? "a" : "div", { class: "card tile", href }, h("div", { class: "value" }, value.toLocaleString()), h("div", { class: "label" }, label));
@@ -312,7 +325,7 @@ async function searchPage(params) {
   document.getElementById("q").value = q;
   const results = await api(`/v1/search?q=${enc(q)}&limit=200${kind ? `&kind=${enc(kind)}` : ""}`);
   const select = h("select", { "aria-label": "Kind", onchange: (e) => { location.hash = `#/search?q=${enc(q)}${e.target.value ? `&kind=${e.target.value}` : ""}`; } },
-    ["", "table", "column", "project", "document"].map((k) => h("option", { value: k, selected: k === kind }, k ? `${k}s` : "everything")));
+    ["", "table", "column", "project", "document", "term", "domain"].map((k) => h("option", { value: k, selected: k === kind }, k ? `${k}s` : "everything")));
   render(
     h("h1", {}, q ? `Results for “${q}”` : `All ${kind ? `${kind}s` : "entries"}`),
     h("div", { class: "controls" }, h("span", { class: "muted" }, plural(results.length, "result")), select),
@@ -346,13 +359,24 @@ async function entryPage(key) {
       ["Copy of", (entry.copy_of || []).length ? entry.copy_of.map((d, n) => [n ? ", " : "", entryLink(d.key, d.title)]) : null],
       ["Copies", (entry.instances || []).length ? [entry.instances.map((p, n) => [n ? ", " : "", h("code", {}, p)]),
         ` match ${(entry.copies || []).length}: `, (entry.copies || []).map((d, n) => [n ? ", " : "", entryLink(d.key, d.title)])] : null],
+      ["Also called", (entry.synonyms || []).join(", ") || null],
+      ["Means", (entry.terms || []).length ? entry.terms.map((t, n) => [n ? ", " : "", entryLink(t.key, t.title)]) : null],
+      ["Domain", (entry.domain || []).length ? entry.domain.map((d) => entryLink(d.key, d.title)) : null],
       ["Personal data", entry.pii === true ? "yes" : entry.pii === false ? "no" : null], ["Scrubbing", entry.scrubbing],
       ["Data category", entry.data_category], ["Retention", entry.retention],
       ["Revision", [`${entry.revision} by ${entry.registered_by}, `, when(entry.at)]],
       ["Sources", sources(entry.source)],
     ])),
   ];
-  if (entry.kind === "project") {
+  if (entry.kind === "term") {
+    parts.push(h("h2", {}, `Meant by (${entry.meant_by.length})`),
+      table(["Entry", "Kind", "Description"], entry.meant_by.map((m) => [entryLink(m.key, m.title), kindBadge(m.kind), m.description || ""]),
+        "No table or column says it means this yet."));
+  } else if (entry.kind === "domain") {
+    parts.push(h("h2", {}, `In this domain (${entry.members.length})`),
+      table(["Entry", "Kind", "Description"], entry.members.map((m) => [entryLink(m.key, m.title), kindBadge(m.kind), m.description || ""]),
+        "Nothing is in this domain yet."));
+  } else if (entry.kind === "project") {
     if (isModel) {
       parts.push(h("h2", {}, `Model versions (${entry.model_versions.length})`), modelVersionsTable(entry.model_versions, false));
     }
@@ -817,10 +841,11 @@ async function route() {
     models: () => modelsPage(),
     tables: () => tablesPage(params),
     projects: () => projectsPage(),
+    glossary: () => glossaryPage(),
     runs: () => runsPage(params),
     account: () => accountPage(),
   };
-  const section = { "": "#/", models: "#/models", model: "#/models", tables: "#/tables", projects: "#/projects", runs: "#/runs" }[parts[0] || ""];
+  const section = { "": "#/", models: "#/models", model: "#/models", tables: "#/tables", projects: "#/projects", glossary: "#/glossary", runs: "#/runs" }[parts[0] || ""];
   for (const link of document.querySelectorAll(".top nav a")) {
     if (link.getAttribute("href") === section) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");

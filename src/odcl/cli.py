@@ -104,6 +104,11 @@ def lines(command: str, result) -> list[str]:
             out += [f"  subscription {m['subscription']} ({m['channel']}): {len(m['alerts'])} alert(s)"] + (
                 ["    " + line for line in m["text"].splitlines()] if result["dry_run"] else [])
         return out + [f"  subscription {m['subscription']} failed: {m['error']}" for m in result["failed"]]
+    if command == "glossary":
+        return [f"{t['title']}" + (f"  [{short(t['domain'])}]" if t["domain"] else "") + f"  meant by {t['meant_by']}" + (f"  ({t['status']})" if t["status"] else "")
+                + f"\n    {t['definition']}" + (f"\n    also: {', '.join(t['synonyms'])}" if t["synonyms"] else "") for t in result] or ["No glossary term yet."]
+    if command in ("term", "domain", "means", "in-domain"):
+        return [f"{result['key']}  {result['change']}  ({result['revision']})"]
     if command == "quality":
         return [f"{result['key']}: {result['status'] or 'no results'}" + (f" (as of {result['at']})" if result["at"] else "")] + [
             f"  {r['status']:<5} {short(r['entry'])}  {r['test']}" + (f"  {r['failures']} failing" if r["failures"] else "")
@@ -459,6 +464,17 @@ def run(catalog: Catalog, args):
         return {"key": catalog.resolve(args.key, DESCRIBED), "documents": catalog.documents(args.key)}
     if args.command == "show":
         return catalog.get(args.key)
+    if args.command == "term":
+        return catalog.put("term", {"name": args.name, "description": args.definition, "owner": args.owner, "status": args.status,
+                                    "synonyms": args.synonym or None, "domain": args.domain}, merge=True)
+    if args.command == "domain":
+        return catalog.put("domain", {"name": args.name, "description": args.description, "owner": args.owner}, merge=True)
+    if args.command == "means":
+        return catalog.set_terms(args.key, args.terms)
+    if args.command == "in-domain":
+        return catalog.set_domain(args.key, args.domain)
+    if args.command == "glossary":
+        return catalog.glossary(args.domain)
     if args.command == "quality":
         from .quality import for_entry
         return for_entry(catalog, args.key, args.at)
@@ -644,7 +660,7 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("find", help="search tables, columns and projects")
     s.add_argument("words", nargs="*")
-    s.add_argument("--kind", choices=["table", "column", "project", "document"])
+    s.add_argument("--kind", choices=["table", "column", "project", "document", "term", "domain"])
     s.add_argument("--layer")
     s.add_argument("--limit", type=int, default=50)
     s.add_argument("--retired", action="store_true", help="include tables and columns no longer at their source")
@@ -654,6 +670,32 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("show", help="one entry in full")
     s.add_argument("key")
+
+    s = sub.add_parser("term", help="add or change a glossary term: a business word and what it means")
+    t = s.add_subparsers(dest="what", required=True).add_parser("add")
+    t.add_argument("name")
+    t.add_argument("--definition", required=True)
+    t.add_argument("--synonym", action="append", help="another word for it; repeat for more")
+    t.add_argument("--domain")
+    t.add_argument("--owner")
+    t.add_argument("--status", help="draft, approved, or your own word")
+
+    s = sub.add_parser("domain", help="add or change a domain: a part of the business that owns data, projects and terms")
+    t = s.add_subparsers(dest="what", required=True).add_parser("add")
+    t.add_argument("name")
+    t.add_argument("--description", required=True)
+    t.add_argument("--owner")
+
+    s = sub.add_parser("means", help="say which glossary terms a table or column means (no terms clears them)")
+    s.add_argument("key")
+    s.add_argument("terms", nargs="*")
+
+    s = sub.add_parser("in-domain", help="put a table, project or term in a domain (no domain takes it out)")
+    s.add_argument("key")
+    s.add_argument("domain", nargs="?")
+
+    s = sub.add_parser("glossary", help="every glossary term, with its domain and how many tables and columns mean it")
+    s.add_argument("--domain")
 
     s = sub.add_parser("quality", help="the newest result of each data-quality test on a table (and its columns) or a column")
     s.add_argument("key")

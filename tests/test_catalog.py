@@ -20,7 +20,7 @@ def catalog(database):
 
 def test_a_dbt_project_becomes_shared_tables_and_columns_with_lineage(catalog):
     counts = catalog.overview()["counts"]
-    assert counts == {"table": 5, "column": 19, "project": 0, "document": 0}
+    assert counts == {"table": 5, "column": 19, "project": 0, "document": 0, "term": 0, "domain": 0}
     gold = catalog.get(GOLD)
     assert gold["layer"] == "gold" and gold["system"] == "duckdb" and gold["registered_by"] == "ana"
     assert [t["key"] for t in gold["derived_from"]] == ["table:churn.main_silver.stg_accounts", "table:churn.main_silver.stg_tickets"]

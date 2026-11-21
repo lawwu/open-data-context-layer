@@ -35,8 +35,8 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-KINDS = ("table", "column", "project", "document")
-DESCRIBED = ("table", "column", "project")  # what a document can describe
+KINDS = ("table", "column", "project", "document", "term", "domain")
+DESCRIBED = ("table", "column", "project", "term", "domain")  # what a document can describe
 DOCUMENT = re.compile(r"^[a-z0-9_][a-z0-9_.\-/@~+]{0,499}$")
 PATH = re.compile(r"^[a-z0-9_][a-z0-9_.\-$]{0,299}$")
 COLUMN = re.compile(r"^[a-z0-9_][a-z0-9_.\-$]{0,149}$")  # dots separate the levels of a nested field
@@ -44,7 +44,8 @@ NAME = re.compile(r"^[a-z0-9_][a-z0-9_.\-]{0,99}$")
 GLOB = re.compile(r"^[a-z0-9_.\-$*?\[\]!]{1,300}$")  # a pattern over table paths, such as t-*.sales.daily_totals
 TEXT = {"table": {"system": 100, "layer": 50, "owner": 200, "type": 50},
         "column": {"dtype": 200, "definition": 4000, "owner": 200},
-        "project": {"owner": 200, "repository": 500, "status": 50}}
+        "project": {"owner": 200, "repository": 500, "status": 50},
+        "term": {"owner": 200, "status": 50}, "domain": {"owner": 200}}
 PRIVACY = {"data_category": 100, "retention": 100, "scrubbing": 200}  # with `pii`, on tables and columns: kept only when said
 HOW = ("direct", "column", "table", "downstream")  # how a project comes to depend on an entry, strongest first
 
@@ -103,6 +104,7 @@ def search_text(body: dict) -> str:
     words += " pii" if body.get("pii") else ""
     words += " " + " ".join(str((body.get("created_by") or {}).get(f) or "") for f in ("kind", "path", "note"))
     words += " " + " ".join(h["text"] for h in body.get("headings") or [])
+    words += " " + " ".join(body.get("synonyms") or [])
     return " ".join(TOKEN.findall((words + " " + " ".join(body["tags"])).lower()))
 
 
@@ -279,29 +281,34 @@ class Catalog:
                 key, title = f"column:{table[6:]}.{name}", f"{table[6:]}.{name}"
                 extra = {"table": table, "name": name}
             else:
-                name = str(p.get("name") or "").lower()
-                require(NAME.match(name), "name", "A project name is letters, digits, _ . or -")
-                key, title = f"project:{name}", name
+                name = str(p.get("name") or "").strip().lower()
+                require(NAME.match(name), "name", f"A {kind} name is letters, digits, _ . or -")
+                key, title = f"{kind}:{name}", name
                 extra = {"name": name}
                 self._lock(key)
                 prior = self._head(key)
-                links = [link for link in prior["body"]["links"] if link["relation"] == "uses"] if prior else []
+                if kind == "project":  # uses are recorded by `use`, so saying the project again keeps them
+                    links = [link for link in prior["body"]["links"] if link["relation"] == "uses"] if prior else []
+                if prior and not merge and "domain" not in p:  # as is its domain, which its own command sets
+                    p = {**p, "domain": next((link["to"] for link in prior["body"]["links"] if link["relation"] == "in_domain"), None)}
             if merge:
                 self._lock(key)
                 prior = self._head(key)
                 if prior:
                     said = prior["body"]
+                    linked = lambda relation: [link["to"] for link in said["links"] if link["relation"] == relation]
                     kept = {"description": said["description"] or None, **{f: said.get(f) for f in TEXT[kind]}, "tags": said["tags"],
-                            **({f: said.get(f) for f in ("pii", *PRIVACY)} if kind != "project" else {}),
+                            **({f: said.get(f) for f in ("pii", *PRIVACY)} if kind in ("table", "column") else {}),
                             **({"instances": said.get("instances"), "created_by": said.get("created_by")} if kind == "table" else {}),
-                            "derived_from": [link["to"] for link in said["links"] if link["relation"] == "derived_from"],
-                            **({"references": [link["to"] for link in said["links"] if link["relation"] == "references"]} if kind == "column" else {})}
+                            "derived_from": linked("derived_from"), "terms": linked("means"), "domain": next(iter(linked("in_domain")), None),
+                            **({"synonyms": said.get("synonyms")} if kind == "term" else {}),
+                            **({"references": linked("references")} if kind == "column" else {})}
                     require(isinstance(payload.get("source") or {}, dict), "source", "source is a small object saying where the entry came from")
                     p = {**kept, **{k: v for k, v in payload.items() if v is not None}, "source": {**said["source"], **(payload.get("source") or {})}}
                 p = self._own_tags(p, payload, prior["body"] if prior else None)
-            elif kind != "project":
+            elif kind in ("table", "column"):
                 p = self._keep_annotations(kind, key, p)
-            if kind != "project":
+            if kind in ("table", "column"):
                 for parent in names(p.get("derived_from"), "derived_from"):
                     parent = self.resolve(parent, (kind,))
                     require(parent != key, "derived_from", f"{key} cannot be derived from itself")
@@ -311,6 +318,18 @@ class Catalog:
                     target = self.resolve(target, ("column",))
                     require(target != key, "references", f"{key} cannot reference itself")
                     links.append({"relation": "references", "to": target, "revision": self._head(target)["id"]})
+            if kind in ("table", "column"):  # the glossary terms it means
+                for term in names(p.get("terms"), "terms", 20):
+                    term = self.resolve(term, ("term",))
+                    links.append({"relation": "means", "to": term, "revision": self._head(term)["id"]})
+            if kind in ("table", "project", "term") and p.get("domain"):  # the one domain it belongs to
+                domain = self.resolve(str(p["domain"]), ("domain",))
+                links.append({"relation": "in_domain", "to": domain, "revision": self._head(domain)["id"]})
+            synonyms = None
+            if kind == "term" and p.get("synonyms"):
+                synonyms = names(p["synonyms"], "synonyms", 20)
+                require(all(len(x) <= 100 for x in synonyms), "synonyms", "A synonym is at most 100 characters")
+                synonyms = sorted(set(synonyms))
             instances = None
             if kind == "table" and p.get("instances") is not None:
                 instances = names(p["instances"], "instances", 50)
@@ -322,9 +341,10 @@ class Catalog:
             source = p.get("source") or {}
             require(isinstance(source, dict) and len(json.dumps(source)) <= 5000, "source", "source is a small object saying where the entry came from")
             body = {"key": key, "kind": kind, "title": title, **extra,
-                    "description": text(p.get("description"), "description", 4000, optional=kind != "project") or "",
+                    "description": text(p.get("description"), "description", 4000, optional=kind not in ("project", "term")) or "",
                     **{field: text(p.get(field), field, limit, optional=True) for field, limit in TEXT[kind].items()},
-                    **(self._privacy(p) if kind != "project" else {}), **({"instances": instances} if instances else {}),
+                    **(self._privacy(p) if kind in ("table", "column") else {}), **({"instances": instances} if instances else {}),
+                    **({"synonyms": synonyms} if synonyms else {}),
                     **({"created_by": created} if kind == "table" and (created := self._created_by(p)) else {}),
                     "tags": sorted(set(tags)), "source": source, "links": links}
             # a hand edit annotates a retired entry; only its source seeing it again revives it
@@ -340,7 +360,7 @@ class Catalog:
         """Without `merge`, a payload says the whole entry, but an importer such as dbt does not know what was said
         beside it: the copies of a definition, what created a table, a column's foreign keys and the privacy fields.
         Those it leaves out (the field is absent, not None) keep what the entry says now; their own commands change them."""
-        fields = ("pii", *PRIVACY, *(("instances", "created_by") if kind == "table" else ()), *(("references",) if kind == "column" else ()))
+        fields = ("pii", *PRIVACY, "terms", *(("instances", "created_by", "domain") if kind == "table" else ()), *(("references",) if kind == "column" else ()))
         if all(f in p for f in fields):
             return p
         self._lock(key)
@@ -351,6 +371,10 @@ class Catalog:
         kept = {f: said[f] for f in fields if f not in p and f in said}
         if "references" in fields and "references" not in p:
             kept["references"] = [link["to"] for link in said["links"] if link["relation"] == "references"] or None
+        if "terms" not in p:
+            kept["terms"] = [link["to"] for link in said["links"] if link["relation"] == "means"] or None
+        if "domain" in fields and "domain" not in p:
+            kept["domain"] = next((link["to"] for link in said["links"] if link["relation"] == "in_domain"), None)
         return {**p, **{k: v for k, v in kept.items() if v is not None}}
 
     def _instance_links(self, key: str, patterns: list[str]) -> list[dict]:
@@ -596,7 +620,7 @@ class Catalog:
                        "owner": body.get("owner") or table.get("owner"), "revision": row["id"]}
             if body["kind"] == "document":
                 summary |= {"doc_kind": body.get("doc_kind"), "retired": body.get("retired", False)}
-            elif body["kind"] != "project":
+            elif body["kind"] in ("table", "column"):
                 summary.update(layer=table.get("layer"), system=table.get("system"), dtype=body.get("dtype"))
                 if body.get("retired"):
                     summary["retired"] = True
@@ -735,6 +759,15 @@ class Catalog:
                                                                WHERE d.document_key = %s ORDER BY b.recorded_at DESC, b.id DESC""", (key,))]
             return out
         out["documents"] = self.documents(key)
+        if out["kind"] == "term":
+            out["domain"] = self._linked(key, "in_domain", "up")
+            out["meant_by"] = self._linked(key, "means", "down")  # the tables and columns that mean it
+            return out
+        if out["kind"] == "domain":
+            out["members"] = self._linked(key, "in_domain", "down")  # its tables, projects and terms
+            return out
+        if out["kind"] in ("table", "project"):
+            out["domain"] = self._linked(key, "in_domain", "up")
         if out["kind"] == "project":
             out["uses"] = self._linked(key, "uses", "up")
             out["model_versions"] = self.models(key)
@@ -747,6 +780,7 @@ class Catalog:
             out["copies"] = self._linked(key, "instance_of", "up")         # what this definition is copied to
             out["copy_of"] = self._linked(key, "instance_of", "down")      # the definitions this table is a copy of
             out["foreign_keys"], out["referenced_by"] = self._foreign_keys(key)
+        out["terms"] = self._linked(key, "means", "up")
         if out["kind"] in ("table", "column"):
             from .quality import for_entry
             found = for_entry(self, key)
@@ -953,6 +987,31 @@ class Catalog:
             ORDER BY e.key""", {"layer": layer, "system": system, "retired": retired}).fetchall()
         return [{**summary, "columns": r["columns"], "changed": stamp(r["recorded_at"])}
                 for r, summary in zip(rows, self._summaries([r["key"] for r in rows], users=True), strict=True)]
+
+    def set_terms(self, name: str, terms: list[str]) -> dict:
+        """Say which glossary terms a table or column means, keeping everything else it says. No terms clears them."""
+        body = self._head(self.resolve(name, ("table", "column")))["body"]
+        where = {"path": body["path"]} if body["kind"] == "table" else {"table": body["table"], "name": body["name"]}
+        return self.put(body["kind"], {**where, "terms": [self.resolve(t, ("term",)) for t in terms]}, merge=True)
+
+    def set_domain(self, name: str, domain: str | None) -> dict:
+        """Put a table, project or term in a domain, keeping everything else it says. None takes it out."""
+        key = self.resolve(name, ("table", "project", "term"))
+        body = self._head(key)["body"]
+        where = {"path": body["path"]} if body["kind"] == "table" else {"name": body["name"]}
+        written = self.put(body["kind"], {**where, "domain": self.resolve(domain, ("domain",)) if domain else ""}, merge=True)
+        return written
+
+    def glossary(self, domain: str | None = None) -> list[dict]:
+        """Every glossary term, with its domain, synonyms and how many tables and columns mean it."""
+        domain = self.resolve(domain, ("domain",)) if domain else None
+        rows = self.db.execute("""
+            SELECT e.key, r.body, (SELECT target_key FROM revision_links WHERE source_revision = r.id AND relation = 'in_domain' LIMIT 1) AS domain,
+                   (SELECT count(*) FROM current_links c WHERE c.target_key = e.key AND c.relation = 'means') AS meant_by
+            FROM entries e JOIN revisions r ON r.id = e.head_revision WHERE e.kind = 'term' ORDER BY e.key""").fetchall()
+        return [{"key": r["key"], "title": r["body"]["title"], "definition": r["body"]["description"], "owner": r["body"].get("owner"),
+                 "status": r["body"].get("status"), "synonyms": r["body"].get("synonyms") or [], "domain": r["domain"], "meant_by": r["meant_by"]}
+                for r in rows if domain is None or r["domain"] == domain]
 
     def set_instances(self, definition: str, patterns: list[str]) -> dict:
         """Say which tables are copies of a definition table, by glob patterns over their paths (t-*.sales.orders).

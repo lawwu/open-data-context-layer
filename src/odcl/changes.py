@@ -30,7 +30,8 @@ FIELDS = {  # field -> (severity, what it means)
 }
 LINKS = {"derived_from": ("semantic", "computed from different inputs"), "references": ("semantic", "foreign key changed"),
          "instance_of": ("semantic", "copies changed"), "describes": ("cosmetic", "what it describes changed"),
-         "uses": ("cosmetic", "what it uses changed")}
+         "uses": ("cosmetic", "what it uses changed"), "means": ("cosmetic", "glossary terms changed"),
+         "in_domain": ("cosmetic", "domain changed")}
 
 
 def worst(severities) -> str | None:
