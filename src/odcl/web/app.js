@@ -262,6 +262,150 @@ function lineageGraph(lineage) {
       nodes.length > MAX ? h("span", {}, `Showing ${MAX} of ${nodes.length}; the lists below have all of them.`) : null));
 }
 
+// ---- the lineage explorer: every edge, laid out in columns by steps from the focus -----------------------------
+async function explorerPage(key, params) {
+  const direction = params.get("direction") || "both", depth = params.get("depth") || "", level = params.get("level") || "column";
+  const projects = params.get("projects") === "1";
+  const go = (next) => {
+    const all = { direction, depth, level, projects: projects ? "1" : "", ...next };
+    const q = new URLSearchParams();
+    if (all.direction !== "both") q.set("direction", all.direction);
+    if (all.depth) q.set("depth", all.depth);
+    if (all.level !== "column") q.set("level", all.level);
+    if (all.projects) q.set("projects", "1");
+    location.hash = `#/lineage/${enc(next.key || key)}${q.toString() ? `?${q}` : ""}`;
+  };
+  const g = await api(`/v1/entries/${enc(key)}/graph?direction=${direction}${depth ? `&depth=${depth}` : ""}&level=${level}${projects ? "&projects=1" : ""}`);
+  const focus = g.nodes.find((n) => n.key === g.focus);
+  const controls = h("div", { class: "controls" },
+    select("Direction", direction, [["both", "both ways"], ["up", "built from"], ["down", "feeds"]], (v) => go({ direction: v })),
+    select("Depth", depth, [["", "all steps"], ["1", "1 step"], ["2", "2 steps"], ["3", "3 steps"], ["5", "5 steps"]], (v) => go({ depth: v })),
+    select("Show", level, [["column", "columns"], ["table", "tables"]], (v) => go({ level: v })),
+    h("label", {}, h("input", { type: "checkbox", checked: projects, onchange: (e) => go({ projects: e.target.checked ? "1" : "" }) }), " projects that use it"),
+    h("input", { type: "search", placeholder: "Highlight…", "aria-label": "Highlight entries whose name contains", oninput: (e) => highlight(e.target.value) }));
+  if (g.nodes.length === 1) {
+    render(h("h1", {}, `Lineage of ${focus.title}`), controls, h("p", { class: "muted" }, "No lineage is recorded for this entry, in this direction and depth."));
+    return;
+  }
+
+  // columns: upstream to the left of the focus, downstream to the right, projects last
+  const dataCols = g.nodes.filter((n) => n.kind !== "project").map((n) => n.side * n.depth);
+  const lastCol = Math.max(0, ...dataCols);
+  const colOf = (n) => (n.kind === "project" ? lastCol + 1 : n.side * n.depth);
+  const byKey = new Map(g.nodes.map((n) => [n.key, n]));
+  const columns = new Map();
+  for (const n of g.nodes) {
+    n.col = colOf(n);
+    if (!columns.has(n.col)) columns.set(n.col, []);
+    columns.get(n.col).push(n);
+  }
+  const cols = [...columns.keys()].sort((a, b) => a - b);
+  const neighbours = new Map(g.nodes.map((n) => [n.key, []]));
+  for (const e of g.edges) {
+    neighbours.get(e.from)?.push(e.to);
+    neighbours.get(e.to)?.push(e.from);
+  }
+  // order each column by where its neighbours sit, a few sweeps each way, so edges cross less
+  for (const list of columns.values()) list.sort((a, b) => a.title.localeCompare(b.title)).forEach((n, i) => { n.row = i; });
+  for (let pass = 0; pass < 6; pass++) {
+    const order = pass % 2 ? [...cols].reverse() : cols;
+    for (const col of order) {
+      const list = columns.get(col);
+      const centre = (n) => {
+        const near = neighbours.get(n.key).map((k) => byKey.get(k)).filter((m) => m && m.col !== col);
+        return near.length ? near.reduce((sum, m) => sum + m.row, 0) / near.length : n.row;
+      };
+      list.map((n) => [n, centre(n)]).sort((a, b) => a[1] - b[1] || a[0].title.localeCompare(b[0].title)).forEach(([n], i) => { n.row = i; });
+    }
+  }
+  const W = 220, H = 44, GX = 96, GY = 14, PAD = 10;
+  const tallest = Math.max(...[...columns.values()].map((l) => l.length));
+  const width = cols.length * (W + GX) - GX + PAD * 2, height = tallest * (H + GY) - GY + PAD * 2;
+  const x = (n) => PAD + cols.indexOf(n.col) * (W + GX);
+  const y = (n) => PAD + ((tallest - columns.get(n.col).length) * (H + GY)) / 2 + n.row * (H + GY);
+
+  const edgeEls = g.edges.filter((e) => byKey.has(e.from) && byKey.has(e.to)).map((e) => {
+    const a = byKey.get(e.from), b = byKey.get(e.to);
+    const forward = x(a) < x(b);
+    const x1 = forward ? x(a) + W : x(a) + W / 2, y1 = forward ? y(a) + H / 2 : y(a) + H;
+    const x2 = forward ? x(b) : x(b) + W / 2, y2 = forward ? y(b) + H / 2 : y(b);
+    const d = forward ? `M${x1},${y1} C${(x1 + x2) / 2},${y1} ${(x1 + x2) / 2},${y2} ${x2},${y2}` : `M${x1},${y1} C${x1},${y1 + 30} ${x2},${y2 - 30} ${x2},${y2}`;
+    const el = s("path", { class: `edge ${e.kind}${e.changed_since ? " changed" : ""}`, d });
+    el.append(s("title", {}, `${short(e.from)} → ${short(e.to)}${e.kind === "copy" ? " (a copy of its definition)" : e.kind === "uses" ? " (uses)" : ""}${e.changed_since ? "; redefined since" : ""}`));
+    return { e, el };
+  });
+  const panel = h("div", { class: "card explorer-panel" }, h("p", { class: "muted" }, "Hover an entry to follow its lineage; click it for details."));
+  const nodeEls = g.nodes.map((n) => {
+    const tail = n.kind === "project" ? n.title : n.title.split(".").slice(-2).join(".");
+    const label = tail.length > 30 ? `${tail.slice(0, 29)}…` : tail;
+    const el = s("g", { class: `node${n.key === g.focus ? " focus" : ""}${n.retired ? " retired" : ""}`, transform: `translate(${x(n)},${y(n)})`, tabindex: 0,
+      role: "button", "aria-label": `${n.kind} ${n.title}`,
+      onmouseenter: () => trace(n.key), onmouseleave: () => trace(null), onfocus: () => trace(n.key), onblur: () => trace(null),
+      onclick: () => choose(n), onkeydown: (ev) => { if (ev.key === "Enter") choose(n); } },
+    s("rect", { class: "box", width: W, height: H, rx: 6 }),
+    s("rect", { x: 0, y: 0, width: 5, height: H, rx: 2, fill: `var(--${n.kind})` }),
+    s("text", { class: "kindlabel", x: 14, y: 17 }, n.kind.toUpperCase() + (n.layer ? ` · ${n.layer}` : "") + (n.retired ? " · RETIRED" : "")),
+    s("text", { x: 14, y: 35 }, label));
+    el.append(s("title", {}, n.title));
+    return { n, el };
+  });
+
+  // what feeds the hovered entry, and what it feeds, stays lit; the rest fades
+  const into = new Map(), outOf = new Map();
+  for (const { e } of edgeEls) {
+    (into.get(e.to) || into.set(e.to, []).get(e.to)).push(e.from);
+    (outOf.get(e.from) || outOf.set(e.from, []).get(e.from)).push(e.to);
+  }
+  const reach = (start, next) => {
+    const seen = new Set([start]), stack = [start];
+    while (stack.length) for (const k of next.get(stack.pop()) || []) if (!seen.has(k)) { seen.add(k); stack.push(k); }
+    return seen;
+  };
+  function trace(k) {
+    const lit = k ? new Set([...reach(k, into), ...reach(k, outOf)]) : null;
+    for (const { n, el } of nodeEls) el.classList.toggle("dim", Boolean(lit) && !lit.has(n.key));
+    for (const { e, el } of edgeEls) {
+      const on = lit && lit.has(e.from) && lit.has(e.to);
+      el.classList.toggle("dim", Boolean(lit) && !on);
+      el.classList.toggle("lit", Boolean(on));
+    }
+  }
+  function highlight(text) {
+    const t = text.trim().toLowerCase();
+    for (const { n, el } of nodeEls) el.classList.toggle("match", Boolean(t) && n.title.toLowerCase().includes(t));
+  }
+  function choose(n) {
+    for (const { el, n: m } of nodeEls) el.classList.toggle("selected", m === n);
+    const ins = (into.get(n.key) || []).length, outs = (outOf.get(n.key) || []).length;
+    panel.replaceChildren(
+      h("div", {}, kindBadge(n.kind), n.retired ? [" ", retiredBadge()] : null),
+      h("h3", {}, n.title), n.description ? h("p", {}, n.description) : h("p", { class: "muted" }, "No description yet."),
+      h("p", { class: "muted" }, [n.layer ? `${n.layer} · ` : "", n.system ? `${n.system} · ` : "", n.dtype ? `${n.dtype} · ` : "",
+        `${plural(ins, "input")} here, feeds ${plural(outs, "entry", "entries")} here`]),
+      h("div", { class: "actions" }, h("a", { href: entryHref(n.key) }, "Open"),
+        n.kind !== "project" && n.key !== g.focus ? h("a", { href: "#", onclick: (ev) => { ev.preventDefault(); go({ key: n.key }); } }, "Explore from here") : null));
+  }
+
+  let zoom = 1;
+  const svg = s("svg", { width, height, viewBox: `0 0 ${width} ${height}`, role: "group", "aria-label": `Lineage of ${focus.title}` },
+    edgeEls.map((x) => x.el), nodeEls.map((x) => x.el));
+  const box = h("div", { class: "card graph explorer" }, svg);
+  const scale = (z) => { zoom = Math.min(2, Math.max(0.2, z)); svg.setAttribute("width", width * zoom); svg.setAttribute("height", height * zoom); };
+  const ups = g.nodes.filter((n) => n.side < 0).length, downs = g.nodes.filter((n) => n.side > 0 && n.kind !== "project").length;
+  render(
+    h("h1", {}, ["Lineage of ", entryLink(focus.key, focus.title)]),
+    h("p", { class: "sub" }, `${plural(ups, "entry", "entries")} upstream, ${plural(downs, "entry", "entries")} downstream, ${plural(g.edges.length, "edge")}.`
+      + (g.truncated ? " Only the nearest are shown; narrow it by depth." : "")),
+    controls,
+    h("div", { class: "controls" }, h("button", { type: "button", onclick: () => scale(zoom / 1.25) }, "−"), h("button", { type: "button", onclick: () => scale(zoom * 1.25) }, "+"),
+      h("button", { type: "button", onclick: () => scale(box.clientWidth / width) }, "Fit"), h("span", { class: "muted" }, "Inputs on the left, what they feed on the right.")),
+    h("div", { class: "explorer-layout" }, box, panel),
+    h("div", { class: "legend muted" }, kindBadge("table"), kindBadge("column"), kindBadge("project"),
+      h("span", {}, "dotted: a copy of its definition"),
+      h("span", {}, "dashed amber: redefined after the link was recorded")));
+  if (width > box.clientWidth) scale(Math.max(0.75, box.clientWidth / width));  // smaller is hard to read: scroll instead
+}
+
 function lineageLists(lineage) {
   const row = (n) => [h("span", {}, "".padStart((n.depth - 1) * 2, " "), entryLink(n.key, n.title)), kindBadge(n.kind), String(n.depth),
     n.changed_since ? changedBadge() : ""];
@@ -389,7 +533,7 @@ async function entryPage(key) {
     if (lineage.system === "bigquery") {
       parts[4].append(h("div", { class: "console-row" }, consoleLink(gcp.table(entry.kind === "column" ? entry.table : entry.key), "Open in BigQuery")));
     }
-    parts.push(h("h2", {}, "Lineage"), lineageGraph(lineage), lineageLists(lineage));
+    parts.push(h("h2", {}, ["Lineage ", h("a", { class: "aside", href: `#/lineage/${enc(entry.key)}` }, "Explore →")]), lineageGraph(lineage), lineageLists(lineage));
     if (entry.kind === "table") {
       parts.push(h("h2", {}, `Columns (${entry.columns.length})`),
         table(["Column", "Type", "Description"], entry.columns.map((c) => [entryLink(c.key, c.title.split(".").pop()), c.dtype || "", c.description || ""]),
@@ -850,6 +994,7 @@ async function route() {
     "": () => overviewPage(),
     search: () => searchPage(params),
     entry: () => entryPage(parts[1]),
+    lineage: () => explorerPage(parts[1], params),
     model: () => modelPage(parts[1], parts[2]),
     dataset: () => datasetPage(parts.slice(1).join("/")),
     models: () => modelsPage(),
