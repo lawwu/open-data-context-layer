@@ -10,11 +10,31 @@ from datetime import timedelta
 from .store import Catalog, CatalogError, migrate, require
 
 
+
+def _not_linked(result: dict) -> list[str]:
+    """What an import of SQL definitions read but could not link or trace, one line each."""
+    return ([f"  not defined or registered, so registered by name only: {t}" for t in result.get("unresolved") or []]
+            + [f"  SQL not traced (sqlglot could not read its columns): {t}" for t in result.get("untraced") or []])
+
 def span(value: str) -> timedelta:
     """7d or 12h as a length of time."""
     found = re.fullmatch(r"(\d{1,4})([dh])", value or "")
     require(found, "since", f"{value!r} is not a span of time: write days or hours, like 7d or 12h")
     return timedelta(**{"days" if found.group(2) == "d" else "hours": int(found.group(1))})
+
+
+def moment(value: str, name: str):
+    """A time as ISO 8601 (a date, or a date and time; UTC unless it says), or a span back from now such as 7d."""
+    from datetime import datetime, timezone
+
+    from . import store
+    if re.fullmatch(r"\d{1,4}[dh]", value or ""):
+        return store.now() - span(value)
+    try:
+        when = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        raise CatalogError(name, f"{value!r} is not a time: write 2026-10-05T09:00:00Z, 2026-10-05, or a span back from now like 12h") from None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
 
 
 def flag(entry) -> str:
@@ -27,6 +47,19 @@ def _count(n: int, word: str) -> str:
 
 def _defined(defined: dict) -> str:
     return f"{defined['file']} at commit {defined['commit']}" if defined.get("commit") else f"{defined['file']} (no git commit)"
+
+
+def _created(c: dict | None) -> str:
+    if not c:
+        return "unknown"
+    where = c.get("path") or c.get("url") or c.get("command") or ""
+    return (f"{c['kind']} {where}" + (f" at {c['commit'][:12]}" if c.get("commit") else "") + (" (with uncommitted changes)" if c.get("uncommitted") else "")
+            + (f" in {c['repository']}" if c.get("repository") else "") + "  (as stated)")
+
+
+def _relied(documents: list[dict]) -> list[str]:
+    return [f"  {d['document']} at {d['revision']} ({d['pinned_by'].replace('_', ' ')})" + (f"  for: {d['why']}" if d["why"] else "")
+            + ("  (corrected since)" if d["changed_since"] else "") for d in documents]
 
 
 def lines(command: str, result) -> list[str]:
@@ -50,7 +83,7 @@ def lines(command: str, result) -> list[str]:
             if direction in result:
                 out += [direction + ":"] + ([f"  {'  ' * (n['depth'] - 1)}{n['key']}" + flag(n) for n in result[direction]] or ["  nothing"])
         return out
-    if command == "import" and "skipped" in result:
+    if command == "import" and "documents" in result:
         c = result["documents"]
         out = [f"{c['added'] + c['changed'] + c['unchanged']} documents: {c['added']} added, {c['changed']} changed, {c['unchanged']} unchanged, "
                f"{c['retired']} retired; {result['skipped']} files without an odcl block skipped"]
@@ -86,7 +119,8 @@ def lines(command: str, result) -> list[str]:
                f"  produced by   {produced['pipeline_run']} / task {produced['task']}",
                f"  artifact      {artifact['uri']}#{artifact['generation']}  sha256 {artifact['sha256'][:12]}…",
                f"  read          {read['uri']}  ({_count(read['objects'], 'object')}, generations pinned)",
-               "  written by    " + (f"{read['produced_by']['pipeline_run']} / task {read['produced_by']['task']}" if read["produced_by"] else "unknown"),
+               "  written by    " + (f"{read['produced_by']['pipeline_run']} / task {read['produced_by']['task']}" if read["produced_by"]
+                                    else _created(read.get("created_by"))),
                "  exported from " + (f"{read['exported_from']['table']}" + ("  (changed since)" if read["exported_from"]["changed_since"] else "")
                                      if read["exported_from"] else "not recorded")]
         for j in read.get("exported_by") or []:
@@ -95,6 +129,7 @@ def lines(command: str, result) -> list[str]:
             out.append(f"  row filter    {read['row_filter']['expression'] or ', '.join(read['row_filter']['columns'])}")
         out += [f"  {i['role']:<8} {i['field']} = {i['expression'] or '?'}  from {', '.join(i['derived_from']) or '?'}" if "derived_from" in i
                 else f"  {i['role']:<8} {i['field']}  {i['dtype'] or '?'}  (lineage not claimed)" for i in result["inputs"]]
+        out += (["  relied on"] + _relied(result["relied_on"])) if result.get("relied_on") else []
         return out + [f"missing: {m}" for m in result["missing"]]
     if command == "explain" and "model" in result:
         produced, artifact, read = result["produced_by"], result["artifact"], result["read"]
@@ -108,12 +143,21 @@ def lines(command: str, result) -> list[str]:
                     "           as " + (f"BigQuery job ({i['executed_as']['project']}, {i['executed_as']['location']}, {i['executed_as']['job_id']})"
                                         if i["executed_as"] else "an unknown job") + f", from {_defined(i['defined_in'])}",
                     f"           from {', '.join(i['derived_from']) or '?'}"]
+        out += (["  relied on"] + _relied(result["relied_on"])) if result.get("relied_on") else []
         return out + [f"missing: {m}" for m in result["missing"]]
     if command == "import" and "entries" in result:
         counts = result["entries"]
         return ([f"{counts['added']} added, {counts['changed']} changed, {counts['unchanged']} unchanged from {result['compilation_result']}"]
                 + (["Definitions not applied: a newer compilation of this repository was imported before"] if result["definitions"] != "applied" else [])
-                + [f"  {a['target']}  {a['state']}" + (f"  job {a['job_id']}" if a["job_id"] else "") for a in result["actions"]])
+                + [f"  {a['target']}  {a['state']}" + (f"  job {a['job_id']}" if a["job_id"] else "") for a in result["actions"]]
+                + _not_linked(result))
+    if command == "import" and "views_traced" in result:
+        return ([f"{result['relations']} relations from {result['database']}: {result['added']} entries added, {result['changed']} changed, "
+                 f"{result['unchanged']} unchanged; {result['views_traced']} views traced, {result['foreign_keys']} foreign keys"]
+                + [f"  skipped: {s}" for s in result["skipped"]])
+    if command == "import" and "definitions" in result:
+        return [f"{result['definitions']} definitions: {result['added']} entries added, {result['changed']} changed, {result['unchanged']} unchanged; "
+                f"{result['columns_traced']} columns traced, {result['columns_partial']} in part"] + _not_linked(result)
     if command == "import":
         return [f"{result['added']} added, {result['changed']} changed, {result['unchanged']} unchanged"]
     if command == "handoff":
@@ -121,7 +165,8 @@ def lines(command: str, result) -> list[str]:
     if command == "explain" and result.get("kind") == "gcs_files":
         produced, exported = result["produced_by"], result["exported_from"]
         out = [result["reference"], f"  files         {result['uri']}  ({_count(len(result['objects']), 'object')}, generations pinned)",
-               "  written by    " + (f"{produced['pipeline_run']} / task {produced['task']}  {produced['state']}" if produced else "unknown"),
+               "  written by    " + (f"{produced['pipeline_run']} / task {produced['task']}  {produced['state']}" if produced
+                                    else _created(result.get("created_by"))),
                "  exported from " + (f"{exported['table']}" + ("  (changed since)" if exported["changed_since"] else "") if exported else "not recorded")]
         for j in result.get("exported_by") or []:
             out.append(f"  exported by   BigQuery job ({j['job']})  {j['statement_type']}" + (f"  {j['rows']:,} rows" if j["rows"] is not None else ""))
@@ -143,6 +188,7 @@ def lines(command: str, result) -> list[str]:
         return out + [f"missing: {m}" for m in result["missing"]]
     if command == "sync":
         return [f"{result['jobs']} jobs read, {result['added']} new, from {result['since']} to {result['until']}"
+                + (" (this window only: the next sync starts where the last one ended)" if result.get("window") == "explicit" else "")
                 + (f" ({result['excluded']} monitoring jobs left out)" if result["excluded"] else "")
                 + ("" if result["finished"] else f"\nNot recorded as finished: Google could not reach {', '.join(result['unreachable'])}")]
     if command == "history":
@@ -157,8 +203,40 @@ def lines(command: str, result) -> list[str]:
         if not result["synced"]:
             out.append("No job history has been synced yet: run `odcl sync bigquery-jobs --project PROJECT`")
         return out
+    if command == "privacy" and "entries" in result:
+        return [f"{e['key']}  {e['change']}  ({e['revision']})" for e in result["entries"]]
+    if command == "privacy":
+        import csv
+        import io
+        out = io.StringIO()
+        fields = ["key", "table", "column", "dtype", "pii", "scrubbing", "data_category", "retention", "owner", "table_pii", "inherited"]
+        writer = csv.DictWriter(out, fields, lineterminator="\n")
+        writer.writeheader()
+        for c in result["columns"]:
+            writer.writerow({**c, **{f: {True: "yes", False: "no", None: ""}[c[f]] for f in ("pii", "table_pii")}, "inherited": " ".join(c["inherited"])})
+        return [out.getvalue().rstrip("\n")]
     if command == "migrate":
         return [f"applied {name}" for name in result["applied"]] or ["The database is up to date."]
+    if command == "discover":
+        return [f"{r['created'] or '?'}  {r['state'] or '?':<26}  {r['pipeline_run']}" + (f"  {r['display_name']}" if r["display_name"] else "")
+                + (f"\n    recorded: {', '.join(r['model_versions'])}" if r["model_versions"] else "") for r in result["runs"]] or ["No pipeline run in that window."]
+    if command == "propose":
+        out = [json.dumps(result["manifest"], indent=2), "", "Where each value came from:"]
+        out += [f"  {k}: {v}" for k, v in result["sources"].items()]
+        out += ["", "Ready to import." if result["ready"] else "Review before importing:"] + [f"  - {r}" for r in result["review"]]
+        out += [f"  missing: {', '.join(result['missing'])}"] if result["missing"] else []
+        return out + ([f"\nWritten to {result['written_to']}: odcl import --vertex-manifest {result['written_to']}"] if result["written_to"] else [])
+    if command == "rely":
+        return [f"{result['model']} {result['version']} relied on:"] + _relied(result["relied_on"])
+    if command == "instances":
+        copies = [f"  copy: {link['to']}" for link in result["links"] if link["relation"] == "instance_of"]
+        return [f"{result['key']}  {result['change']}  ({result['revision']})"] + (copies or ["  no table matches yet"])
+    if command == "created-by":
+        return [f"{result['key']}  {result['change']}  ({result['revision']})", f"  created by {_created(result.get('created_by'))}"
+                if result.get("created_by") else "  nothing recorded"]
+    if command == "references":
+        return [f"{result['key']}  {result['change']}  ({result['revision']})"] + [
+            f"  references {link['to']}" for link in result["links"] if link["relation"] == "references"]
     if command in ("add", "use"):
         return [f"{result['key']}  {result['change']}  ({result['revision']})"]
     return [json.dumps(result, indent=2)]
@@ -166,8 +244,16 @@ def lines(command: str, result) -> list[str]:
 
 def run(catalog: Catalog, args):
     if args.command == "import":
-        require(sum(map(bool, (args.dbt, args.bigquery, args.dataform, args.vertex_manifest, args.openlineage, args.docs))) == 1, "import",
-                "Import from one place: --dbt PATH, --bigquery TABLE..., --dataform INVOCATION, --vertex-manifest PATH, --openlineage FILE or --docs PATH...")
+        require(sum(map(bool, (args.dbt, args.bigquery, args.dataform, args.vertex_manifest, args.openlineage, args.docs, args.sql_definitions,
+                               args.postgres))) == 1,
+                "import", "Import from one place: --dbt PATH, --bigquery TABLE..., --postgres URL, --dataform INVOCATION, --vertex-manifest PATH, "
+                          "--openlineage FILE, --docs PATH... or --sql-definitions FILE")
+        if args.postgres:
+            from .postgres import import_database
+            return import_database(catalog, args.postgres, schemas=args.schema, database=args.database_name)
+        if args.sql_definitions:
+            from .sqldefs import import_definitions
+            return import_definitions(catalog, args.sql_definitions, dialect=args.dialect, system=args.system)
         if args.docs:
             from .docs import import_docs
             return import_docs(catalog, args.docs, repo_url=args.repo_url, commit=args.commit)
@@ -195,9 +281,18 @@ def run(catalog: Catalog, args):
         return catalog.apply(dbt_entries(args.dbt, args.select))
     if args.command == "sync":
         from . import bigquery
+        since = moment(args.since, "since") if args.since else None
+        until = moment(args.until, "until") if args.until else None
+        require(not args.task or args.pipeline_run, "task", "--task names a task of the --pipeline-run")
+        if args.pipeline_run:
+            from . import vertex
+            require(not (since or until), "since", "Give --pipeline-run or --since/--until, not both")
+            location = vertex.JOB.match(args.pipeline_run)
+            require(location, "pipeline_run", "--pipeline-run is a Vertex AI pipeline job: projects/P/locations/L/pipelineJobs/J")
+            since, until = vertex.run_window(vertex.client(location.group(2)).get(args.pipeline_run), args.pipeline_run, args.task)
         client = bigquery.client(args.project)
         try:
-            return bigquery.sync_jobs(catalog, args.project, client=client, backfill=span(args.backfill), sql=args.sql)
+            return bigquery.sync_jobs(catalog, args.project, client=client, since=since, until=until, backfill=span(args.backfill), sql=args.sql)
         finally:
             client.close()
     if args.command == "handoff":
@@ -212,9 +307,11 @@ def run(catalog: Catalog, args):
         from . import filesets, vertex
         location = vertex.JOB.match(args.pipeline_run or "")
         require(location or not args.pipeline_run, "files", "--pipeline-run is a Vertex AI pipeline job: projects/P/locations/L/pipelineJobs/J")
+        from .provenance import describe
+        created = describe(args.created_by, note=args.created_by_note) if args.created_by or args.created_by_note else None
         return filesets.record(catalog, client=vertex.client(location.group(2) if location else "us-central1"), pipeline_run=args.pipeline_run,
                                task=args.task, output=args.output, uris=args.uri, from_table=args.from_table, export_jobs=args.export_job,
-                               find_export_job=args.find_export_job, sql=args.sql)
+                               find_export_job=args.find_export_job, sql=args.sql, created_by=created)
     if args.command == "explain" and args.what == "model":
         return catalog.explain_model(args.name, args.version)
     if args.command == "explain":
@@ -222,9 +319,38 @@ def run(catalog: Catalog, args):
         return builds.explain_dataset(catalog, args.reference)
     if args.command == "history":
         return catalog.table_history(args.key, span(args.since), args.patterns, args.limit)
+    if args.command == "discover":
+        from . import discover, vertex
+        return {"runs": discover.runs(catalog, vertex.client(args.location), args.project, moment(args.since, "since"))}
+    if args.command == "propose":
+        from . import discover, vertex
+        location = vertex.JOB.match(args.pipeline_run or "")
+        require(location, "pipeline_run", "--pipeline-run is a Vertex AI pipeline job: projects/P/locations/L/pipelineJobs/J")
+        found = discover.propose(catalog, vertex.client(location.group(2)), args.pipeline_run, trainer=args.trainer, loader=args.loader,
+                                 loader_output=args.loader_output, model=args.model, version=args.version)
+        if args.out:
+            with open(args.out, "w", encoding="utf-8") as f:
+                json.dump(found["manifest"], f, indent=2)
+                f.write("\n")
+        return {**found, "written_to": args.out}
+    if args.command == "rely":
+        return catalog.rely(args.model, args.version, args.documents, args.why)
+    if args.command == "created-by":
+        from .provenance import describe
+        return catalog.set_created_by(args.table, None if args.clear else describe(args.what, kind=args.kind, command=args.command_line, note=args.note,
+                                                                                   repo_url=args.repo_url, commit=args.commit))
+    if args.command == "references":
+        return catalog.set_references(args.column, args.targets)
+    if args.command == "instances":
+        return catalog.set_instances(args.definition, args.patterns)
+    if args.command == "privacy" and args.what == "set":
+        return {"entries": catalog.set_privacy(args.keys, pii=args.pii, data_category=args.data_category, retention=args.retention, scrubbing=args.scrubbing)}
+    if args.command == "privacy":
+        return {"columns": catalog.privacy(args.pii_only, args.table)}
     if args.command == "add":
         fields = {k: v for k, v in vars(args).items() if k in ("path", "table", "name", "description", "system", "layer", "owner", "type", "dtype",
-                                                                 "definition", "repository", "status", "derived_from", "tags") and v not in (None, [])}
+                                                                 "definition", "repository", "status", "derived_from", "references", "tags", "pii", "data_category",
+                                                                 "retention", "scrubbing") and v not in (None, [])}
         return catalog.put(args.kind, fields)
     if args.command == "find":
         return catalog.find(" ".join(args.words), args.kind, args.layer, args.limit)
@@ -242,6 +368,13 @@ def run(catalog: Catalog, args):
     if args.command == "uses":
         return catalog.uses(args.project, args.upstream, args.revision)
     return catalog.overview()
+
+
+def privacy_flags(p) -> None:
+    p.add_argument("--pii", choices=["yes", "no"], help="whether it holds personal data")
+    p.add_argument("--data-category", metavar="CATEGORY", help="e.g. contact, financial, health; a column without one takes its table's")
+    p.add_argument("--retention", metavar="PERIOD", help="how long it is kept, e.g. 400d or 7 years; a column without one takes its table's")
+    p.add_argument("--scrubbing", metavar="HOW", help="how the personal data is scrubbed, e.g. hashed, truncated, removed")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -265,6 +398,14 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--repo-url", metavar="URL", help="with --docs: the repository's web address, when git cannot say")
     s.add_argument("--commit", metavar="SHA", help="with --docs: the commit the pages were read at, when git cannot say")
     s.add_argument("--openlineage", metavar="FILE", help="OpenLineage events: one JSON event, a JSON list of them, or JSON Lines")
+    s.add_argument("--postgres", metavar="URL", help="a PostgreSQL database to read tables, views, view lineage and foreign keys from, "
+                                                     "e.g. postgresql://reader@host/dbname (the URL is not kept)")
+    s.add_argument("--schema", nargs="+", metavar="SCHEMA", help="with --postgres: only these schemas (default: all but the system's)")
+    s.add_argument("--database-name", metavar="NAME", help="with --postgres: the name to key its tables by (default: the database's own)")
+    s.add_argument("--sql-definitions", metavar="FILE", help="JSON Lines of tables and the SELECT that builds each: target, select, dependencies, "
+                                                             "description, columns, type, file (or declaration: true)")
+    s.add_argument("--system", help="with --sql-definitions: the system the tables live in (default: the dialect)")
+    s.add_argument("--dialect", default="bigquery", help="with --sql-definitions: the SQL dialect, as sqlglot names it (default: bigquery)")
     s.add_argument("--project", help="with --bigquery: the project the API calls are made from (default: your credentials' project)")
 
     s = sub.add_parser("handoff", help="record that a successful build handed on a snapshot of its output")
@@ -285,6 +426,9 @@ def parser() -> argparse.ArgumentParser:
                    help="the BigQuery EXPORT DATA job that wrote the files; each field is traced through its SELECT (repeat for several)")
     f.add_argument("--find-export-job", action="store_true", help="with --pipeline-run: find the EXPORT DATA job among the jobs created while the task ran")
     f.add_argument("--sql", choices=["templates", "none"], default="templates", help="keep the export job's SQL as its shape (default), or not at all")
+    f.add_argument("--created-by", metavar="SCRIPT", help="what wrote the files, when no pipeline task did: a script or notebook (a local file, read "
+                                                         "from git) or a link")
+    f.add_argument("--created-by-note", metavar="TEXT", help="how it was run, or anything else worth knowing")
 
     s = sub.add_parser("explain", help="where something came from, as recorded")
     kinds = s.add_subparsers(dest="what", required=True)
@@ -305,6 +449,7 @@ def parser() -> argparse.ArgumentParser:
     c.add_argument("name")
     c.add_argument("--dtype")
     c.add_argument("--definition", help="how it is computed")
+    c.add_argument("--references", nargs="+", default=[], metavar="COLUMN", help="the column(s) its values are drawn from: a foreign key")
     j = kinds.add_parser("project")
     j.add_argument("name")
     j.add_argument("--repository")
@@ -315,12 +460,69 @@ def parser() -> argparse.ArgumentParser:
         k.add_argument("--tags", nargs="+", default=[])
     for k in (t, c):
         k.add_argument("--derived-from", nargs="+", default=[], metavar="KEY", help="what it is built from")
+        privacy_flags(k)
+
+    s = sub.add_parser("discover", help="find runs whose model versions the catalog has not recorded")
+    kinds = s.add_subparsers(dest="what", required=True)
+    d = kinds.add_parser("vertex-runs", help="the Vertex AI pipeline runs of a project, and which already have a model version recorded")
+    d.add_argument("--project", required=True)
+    d.add_argument("--location", default="us-central1")
+    d.add_argument("--since", default="7d", metavar="TIME", help="runs created since this time or span (default: 7d)")
+
+    s = sub.add_parser("propose", help="draft something for a person to review before it is imported")
+    kinds = s.add_subparsers(dest="what", required=True)
+    d = kinds.add_parser("vertex-manifest", help="a training manifest for a pipeline run, from its trainer's metadata.json and its loader's output")
+    d.add_argument("--pipeline-run", required=True, metavar="JOB")
+    d.add_argument("--trainer", metavar="TASK", help="the task that trained the model (default: the one with a Model output)")
+    d.add_argument("--loader", metavar="TASK", help="the task that wrote the training data (default: the one with a Dataset output)")
+    d.add_argument("--loader-output", metavar="NAME", help="the loader's output the model read (default: the one named for training)")
+    d.add_argument("--model", help="the model's name, when metadata.json does not say it")
+    d.add_argument("--version", help="the model version, when metadata.json does not say it (default: the pipeline job's id)")
+    d.add_argument("--out", metavar="FILE", help="also write the draft manifest here, to review and then import with --vertex-manifest")
+
+    s = sub.add_parser("rely", help="record that a model version relied on documents, such as a finding, at the revision it was trained on")
+    s.add_argument("model")
+    s.add_argument("--version", required=True)
+    s.add_argument("documents", nargs="+", metavar="DOCUMENT")
+    s.add_argument("--why", help="what the model took from them")
+
+    s = sub.add_parser("created-by", help="say what created a table or file: a script, a notebook, a query run by hand")
+    s.add_argument("table", help="the table, view or file entry")
+    s.add_argument("what", nargs="?", help="a local file (its repository, commit and link are read from git), a link, or a path in --repo-url")
+    s.add_argument("--kind", choices=["script", "notebook", "query", "job", "manual", "other"], help="default: from the file's extension")
+    s.add_argument("--command", dest="command_line", metavar="CMD", help="how it was run, e.g. python make_features.py --month 2026-10")
+    s.add_argument("--note", help="anything else worth knowing")
+    s.add_argument("--repo-url", help="the repository, when the file is not in a local checkout")
+    s.add_argument("--commit", help="the commit, when git cannot say")
+    s.add_argument("--clear", action="store_true", help="forget what created it")
+
+    s = sub.add_parser("references", help="say which columns a column's values are drawn from: a foreign key")
+    s.add_argument("column")
+    s.add_argument("targets", nargs="*", metavar="COLUMN", help="the referenced column(s); none clears them")
+
+    s = sub.add_parser("instances", help="say which tables are copies of a definition table, by patterns over their paths")
+    s.add_argument("definition", help="the definition table, e.g. core.sales.daily_totals")
+    s.add_argument("patterns", nargs="*", metavar="PATTERN", help="globs over table paths, e.g. 't-*.sales.daily_totals'; none clears them")
+
+    s = sub.add_parser("privacy", help="which tables and columns hold personal data, their data category and retention")
+    kinds = s.add_subparsers(dest="what", required=True)
+    v = kinds.add_parser("set", help="say these for tables or columns, keeping what else they say")
+    v.add_argument("keys", nargs="+", metavar="KEY")
+    privacy_flags(v)
+    v = kinds.add_parser("export", help="every column with its privacy fields, as CSV (or --json)")
+    v.add_argument("--pii-only", action="store_true", help="only columns marked as personal data")
+    v.add_argument("--table", help="only this table's columns")
 
     s = sub.add_parser("sync", help="read new activity from a source into the catalog")
     kinds = s.add_subparsers(dest="what", required=True)
     b = kinds.add_parser("bigquery-jobs", help="the query jobs a BigQuery project ran since the last sync")
     b.add_argument("--project", required=True, help="the project the jobs ran in, which may differ from where the tables live")
     b.add_argument("--backfill", default="7d", metavar="SPAN", help="how far back the first sync reads (default: 7d)")
+    b.add_argument("--since", metavar="TIME", help="read exactly the jobs created from this time (ISO 8601, or a span back from now like 12h); "
+                                                   "the regular sync still starts where it last ended")
+    b.add_argument("--until", metavar="TIME", help="read the jobs created up to this time (default: now)")
+    b.add_argument("--pipeline-run", metavar="JOB", help="read the jobs created while this Vertex AI pipeline job ran")
+    b.add_argument("--task", help="with --pipeline-run: only while this task of it ran")
     b.add_argument("--sql", choices=["templates", "none"], default="templates",
                    help="templates keeps each query's shape without its literals; none does not read SQL at all")
 

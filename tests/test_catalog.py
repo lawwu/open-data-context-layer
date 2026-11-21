@@ -105,7 +105,7 @@ def test_an_importer_adds_what_it_knows_without_erasing_what_another_said(catalo
 
     column = catalog.get("column:p.d.t.x")
     assert (column["dtype"], column["definition"], column["tags"]) == ("FLOAT", "m / 60", ["lineage:partial"])
-    assert column["source"] == {"bigquery": {"mode": "NULLABLE"}, "dataform": {"file": "definitions/t.sqlx"}}
+    assert column["source"] == {"bigquery": {"mode": "NULLABLE"}, "dataform": {"file": "definitions/t.sqlx", "tags": ["lineage:partial"]}}
     assert [c["key"] for c in column["derived_from"]] == ["column:p.d.raw.m"]
     assert catalog.get("table:p.d.t")["description"] == "Shift inputs"
     assert catalog.apply(bigquery, merge=True) == {"added": 0, "changed": 0, "unchanged": 2}  # each import again changes nothing
@@ -172,3 +172,205 @@ def test_the_table_list_counts_columns_and_users_and_filters_by_layer_and_system
     assert gold["changed"] == catalog.get(GOLD)["at"]
     assert [t["key"] for t in catalog.tables(layer="bronze")] == ["table:churn.bronze.accounts", "table:churn.bronze.tickets"]
     assert catalog.tables(system="bigquery") == []
+
+
+def test_listed_user_counts_match_what_used_by_finds_for_each_entry(catalog):
+    """The lists count users for every row at once; each count must agree with asking `used_by` of that one entry."""
+    for name in ("churn-model", "billing-audit", "support-dashboard"):
+        catalog.put("project", {"name": name, "description": name})
+    catalog.use("churn-model", [f"column:{GOLD}.plan_tier", f"column:{GOLD}.tenure_months"])
+    catalog.use("billing-audit", [f"column:{BRONZE}.plan"])
+    catalog.use("support-dashboard", [f"table:{SILVER}"])
+    listed = catalog.tables() + catalog.find("", "column", limit=2000)
+    assert any(e["used_by"] > 1 for e in listed)
+    for entry in listed:
+        assert entry["used_by"] == len(catalog.used_by(entry["key"])["projects"]), entry["key"]
+
+
+def test_a_large_import_holds_a_bounded_number_of_locks(database):
+    from odcl.store import ENTRY_LOCKS
+    held = []
+
+    def entries():
+        yield ("table", {"path": "big.d.t"})
+        for i in range(3000):
+            yield ("column", {"table": "big.d.t", "name": f"c{i}"})
+        held.append(catalog.db.execute("SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()").fetchone()["n"])
+
+    with Catalog(database, actor="ana") as catalog:
+        assert catalog.apply(entries())["added"] == 3001
+        assert 0 < held[0] <= ENTRY_LOCKS  # one lock per entry would be 3,001, past PostgreSQL's default lock table
+
+
+def test_under_merge_each_importer_replaces_only_its_own_tags(database):
+    with Catalog(database, actor="ana") as c:
+        c.put("table", {"path": "p.d.t", "tags": ["reviewed"]})  # a person's tag
+        c.put("table", {"path": "p.d.t", "tags": ["lineage:partial"], "source": {"dataform": {"file": "t.sqlx"}}}, merge=True)
+        c.put("table", {"path": "p.d.t", "tags": ["tenant"], "source": {"datahub": {"urn": "x"}}}, merge=True)
+        assert c.get("p.d.t")["tags"] == ["lineage:partial", "reviewed", "tenant"]
+        c.put("table", {"path": "p.d.t", "tags": [], "source": {"dataform": {"file": "t.sqlx"}}}, merge=True)  # lineage resolved now
+        said = c.get("p.d.t")
+        assert said["tags"] == ["reviewed", "tenant"] and said["source"]["dataform"]["tags"] == [] and said["source"]["datahub"]["tags"] == ["tenant"]
+        c.put("table", {"path": "p.d.t", "source": {"datahub": {"urn": "x"}}}, merge=True)  # sending no tags keeps them
+        assert c.get("p.d.t")["tags"] == ["reviewed", "tenant"]
+
+        # an entry an importer wrote before tags had owners: its next import takes them over, then tags add up again
+        c.put("table", {"path": "p.d.old", "tags": ["a", "b"], "source": {"dataform": {"file": "old.sqlx"}}})
+        c.put("table", {"path": "p.d.old", "tags": ["a"], "source": {"dataform": {"file": "old.sqlx"}}}, merge=True)
+        assert c.get("p.d.old")["tags"] == ["a"]
+
+
+def test_privacy_fields_are_said_kept_inherited_and_exported(catalog, database, tmp_path, capsys):
+    accounts = catalog.get(BRONZE)
+    catalog.set_privacy([BRONZE], data_category="customer", retention="400d")
+    catalog.set_privacy([f"{BRONZE}.account_id"], pii=True, scrubbing="hashed")
+    kept = catalog.get(BRONZE)
+    assert (kept["data_category"], kept["retention"], kept["description"], kept["layer"]) == ("customer", "400d", accounts["description"], "bronze")
+    assert catalog.get(f"{BRONZE}.account_id")["pii"] is True
+    assert catalog.apply(dbt_entries(DBT), merge=True)["changed"] == 0  # an import that says nothing of privacy keeps it
+
+    columns = {c["column"]: c for c in catalog.privacy(table=BRONZE)}
+    assert columns["account_id"] | {} == {**columns["account_id"], "pii": True, "scrubbing": "hashed", "data_category": "customer",
+                                          "retention": "400d", "inherited": ["data_category", "retention"]}
+    assert columns["plan"]["pii"] is None  # not said is not "no"
+    assert [c["key"] for c in catalog.privacy(pii_only=True)] == [f"column:{BRONZE}.account_id"]
+    assert catalog.find("pii")[0]["key"] == f"column:{BRONZE}.account_id"
+    with pytest.raises(CatalogError, match="pii is yes or no"):
+        catalog.set_privacy([BRONZE], pii="maybe")
+
+    db = ["--database-url", database]
+    assert main([*db, "privacy", "set", f"{BRONZE}.plan", "--pii", "no", "--data-category", "billing"]) == 0
+    capsys.readouterr()
+    assert main([*db, "privacy", "export", "--table", BRONZE]) == 0
+    rows = capsys.readouterr().out.splitlines()
+    assert rows[0].startswith("key,table,column,dtype,pii,scrubbing,data_category,retention")
+    assert f"column:{BRONZE}.plan,table:{BRONZE},plan," in rows[-1] and ",no,,billing,400d," in rows[-1]
+
+
+def test_dbt_meta_says_what_is_personal_data(database, tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    manifest = json.loads((DBT / "manifest.json").read_text())
+    accounts = manifest["sources"]["source.churn.bronze.accounts"]
+    accounts["meta"] |= {"data_category": "customer", "retention": "7 years"}
+    accounts["columns"]["account_id"]["meta"] = {"privacy": {"pii": "yes", "scrubbing": "hashed"}}
+    (target / "manifest.json").write_text(json.dumps(manifest))
+    with Catalog(database, actor="ana") as c:
+        c.apply(dbt_entries(target))
+        assert (c.get(BRONZE)["data_category"], c.get(BRONZE)["retention"]) == ("customer", "7 years")
+        assert (c.get(f"{BRONZE}.account_id")["pii"], c.get(f"{BRONZE}.account_id")["scrubbing"]) == (True, "hashed")
+        assert "pii" not in c.get(f"{BRONZE}.plan")  # only what is said is kept
+
+
+def test_copies_of_a_definition_are_linked_by_pattern_and_lineage_and_users_go_through_them(database, capsys):
+    definition, copy = "core.sales.daily_totals", "t-1.sales.daily_totals"
+    with Catalog(database, actor="ana") as c:
+        c.put("table", {"path": "core.ref.discounts"})
+        c.put("column", {"table": "core.ref.discounts", "name": "discounted"})
+        c.put("table", {"path": definition, "derived_from": ["table:core.ref.discounts"]})
+        c.put("column", {"table": definition, "name": "net_total", "definition": "SUM(IF(discounted, amount, 0))", "derived_from": ["column:core.ref.discounts.discounted"]})
+        for tenant in ("t-1", "t-2"):
+            c.put("table", {"path": f"{tenant}.sales.daily_totals", "system": "bigquery"})
+            c.put("column", {"table": f"{tenant}.sales.daily_totals", "name": "net_total", "dtype": "FLOAT64"})
+        c.put("project", {"name": "revenue-model", "description": "Revenue forecast"})
+        c.use("revenue-model", [f"column:{copy}.net_total"])
+        assert c.used_by(f"{definition}.net_total")["projects"] == []  # not connected yet
+
+        linked = c.set_instances(definition, ["t-*.sales.daily_totals"])
+        assert [link["to"] for link in linked["links"] if link["relation"] == "instance_of"] == [f"table:{copy}", "table:t-2.sales.daily_totals"]
+        [user] = c.used_by(f"{definition}.net_total")["projects"]
+        assert (user["project"], user["how"], user["through"]) == ("project:revenue-model", "downstream", f"column:{copy}.net_total")
+        assert {t["key"]: t["used_by"] for t in c.tables()}[f"table:{definition}"] == 1
+        up = [n["key"] for n in c.lineage(f"{copy}.net_total", "up")["upstream"]]
+        assert up == [f"column:{definition}.net_total", "column:core.ref.discounts.discounted"]  # through the copy to the definition and its input
+        assert "column:core.ref.discounts.discounted" in [n["key"] for n in c.uses("revenue-model", upstream=True)["built_from"]]
+
+        c.put("table", {"path": "t-3.sales.daily_totals"})  # a tenant added later is linked when it is registered
+        c.put("column", {"table": "t-3.sales.daily_totals", "name": "net_total"})
+        shown = c.get(definition)
+        assert [t["key"] for t in shown["copies"]] == [f"table:{copy}", "table:t-2.sales.daily_totals", "table:t-3.sales.daily_totals"]
+        assert [t["key"] for t in c.get("t-3.sales.daily_totals")["copy_of"]] == [f"table:{definition}"]
+        assert "column:t-3.sales.daily_totals.net_total" in [n["key"] for n in c.lineage(f"{definition}.net_total", "down")["downstream"]]
+        assert c.put("table", {"path": definition, "description": "Net totals"}, merge=True)["instances"] == ["t-*.sales.daily_totals"]  # kept
+
+        c.set_instances(definition, [])
+        assert c.get(definition)["copies"] == [] and c.used_by(f"{definition}.net_total")["projects"] == []
+    assert main(["--database-url", database, "instances", definition, "t-*.sales.daily_totals"]) == 0
+    assert "copy: table:t-3.sales.daily_totals" in capsys.readouterr().out
+
+
+def test_a_column_references_the_column_its_values_are_drawn_from(database, capsys):
+    with Catalog(database, actor="ana") as c:
+        for table, columns in (("shop.public.customers", ["id", "email"]), ("shop.public.orders", ["id", "customer_id"])):
+            c.put("table", {"path": table})
+            for column in columns:
+                c.put("column", {"table": table, "name": column})
+        c.put("column", {"table": "shop.public.orders", "name": "customer_id", "references": ["shop.public.customers.id"]})
+        fk = c.get("shop.public.orders.customer_id")
+        assert [r["key"] for r in fk["references"]] == ["column:shop.public.customers.id"] and fk["derived_from"] == []  # not lineage
+        assert [r["key"] for r in c.get("shop.public.customers.id")["referenced_by"]] == ["column:shop.public.orders.customer_id"]
+        orders, customers = c.get("shop.public.orders"), c.get("shop.public.customers")
+        assert orders["foreign_keys"] == [{"column": "column:shop.public.orders.customer_id", "references": "column:shop.public.customers.id",
+                                           "table": "table:shop.public.customers", "changed_since": False}]
+        assert customers["referenced_by"] == [{"column": "column:shop.public.orders.customer_id", "table": "table:shop.public.orders",
+                                               "references": "column:shop.public.customers.id"}]
+        assert c.lineage("shop.public.customers.id", "down")["downstream"] == []
+        c.put("column", {"table": "shop.public.orders", "name": "customer_id", "description": "Who ordered"}, merge=True)
+        assert [r["key"] for r in c.get("shop.public.orders.customer_id")["references"]] == ["column:shop.public.customers.id"]  # kept
+        with pytest.raises(CatalogError, match="Nothing registered"):
+            c.set_references("shop.public.orders.id", ["shop.public.nowhere.id"])
+        c.set_references("shop.public.orders.customer_id", [])
+        assert c.get("shop.public.orders")["foreign_keys"] == []
+    assert main(["--database-url", database, "references", "shop.public.orders.customer_id", "shop.public.customers.id"]) == 0
+    assert "references column:shop.public.customers.id" in capsys.readouterr().out
+
+
+def test_imports_of_different_tables_at_the_same_time_do_not_deadlock(database):
+    import threading
+    failed = []
+
+    def run(prefix):
+        try:
+            with Catalog(database, actor=prefix) as c:
+                c.apply([("table", {"path": f"{prefix}.d.t{i}"}) for i in range(1500)])
+        except Exception as e:  # noqa: BLE001 - collected and asserted below
+            failed.append(e)
+
+    threads = [threading.Thread(target=run, args=(p,)) for p in ("aa", "bb", "cc")]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert not failed
+    with Catalog(database, actor="ana") as c:
+        assert len(c.tables()) == 4500
+
+
+def test_copies_registered_in_one_import_link_to_their_definition_in_one_revision(database):
+    with Catalog(database, actor="ana") as c:
+        c.put("table", {"path": "core.sales.daily_totals", "instances": ["t-*.sales.daily_totals"]})
+        c.apply([("table", {"path": f"t-{i}.sales.daily_totals"}) for i in range(50)])
+        assert len(c.get("core.sales.daily_totals")["copies"]) == 50
+        assert len(c.get("core.sales.daily_totals")["history"]) == 2
+        assert c.apply([("table", {"path": f"t-{i}.sales.daily_totals"}) for i in range(50)])["unchanged"] == 50
+        assert len(c.get("core.sales.daily_totals")["history"]) == 2
+
+
+def test_a_whole_entry_import_keeps_what_was_said_beside_it(database):
+    """dbt says the whole entry, but not its copies, creator, foreign keys or privacy fields: those stay."""
+    with Catalog(database, actor="ana") as c:
+        c.put("table", {"path": "core.sales.daily_totals", "description": "Totals"})
+        c.put("column", {"table": "core.sales.daily_totals", "name": "store_id"})
+        c.put("table", {"path": "core.ref.stores"})
+        c.put("column", {"table": "core.ref.stores", "name": "id"})
+        c.set_instances("core.sales.daily_totals", ["t-*.sales.daily_totals"])
+        c.set_created_by("core.sales.daily_totals", {"kind": "script", "path": "make.py"})
+        c.set_references("core.sales.daily_totals.store_id", ["core.ref.stores.id"])
+        c.set_privacy(["core.sales.daily_totals.store_id"], pii=True, data_category="business")
+        c.put("table", {"path": "core.sales.daily_totals", "description": "Daily totals"})  # as dbt would, without merge
+        c.put("column", {"table": "core.sales.daily_totals", "name": "store_id", "description": "Store"})
+        table, column = c.get("core.sales.daily_totals"), c.get("core.sales.daily_totals.store_id")
+        assert table["description"] == "Daily totals" and table["instances"] == ["t-*.sales.daily_totals"] and table["created_by"]["path"] == "make.py"
+        assert [r["key"] for r in column["references"]] == ["column:core.ref.stores.id"]
+        assert column["pii"] is True and column["data_category"] == "business"
+        c.put("column", {"table": "core.sales.daily_totals", "name": "store_id", "pii": None, "references": None})  # said outright: cleared
+        column = c.get("core.sales.daily_totals.store_id")
+        assert "pii" not in column and column["references"] == [] and column["data_category"] == "business"

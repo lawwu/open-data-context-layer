@@ -68,7 +68,7 @@ def schema(client, found: list[dict]) -> tuple[list[tuple[str, str]], str]:
 
 def record(catalog: Catalog, *, client, pipeline_run: str | None = None, task: str | None = None, output: str | None = None,
            uris: list[str] | None = None, from_table: str | None = None, export_jobs: list[str] | None = None,
-           find_export_job: bool = False, sql: str = "templates") -> dict:
+           find_export_job: bool = False, sql: str = "templates", created_by: dict | None = None) -> dict:
     """Record the files a task wrote to one of its outputs, or the files under `uris`, as a dataset version.
 
     The reference is the artifact URI and the pipeline job (`gs://…/output_train_dataset@job`); for URIs given
@@ -77,9 +77,14 @@ def record(catalog: Catalog, *, client, pipeline_run: str | None = None, task: s
 
     With `export_jobs` (BigQuery jobs as PROJECT:LOCATION.JOB_ID) or `find_export_job`, the file set is also bound to
     the EXPORT DATA job that wrote it, and each field is traced through the job's SELECT; see `exports`. A file set
-    recorded without a binding can be bound by recording it again with one."""
+    recorded without a binding can be bound by recording it again with one.
+
+    `created_by` says what wrote the files when no pipeline task did, such as a notebook (see `provenance`). It is
+    kept as a person said it, and can be added to a file set recorded before."""
     from . import exports
+    from .provenance import check
     from .vertex import GCS, SUCCEEDED, record_task, task_detail
+    created_by = check(created_by)
     require(bool(pipeline_run) != bool(uris), "files", "Name the files one way: --pipeline-run with --task and --output, or gs:// URIs")
     detail = job = None
     if pipeline_run:
@@ -125,6 +130,9 @@ def record(catalog: Catalog, *, client, pipeline_run: str | None = None, task: s
                                    "WHERE dataset_version_id = %s AND uri = %s",
                                    [(o.get("rows"), o.get("created"), existing["id"], o["uri"]) for o in found if o.get("rows") is not None or o.get("created")])
             change = exports.store(catalog, existing["id"], binding) if binding else "unchanged"
+            if created_by and db.execute("UPDATE dataset_versions SET verification = verification || %s WHERE id = %s AND verification -> 'created_by' "
+                                         "IS DISTINCT FROM %s RETURNING id", (Jsonb({"created_by": created_by}), existing["id"], Jsonb(created_by))).fetchone():
+                change = "changed"
             return {"reference": reference, "change": change, "objects": len(found), "fields": len(fields), "schema": said,
                     **({"exported_by": binding["jobs_named"]} if binding else {})}
         producer = record_task(db, job, detail, pipeline_run, task) if pipeline_run else None
@@ -133,7 +141,7 @@ def record(catalog: Catalog, *, client, pipeline_run: str | None = None, task: s
             VALUES (%s, 'gcs_files', %s, %s, %s, %s, %s, %s) RETURNING id""",
             (reference, roots[0], table, revision, producer,
              Jsonb({"objects": len(found), "schema": said, "producer_unknown": producer is None, "exported_from": table,
-                    "table_may_have_changed": table is not None, "roots": roots,
+                    "table_may_have_changed": table is not None, "roots": roots, **({"created_by": created_by} if created_by else {}),
                     **({"output": output, "artifact": artifacts[0].get("name")} if pipeline_run else {})}),
              catalog.actor)).fetchone()["id"]
         with db.cursor() as cursor:
@@ -177,7 +185,11 @@ def explain(catalog: Catalog, version: dict) -> dict:
     filters = [r["source_key"].removeprefix("column:") for r in
                db.execute("SELECT source_key FROM version_row_filters WHERE dataset_version_id = %s ORDER BY source_key", (version["id"],))]
     missing = []
-    if task is None:
+    created_by = version["verification"].get("created_by")
+    if task is None and created_by:
+        missing.append(f"what wrote these files is as {version['recorded_by']} said ({created_by['kind']} "
+                       f"{created_by.get('path') or created_by.get('url') or created_by.get('command') or ''}".rstrip() + "), not checked against a run")
+    elif task is None:
         missing.append("the producer of these files is not recorded: they were named by URI, not read from a pipeline task's output")
     if exported:
         missing.append(f"the files were exported from {exported['table']}, pinned as that table was defined when the files were recorded; "
@@ -212,6 +224,7 @@ def explain(catalog: Catalog, version: dict) -> dict:
         "produced_by": {"pipeline_run": task["evidence"].get("pipeline_run"), "task": task["evidence"].get("task"), "state": task["state"],
                         "started": stamp(task["started_at"]) if task["started_at"] else None, "ended": stamp(task["ended_at"]) if task["ended_at"] else None}
         if task else None,
+        **({"created_by": created_by} if created_by else {}),
         "exported_from": exported,
         "exported_by": [{"job": name(j["job_project"], j["job_location"], j["job_id"]), "statement_type": "EXPORT_DATA", "rows": j["row_count"],
                          "files": j["file_count"], "created": stamp(j["created_at"]), "ended": stamp(j["ended_at"]) if j["ended_at"] else None}

@@ -10,6 +10,7 @@ MCP tools answer. It runs on the standard library's threaded HTTP server, with o
     GET  /v1/entries/{key}/used-by
     GET  /v1/entries/{key}/documents             the documents that describe it
     GET  /v1/tables?layer=&system=                every table, with its columns and users counted
+    GET  /v1/privacy?pii_only=&table=             every column's personal-data flag, scrubbing, data category and retention
     GET  /v1/projects                            every project, with its uses and latest model version
     GET  /v1/projects/{name}/uses?upstream=
     GET  /v1/query-history?table=&since=7d&patterns=
@@ -74,6 +75,7 @@ ROUTES = [  # (method, pattern, handler(catalog, match, query, body))
     ("GET", r"/v1/datasets/(?P<reference>[^/]+)/trace", lambda c, m, q, b: _explain_dataset(c, m["reference"])),
     ("GET", r"/v1/tables", lambda c, m, q, b: c.tables(q.get("layer") or None, q.get("system") or None)),
     ("GET", r"/v1/projects", lambda c, m, q, b: c.projects()),
+    ("GET", r"/v1/privacy", lambda c, m, q, b: c.privacy(_flag(q.get("pii_only")), q.get("table") or None)),
     ("GET", r"/v1/models", lambda c, m, q, b: c.models(q.get("project") or None)),
     ("GET", r"/v1/models/(?P<name>[^/]+)/versions/(?P<version>[^/]+)/trace", lambda c, m, q, b: c.explain_model(m["name"], m["version"])),
     ("GET", r"/v1/runs", lambda c, m, q, b: c.runs(q.get("system") or None, _limit(q.get("limit"), 100))),

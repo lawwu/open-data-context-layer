@@ -237,6 +237,10 @@ async function overviewPage() {
     h("h2", {}, "Redefined after a document described it"),
     table(["Document", "Describes", ""], (overview.changed_since_described || []).map((c) => [entryLink(c.document), entryLink(c.key), changedBadge()]),
       "Every document describes data as it is defined now."),
+    h("h2", {}, "Corrected after a model version relied on it"),
+    table(["Model version", "Document", ""], (overview.changed_since_relied_on || []).map((c) => [
+      h("a", { href: `#/model/${enc(c.model)}/${enc(c.version)}` }, `${c.model} ${c.version}`), entryLink(c.document), changedBadge()]),
+      "Every model version relied on its documents as they read now."),
     h("h2", {}, "Recent model versions"),
     table(["Model", "Version", "Trained on", "Recorded"], models.slice(0, 8).map((m) => [entryLink(`project:${m.model}`, m.model),
       h("a", { href: `#/model/${enc(m.model)}/${enc(m.version)}` }, m.version),
@@ -276,6 +280,15 @@ async function entryPage(key) {
       ["Layer", entry.layer], ["System", entry.system], ["Owner", entry.owner], ["Status", entry.status],
       ["Repository", entry.repository],
       ["Tags", (entry.tags || []).join(", ")],
+      ["Created by", createdBy(entry.created_by)],
+      ["References", (entry.references || []).length ? entry.references.map((d, n) => [n ? ", " : "", entryLink(d.key, d.title), d.changed_since ? [" ", changedBadge()] : ""]) : null],
+      ["Foreign keys", (entry.foreign_keys || []).length ? entry.foreign_keys.map((f, n) => [n ? "; " : "", entryLink(f.column, f.column.split(".").pop()), " → ", entryLink(f.references, f.references.replace(/^column:/, ""))]) : null],
+      ["Referenced by", (entry.referenced_by || []).length ? entry.referenced_by.map((d, n) => [n ? ", " : "", entryLink(d.key || d.column, (d.title || d.column).replace(/^column:/, ""))]) : null],
+      ["Copy of", (entry.copy_of || []).length ? entry.copy_of.map((d, n) => [n ? ", " : "", entryLink(d.key, d.title)]) : null],
+      ["Copies", (entry.instances || []).length ? [entry.instances.map((p, n) => [n ? ", " : "", h("code", {}, p)]),
+        ` match ${(entry.copies || []).length}: `, (entry.copies || []).map((d, n) => [n ? ", " : "", entryLink(d.key, d.title)])] : null],
+      ["Personal data", entry.pii === true ? "yes" : entry.pii === false ? "no" : null], ["Scrubbing", entry.scrubbing],
+      ["Data category", entry.data_category], ["Retention", entry.retention],
       ["Revision", [`${entry.revision} by ${entry.registered_by}, `, when(entry.at)]],
       ["Sources", sources(entry.source)],
     ])),
@@ -396,6 +409,9 @@ function documentPage(d) {
     unresolved.length ? [h("h2", {}, `Not found (${unresolved.length})`),
       unresolved.map((u) => h("div", { class: "missing" }, "△ ", u.startsWith("section ") ? `names a ${u} that the page has no heading for` : `names ${u}, which the catalog does not have`))] : null,
     d.headings.length ? [h("h2", {}, "Headings"), h("ul", {}, d.headings.map((x) => h("li", { style: null }, "  ".repeat(x.level - 1), x.text, " ", h("code", { class: "muted" }, `#${x.anchor}`))))] : null,
+    (d.relied_on_by || []).length ? [h("h2", {}, `Relied on by (${d.relied_on_by.length})`),
+      table(["Model version", "Revision", "For", ""], d.relied_on_by.map((r) => [h("a", { href: `#/model/${enc(r.model)}/${enc(r.version)}` }, `${r.model} ${r.version}`),
+        h("code", {}, r.revision), r.why || "", r.changed_since ? h("span", { class: "status warning", title: "The page was corrected after this version relied on it" }, "△ corrected since") : ""]))] : null,
     h("h2", {}, "Page"), h("div", { class: "card markdown" }, markdownAsText(d.text || "")),
     h("h2", {}, "History"), table(["Revision", "By", "When"], d.history.map((r) => [h("code", {}, r.revision), r.registered_by, when(r.at)])));
 }
@@ -404,17 +420,36 @@ function step(label, what, ...details) {
   return h("li", {}, h("div", { class: "step" }, label), h("div", { class: "what" }, what), details.filter(Boolean).map((d) => h("div", { class: "muted" }, d)));
 }
 
+function reliedOn(trace) {
+  return (trace.relied_on || []).length ? [h("h2", {}, `Relied on (${trace.relied_on.length})`),
+    table(["Document", "Revision", "For", ""], trace.relied_on.map((d) => [entryLink(d.document, d.title), h("code", {}, d.revision), d.why || "",
+      d.changed_since ? h("span", { class: "status warning", title: "The page was corrected after this version relied on it" }, "△ corrected since") : ""]))] : [];
+}
+
 function missingList(missing) {
   return [h("h2", {}, missing.length ? `Not established (${missing.length})` : "Not established"),
     missing.length ? missing.map((m) => h("div", { class: "missing" }, "△ ", m)) : h("p", { class: "status good" }, "✓ Every link of this trace is recorded.")];
+}
+
+// what a person said created a table or file: a script, a notebook, a query; links only to http(s) addresses
+function createdBy(c) {
+  if (!c) return null;
+  const where = c.path || c.url || c.command || "";
+  const safe = /^https?:\/\//.test(c.url || "") ? c.url : null;
+  return h("span", {}, h("span", { class: "badge" }, c.kind), " ", safe ? h("a", { href: safe, target: "_blank", rel: "noopener noreferrer" }, where, " ↗") : h("code", {}, where),
+    c.commit ? h("span", { class: "muted" }, ` at ${c.commit.slice(0, 12)}`) : null,
+    c.uncommitted ? h("span", { class: "status warning", title: "The file had changes not in that commit" }, " △ uncommitted changes") : null,
+    c.command && c.command !== where ? h("div", {}, h("code", {}, c.command)) : null, c.note ? h("div", { class: "muted" }, c.note) : null,
+    h("div", { class: "muted" }, "as stated; not checked against a run"));
 }
 
 function filesSteps(files) {
   const written = files.produced_by;
   const exported = files.exported_from;
   return [
-    step("Written by", written ? `${written.pipeline_run.split("/").pop()} / task ${written.task}` : "not recorded",
-      written ? h("span", {}, written.pipeline_run, " ", consoleLink(gcp.pipelineRun(written.pipeline_run))) : "the files were named by URI, not read from a pipeline task's output",
+    step("Written by", written ? `${written.pipeline_run.split("/").pop()} / task ${written.task}` : files.created_by ? files.created_by.kind : "not recorded",
+      written ? h("span", {}, written.pipeline_run, " ", consoleLink(gcp.pipelineRun(written.pipeline_run)))
+        : files.created_by ? createdBy(files.created_by) : "the files were named by URI, not read from a pipeline task's output",
       written?.state ? h("span", {}, stateBadge(written.state)) : null),
     step("Exported from", exported ? entryLink(`table:${exported.table}`, exported.table) : "not recorded",
       exported ? h("span", {}, "table-level lineage only, pinned when the files were recorded",
@@ -465,7 +500,7 @@ async function modelPage(name, version) {
             consoleLink(gcp.job(i.executed_as.project, i.executed_as.location, i.executed_as.job_id))) : null),
         step("Defined in", i.defined_in.file || "?", i.defined_in.commit ? `commit ${i.defined_in.commit}` : "no git commit"),
         step("From raw columns", i.derived_from.length ? i.derived_from.map((c, n) => [n ? ", " : "", entryLink(`column:${c}`, c)]) : "?")))),
-    ...missingList(trace.missing));
+    ...reliedOn(trace), ...missingList(trace.missing));
 }
 
 function modelOnFilesPage(trace) {
@@ -488,7 +523,7 @@ function modelOnFilesPage(trace) {
     table(["Field", "Role", "Type", "Expression", "From", "Lineage"], trace.inputs.map((i) => [h("strong", {}, i.field),
       `${i.role}${i.position !== null ? ` #${i.position}` : ""}`, i.dtype || "?", i.expression ? h("code", {}, i.expression) : "", fieldSources(i),
       lineageCell(i.lineage)])),
-    ...missingList(trace.missing));
+    ...reliedOn(trace), ...missingList(trace.missing));
 }
 
 function filesPage(d) {

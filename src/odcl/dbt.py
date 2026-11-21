@@ -35,6 +35,17 @@ def layer_of(meta, tags, schema) -> str | None:
     return next((layer for layer in LAYERS if layer in str(schema or "").lower().split("_")), None)
 
 
+def privacy_of(meta) -> dict:
+    """`pii`, `data_category`, `retention` and `scrubbing` from a dbt `meta`, directly or under `meta.privacy`."""
+    if not isinstance(meta, dict):
+        return {}
+    found = {**meta, **(meta.get("privacy") if isinstance(meta.get("privacy"), dict) else {})}
+    out = {k: str(found[k])[:200] for k in ("data_category", "retention", "scrubbing") if found.get(k) not in (None, "")}
+    if isinstance(found.get("pii"), bool) or str(found.get("pii")).lower() in ("yes", "no", "true", "false"):
+        out["pii"] = found["pii"] if isinstance(found["pii"], bool) else str(found["pii"]).lower() in ("yes", "true")
+    return out
+
+
 def web_url(remote: str) -> str | None:
     """https://host/owner/repo for a Git remote. Anything before an @ (a user name or a token) is dropped."""
     match = re.fullmatch(r"(?:https?://|ssh://)?(?:[^@/]+@)?([A-Za-z0-9.\-]+)[:/]+(.+?)(?:\.git)?/?", remote or "")
@@ -150,7 +161,7 @@ def dbt_entries(path, select=None) -> list[tuple[str, dict]]:
             "path": relation(node), "description": (node.get("description") or "").strip(), "system": dialect,
             "layer": layer_of(meta, node.get("tags"), node.get("schema")), "owner": meta.get("owner") if isinstance(meta.get("owner"), str) else None,
             "type": ((node.get("config") or {}).get("materialized") or "model") if is_model else node.get("resource_type"),
-            "tags": sorted({str(t)[:60] for t in node.get("tags") or []}), "derived_from": upstream, "source": defined_in(node)}))
+            "tags": sorted({str(t)[:60] for t in node.get("tags") or []}), "derived_from": upstream, "source": defined_in(node), **privacy_of(meta)}))
         return key
 
     done: dict[tuple[str, str], str | None] = {}
@@ -166,7 +177,7 @@ def dbt_entries(path, select=None) -> list[tuple[str, dict]]:
         key = done[uid, name] = f"column:{relation(node)}.{clean(name)}"  # set before its parents, so bad SQL cannot recurse forever
         info, is_model = columns(uid).get(name, {}), node.get("resource_type") == "model"
         payload = {"table": table(uid), "name": clean(name), "dtype": info.get("data_type"), "description": (info.get("description") or "").strip(),
-                   "tags": [], "source": defined_in(node)}
+                   "tags": [], "source": defined_in(node), **privacy_of(info.get("meta") or (info.get("config") or {}).get("meta"))}
         if is_model and node.get("compiled_code"):
             traced = False
             try:

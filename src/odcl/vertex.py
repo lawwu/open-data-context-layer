@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 from psycopg.types.json import Jsonb
@@ -44,6 +44,18 @@ class Client:
 
     def get(self, name: str) -> dict:
         return self._get(f"https://{self.location}-aiplatform.googleapis.com/v1/{name}").json()
+
+    def pipeline_jobs(self, project: str, since: datetime) -> list[dict]:
+        """The pipeline jobs created in a project and this client's location since a time, newest first (pipelineJobs.list)."""
+        found, token = [], None
+        while True:
+            page = self._get(f"https://{self.location}-aiplatform.googleapis.com/v1/projects/{quote(project, safe='')}/locations/{self.location}/pipelineJobs",
+                             filter=f'create_time>"{since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}"', orderBy="create_time desc",
+                             pageSize="100", **({"pageToken": token} if token else {})).json()
+            found += page.get("pipelineJobs") or []
+            token = page.get("nextPageToken")
+            if not token:
+                return found
 
     def object(self, uri: str, missing_ok: bool = False) -> dict | None:
         """An object's metadata, or None when `missing_ok` and it is not there."""
@@ -189,6 +201,9 @@ def import_build(catalog: Catalog, manifest: dict, *, client) -> dict:
     reason = data["verification"].get("schema", "read")
     require(not absent, "missing_dependency", f"{reference} has no recorded field {', '.join(absent)}" + (f": {reason}" if not fields and reason != "read" else ""))
 
+    trained_at = _time(task.get("endTime"))
+    relied = [_pin_document(catalog, item, trained_at) for item in manifest.get("relied_on") or []]  # refused before anything is written
+
     with db.transaction():
         catalog._lock(f"{project}@{version}")
         existing = db.execute("SELECT manifest_sha256 FROM model_builds WHERE project_key = %s AND version = %s", (project, version)).fetchone()
@@ -208,14 +223,80 @@ def import_build(catalog: Catalog, manifest: dict, *, client) -> dict:
         with db.cursor() as cursor:
             cursor.executemany("INSERT INTO build_inputs (build_id, role, field, position, dataset_version_id, field_path) VALUES (%s, %s, %s, %s, %s, %s)",
                                [(build, i["role"], i["field"], i.get("position"), data["id"], i["field"].lower()) for i in manifest["inputs"]])
+        _record_relied_on(catalog, build, relied)
         _record_use(catalog, build)
     return {"model": model, "version": version, "change": "added", "inputs": len(manifest["inputs"]), "artifact_verified": verified}
+
+
+def _pin_document(catalog: Catalog, item, trained_at: datetime | None) -> dict:
+    """Which revision of a document a model version relied on. The manifest may name the revision, or the page's
+    content digest (the SHA-256 the docs import keeps); else it is the revision current when training ended, or the
+    current one when the page was registered only afterwards. Says which it was in `pinned_by`."""
+    item = {"document": item} if isinstance(item, str) else item
+    require(isinstance(item, dict) and item.get("document"), "relied_on", "relied_on is a list of documents, each a key or {document, revision, digest, why}")
+    key = catalog.resolve(str(item["document"]), ("document",))
+    why = str(item["why"]).strip()[:500] if item.get("why") else None
+    db = catalog.db
+    if item.get("revision"):
+        found = db.execute("SELECT id FROM revisions WHERE entry_key = %s AND id = %s", (key, item["revision"])).fetchone()
+        require(found, "relied_on", f"{key} has no revision {item['revision']}")
+        return {"key": key, "revision": found["id"], "pinned_by": "revision", "why": why}
+    if item.get("digest"):
+        found = db.execute("SELECT id FROM revisions WHERE entry_key = %s AND body ->> 'digest' = %s ORDER BY recorded_at DESC, seq DESC LIMIT 1",
+                           (key, item["digest"])).fetchone()
+        require(found, "relied_on", f"No revision of {key} has the content digest {item['digest']}: import the page as it was read")
+        return {"key": key, "revision": found["id"], "pinned_by": "digest", "why": why}
+    if trained_at:
+        found = db.execute("SELECT id FROM revisions WHERE entry_key = %s AND recorded_at <= %s ORDER BY recorded_at DESC, seq DESC LIMIT 1",
+                           (key, trained_at)).fetchone()
+        if found:
+            return {"key": key, "revision": found["id"], "pinned_by": "at_training", "why": why}
+    return {"key": key, "revision": catalog._head(key)["id"], "pinned_by": "current", "why": why}
+
+
+def _record_relied_on(catalog: Catalog, build: int, pins: list[dict]) -> None:
+    """Pin documents to a model version. A document already pinned to it keeps its pin; only `why` can be added."""
+    with catalog.db.cursor() as cursor:
+        cursor.executemany("""INSERT INTO build_documents (build_id, document_key, document_revision, pinned_by, why, recorded_by)
+                              VALUES (%s, %s, %s, %s, %s, %s)
+                              ON CONFLICT (build_id, document_key) DO UPDATE SET why = COALESCE(build_documents.why, excluded.why)""",
+                           [(build, p["key"], p["revision"], p["pinned_by"], p["why"], catalog.actor) for p in pins])
+
+
+def rely(catalog: Catalog, name: str, version: str, documents: list[str], why: str | None = None) -> dict:
+    """Record that a model version already imported relied on these documents, each pinned at the revision current
+    when its training task ended."""
+    require(documents, "relied_on", "Name at least one document")
+    row = catalog.db.execute("""SELECT b.id, t.ended_at FROM model_builds b JOIN executions t ON t.id = b.producing_execution
+                                WHERE b.project_key = %s AND b.version = %s""", (f"project:{name.strip().lower()}", str(version))).fetchone()
+    require(row, "not_found", f"No build of {name} {version} is recorded")
+    pins = [_pin_document(catalog, {"document": d, "why": why}, row["ended_at"]) for d in documents]
+    with catalog.db.transaction():
+        _record_relied_on(catalog, row["id"], pins)
+    return {"model": name, "version": str(version), "relied_on": relied_on(catalog, row["id"])}
+
+
+def relied_on(catalog: Catalog, build: int) -> list[dict]:
+    """The documents a model version relied on, each at its pinned revision, and whether the page changed since."""
+    return [{"document": r["document_key"], "title": r["title"], "revision": r["document_revision"], "pinned_by": r["pinned_by"], "why": r["why"],
+             "changed_since": r["document_revision"] != r["head_revision"]}
+            for r in catalog.db.execute("""SELECT d.*, e.head_revision, h.body ->> 'title' AS title FROM build_documents d
+                                           JOIN entries e ON e.key = d.document_key JOIN revisions h ON h.id = e.head_revision
+                                           WHERE d.build_id = %s ORDER BY d.document_key""", (build,))]
 
 
 def task_detail(job: dict, pipeline_run: str, name: str) -> dict:
     task = next((t for t in (job.get("jobDetail") or {}).get("taskDetails") or [] if t.get("taskName") == name), None)
     require(task, "task_not_found", f"{pipeline_run} has no task named {name}")
     return task
+
+
+def run_window(job: dict, pipeline_run: str, task: str | None = None) -> tuple[datetime, datetime | None]:
+    """When a pipeline run, or one of its tasks, ran: (start, end). End is None while it is still running."""
+    found = task_detail(job, pipeline_run, task) if task else job
+    start = _time(found.get("startTime") or found.get("createTime"))
+    require(start, "pipeline_run", f"{task or pipeline_run} reports no start time yet")
+    return start, _time(found.get("endTime"))
 
 
 def record_task(db, job: dict, task: dict, pipeline_run: str, name: str) -> int:
@@ -286,10 +367,12 @@ def explain_model(catalog: Catalog, name: str, version: str) -> dict:
             "model": manifest["model"], "version": row["version"], "produced_by": produced, "artifact": artifact,
             "read": {"dataset_version": data["reference"], "kind": "gcs_files", "uri": data["uri"], "objects": len(data["objects"]), "generations_pinned": True,
                      "produced_by": {k: data["produced_by"][k] for k in ("pipeline_run", "task", "state")} if data["produced_by"] else None,
+                     **({"created_by": data["created_by"]} if data.get("created_by") else {}),
                      "exported_from": data["exported_from"],
                      **({"exported_by": data["exported_by"], "row_filter": data["row_filter"]} if data["exported_by"] else {})},
             "inputs": [_file_input(i, columns.get(i["field_path"], {}), bool(data["exported_by"]))
                        for i in db.execute("SELECT * FROM build_inputs WHERE build_id = %s ORDER BY position NULLS LAST, role, field", (row["id"],))],
+            "relied_on": relied_on(catalog, row["id"]),
             "missing": data["missing"],
         }
     inputs = []
@@ -305,5 +388,6 @@ def explain_model(catalog: Catalog, name: str, version: str) -> dict:
         "model": manifest["model"], "version": row["version"], "produced_by": produced, "artifact": artifact,
         "read": {"dataset_version": data["reference"], "snapshot": data["snapshot"], "snapshot_of": data["snapshot_of"], "snapshot_time": data["snapshot_time"]},
         "inputs": inputs,
+        "relied_on": relied_on(catalog, row["id"]),
         "missing": data["missing"],
     }

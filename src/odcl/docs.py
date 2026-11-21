@@ -14,6 +14,15 @@ A page says what it describes in its frontmatter, so its body stays as it is:
         - pattern: "column:*-prod.sales.orders.amount*"   # a glob over entry keys
     ---
 
+A page whose frontmatter another tool owns, such as a linter that allows only its own keys, can put the odcl block
+in an HTML comment instead, anywhere in the page. The comment holds what the `odcl:` key would:
+
+    <!-- odcl
+    kind: finding
+    describes:
+      - key: column:warehouse.sales.orders.status_code
+    -->
+
 A key names one entry. A pattern is resolved at every import to one link per entry it matches, and is kept on the
 document, so a later import links entries added since. A key or pattern that matches nothing is not an error: it is
 reported in the import result and on the document, as is a section the page has no heading for.
@@ -36,24 +45,52 @@ from .store import DESCRIBED, Catalog, CatalogError, require
 
 FENCE = re.compile(r"^\s{0,3}(```|~~~)")
 HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
+COMMENT = re.compile(r"^[ \t]*<!--[ \t]*odcl:?[ \t]*\r?\n(.*?)^[ \t]*-->[ \t]*(?:\r?\n|$)", re.S | re.M)
 
 
-def frontmatter(content: str) -> tuple[dict | None, str]:
-    """The YAML frontmatter of a page, and the body after it. No frontmatter is (None, content)."""
+def _yaml(text: str, where: str):
     try:
         import yaml
     except ImportError as e:  # pragma: no cover - depends on the installation
         raise CatalogError("docs", "Importing documents needs PyYAML: install open-data-context-layer[docs]") from e
+    try:
+        return yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        raise CatalogError("docs", f"The {where} cannot be read: {str(e).splitlines()[0]}") from None
+
+
+def frontmatter(content: str) -> tuple[dict | None, str]:
+    """The YAML frontmatter of a page, and the body after it. No frontmatter is (None, content)."""
     if not content.startswith("---"):
         return None, content
     end = re.search(r"^---\s*$", content[3:], re.M)
     if not end or content[3:4] not in ("\n", "\r"):
         return None, content
-    try:
-        meta = yaml.safe_load(content[3:3 + end.start()])
-    except yaml.YAMLError as e:
-        raise CatalogError("docs", f"The frontmatter cannot be read: {str(e).splitlines()[0]}") from None
+    meta = _yaml(content[3:3 + end.start()], "frontmatter")
     return (meta if isinstance(meta, dict) else None), content[3 + end.end():].lstrip("\r\n")
+
+
+def odcl_block(meta: dict | None, body: str) -> tuple[dict | None, str]:
+    """The page's odcl block, from its frontmatter or else from an `<!-- odcl ... -->` comment, and the body without
+    that comment. A page with neither is (None, body)."""
+    block = (meta or {}).get("odcl")
+    if isinstance(block, dict):
+        return block, body
+    found = next((m for m in COMMENT.finditer(body) if not _fenced(body[:m.start()])), None)  # not an example in a code block
+    if not found:
+        return None, body
+    block = _yaml(found.group(1), "odcl comment")
+    return (block if isinstance(block, dict) else None), body[:found.start()] + body[found.end():]
+
+
+def _fenced(before: str) -> bool:
+    """Whether text that follows `before` is inside a fenced code block."""
+    fenced = None
+    for line in before.splitlines():
+        fence = FENCE.match(line)
+        if fence:
+            fenced = None if fenced == fence.group(1) else (fenced or fence.group(1))
+    return fenced is not None
 
 
 def anchor(heading: str) -> str:
@@ -109,8 +146,8 @@ def read_page(catalog: Catalog, file: Path, named_by: Path, repo_url: str | None
     """The document entry a page makes, or None when it has no odcl block."""
     content = file.read_text(encoding="utf-8")
     meta, body = frontmatter(content)
-    block = (meta or {}).get("odcl")
-    if not isinstance(block, dict):
+    block, body = odcl_block(meta, body)
+    if block is None:
         return None
     ref = code_ref(file) or {}
     url_base = repo_url or ref.get("repository")
@@ -145,7 +182,7 @@ def read_page(catalog: Catalog, file: Path, named_by: Path, repo_url: str | None
             unresolved.append(f"section {section} of {item.get('key') or item.get('pattern')}")
         describes += [{"key": t, "section": str(section) if section else None, "says": str(says).strip() if says else None} for t in targets]
     return {"repository": repository, "path": relative, "title": str((meta or {}).get("title") or (marks[0]["text"] if marks else file.stem)),
-            "owner": str(meta["owner"]) if meta.get("owner") else None, "doc_kind": str(block["kind"]) if block.get("kind") else None,
+            "owner": str(meta["owner"]) if (meta or {}).get("owner") else None, "doc_kind": str(block["kind"]) if block.get("kind") else None,
             "description": first_paragraph(body), "text": body, "headings": marks,
             "url": f"{url_base}/blob/{commit}/{relative}" if url_base and commit else url_base or None, "commit": commit,
             "digest": hashlib.sha256(content.encode()).hexdigest(), "describes": describes, "patterns": patterns, "unresolved": unresolved}

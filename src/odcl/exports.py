@@ -127,7 +127,7 @@ def _filters(select: str, schema: dict, tables: list[str]) -> tuple[list[tuple[s
     tree = lineage.parse(select, DIALECT)
     if tree is None or not tree.args.get("where"):
         return [], None
-    written = tree.args["where"].this.sql(dialect=DIALECT)
+    written = lineage.parse(select, DIALECT, as_keyed=False).args["where"].this.sql(dialect=DIALECT)
     try:
         tree = qualify(tree, schema=schema or None, dialect=DIALECT, validate_qualify_columns=False, quote_identifiers=False)
     except Exception:  # noqa: BLE001 - unqualified columns are matched to a lone source table below

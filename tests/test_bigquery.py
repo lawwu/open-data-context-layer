@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-pytest.importorskip("sounding", reason="the BigQuery importer needs Sounding, which needs Python 3.14")
+pytest.importorskip("sounding", reason="the BigQuery importer needs the bigquery extra")
 from google.cloud import bigquery as gbq
 
 from odcl import Catalog, CatalogError
@@ -209,3 +209,62 @@ def test_the_command_line_syncs_and_shows_a_tables_history(database, monkeypatch
     assert main([*db, "--json", "history", "table", FEATURES, "--since", "2h"]) == 0
     assert json.loads(capsys.readouterr().out)["totals"]["jobs"] == 0  # the jobs ran four hours before "now"
     assert main([*db, "history", "table", FEATURES, "--since", "soon"]) == 1 and "7d" in capsys.readouterr().err
+
+
+def test_an_explicit_window_is_read_once_and_leaves_the_regular_sync_where_it_was(catalog):
+    client = client_for(week())
+    since = T0 - dt.timedelta(minutes=5)
+    result = bq.sync_jobs(catalog, "jobs-p", client=client, since=since, until=T0 + dt.timedelta(minutes=31))
+    assert result["window"] == "explicit" and result["jobs"] == 7 and result["since"] == "2026-09-02T01:53:40+00:00"
+    asked = client.list_jobs.call_args_list[0].kwargs
+    assert (asked["min_creation_time"], asked["max_creation_time"]) == (since, T0 + dt.timedelta(minutes=31))
+    assert catalog.db.execute("SELECT count(*) AS n FROM sync_cursors").fetchone()["n"] == 0  # the time before it is still unread
+    regular = bq.sync_jobs(catalog, "jobs-p", client=client_for(week()), until=UNTIL)
+    assert regular["window"] == "incremental" and regular["since"] == "2026-08-26T06:00:00+00:00" and regular["added"] == 0
+    with pytest.raises(CatalogError, match="since is not before until"):
+        bq.sync_jobs(catalog, "jobs-p", client=client_for(week()), since=UNTIL, until=T0)
+
+
+def test_the_command_line_reads_the_jobs_of_a_pipeline_task_or_a_window(database, monkeypatch, capsys):
+    from pathlib import Path
+
+    from odcl import vertex
+    run = json.loads((Path(__file__).parent / "fixtures" / "file_trace" / "vertex_pipeline_job.json").read_text())
+    clients = []
+    monkeypatch.setattr(bq, "client", lambda project: clients.append(client_for(week())) or clients[-1])
+    monkeypatch.setattr(vertex, "client", lambda location: Mock(get=Mock(return_value=run)))
+    db = ["--database-url", database, "sync", "bigquery-jobs", "--project", "jobs-p"]
+    assert main([*db, "--pipeline-run", run["name"], "--task", "load-data"]) == 0
+    assert "this window only" in capsys.readouterr().out
+    asked = clients[-1].list_jobs.call_args_list[0].kwargs
+    assert (asked["min_creation_time"].isoformat(), asked["max_creation_time"].isoformat()) == ("2026-10-05T09:01:00+00:00", "2026-10-05T09:12:00+00:00")
+    assert main([*db, "--since", "2026-10-05T09:00:00", "--until", "2026-10-05T09:36:00Z"]) == 0
+    asked = clients[-1].list_jobs.call_args_list[0].kwargs
+    assert (asked["min_creation_time"].isoformat(), asked["max_creation_time"].isoformat()) == ("2026-10-05T09:00:00+00:00", "2026-10-05T09:36:00+00:00")
+    assert main([*db, "--pipeline-run", run["name"], "--since", "2026-10-05"]) == 1 and "not both" in capsys.readouterr().err
+    assert main([*db, "--since", "yesterday"]) == 1 and "is not a time" in capsys.readouterr().err
+
+
+def test_a_foreign_key_constraint_becomes_a_reference_and_one_to_a_table_not_read_is_named(catalog):
+    def table(fqn, fields, keys=()):
+        found = gbq.Table(fqn, schema=[gbq.SchemaField(f, "STRING") for f in fields])
+        found._properties["tableConstraints"] = {"foreignKeys": [
+            {"name": f"fk_{n}", "referencedTable": ref(target), "columnReferences": [{"referencingColumn": a, "referencedColumn": b}]}
+            for n, (a, target, b) in enumerate(keys)]}
+        return found
+    tables = {"p.s.orders": table("p.s.orders", ["id", "Customer_ID", "store_id"], [("Customer_ID", "p.s.customers", "ID"), ("store_id", "p.s.stores", "id")]),
+              "p.s.customers": table("p.s.customers", ["ID"])}
+    client = Mock(get_table=Mock(side_effect=lambda r: tables[f"{r.project}.{r.dataset_id}.{r.table_id}"]))
+    result = bq.import_tables(catalog, ["p.s.orders", "p.s.customers"], client=client)  # the referenced table is read after the one that references it
+    assert result["unresolved_references"] == ["column:p.s.orders.store_id -> column:p.s.stores.id"]
+    assert [r["key"] for r in catalog.get("p.s.orders.customer_id")["references"]] == ["column:p.s.customers.id"]
+    again = bq.import_tables(catalog, ["p.s.orders", "p.s.customers"], client=client)
+    assert (again["added"], again["changed"]) == (0, 0)
+
+
+def test_an_end_in_the_future_reads_and_records_only_up_to_now(catalog):
+    later = store.now() + dt.timedelta(days=30)
+    result = bq.sync_jobs(catalog, "jobs-p", client=client_for(week()), until=later)
+    recorded = catalog.db.execute("SELECT completed_until FROM sync_cursors").fetchone()["completed_until"]
+    assert recorded <= store.now() and dt.datetime.fromisoformat(result["until"]) <= store.now()
+    bq.sync_jobs(catalog, "jobs-p", client=client_for(week()))  # the next regular sync is not refused as already read

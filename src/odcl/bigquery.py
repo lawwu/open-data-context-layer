@@ -15,13 +15,13 @@ from datetime import datetime, timedelta, timezone
 
 from . import store
 from .lineage import MAX_SQL, template  # noqa: F401 - the SQL shape is shared with the OpenLineage importer
-from .store import Catalog, CatalogError, require
+from .store import Catalog, CatalogError, reference_entries, require
 
 try:
     from sounding import source
     from sounding.errors import SoundingError, public_error
 except ImportError as e:  # pragma: no cover - depends on the installation
-    raise CatalogError("bigquery", "The BigQuery importer needs Sounding: install open-data-context-layer[bigquery] on Python 3.14 or later") from e
+    raise CatalogError("bigquery", "The BigQuery importer needs Sounding: install open-data-context-layer[bigquery]") from e
 
 SOURCE = "bigquery.jobs"
 EVERYWHERE = "*"  # jobs.list answers for every location of a project at once
@@ -75,7 +75,14 @@ def import_tables(catalog: Catalog, tables: list[str], *, client) -> dict:
     require(tables, "tables", "Name at least one table as project.dataset.table")
     with reading():
         found = [source.table(fqn, client=client) for fqn in tables]
-    return catalog.apply([entry for table in found for entry in table_entries(table)], merge=True)
+    entries = [entry for table in found for entry in table_entries(table)]
+    # foreign keys (BigQuery's unenforced table constraints) become references, once every column read is registered
+    keys = [(t["table"]["fqn"], a, f"column:{fk['references']}.{b}".lower()) for t in found for fk in t["table"].get("foreign_keys") or []
+            if fk.get("references") for a, b in fk["columns"]]
+    registering = {f"{p['table'].replace('table:', 'column:', 1)}.{p['name']}".lower() for kind, p in entries if kind == "column"}
+    references, unresolved = reference_entries(catalog, keys, registering)
+    counts = catalog.apply(entries + references, merge=True)
+    return {**counts, **({"unresolved_references": unresolved} if unresolved else {})}
 
 
 def snapshot(fqn: str, *, client) -> dict:
@@ -125,29 +132,36 @@ def _store_job(db, record: dict, shape: str | None, capture: bool) -> bool:
     return kept["added"]
 
 
-def sync_jobs(catalog: Catalog, project: str, *, client, until: datetime | None = None, backfill: timedelta = BACKFILL,
-              overlap: timedelta = OVERLAP, sql: str = "templates") -> dict:
+def sync_jobs(catalog: Catalog, project: str, *, client, since: datetime | None = None, until: datetime | None = None,
+              backfill: timedelta = BACKFILL, overlap: timedelta = OVERLAP, sql: str = "templates") -> dict:
     """Read the query jobs an execution project created since the last finished window, and keep each once.
 
     The first read goes back `backfill`. Later reads start `overlap` before the last finished window ended, or
     at the oldest job still unfinished, whichever is earlier. Each page of jobs is committed together. The
     window is recorded as finished only after its last page, so an interrupted read is simply read again.
 
+    With `since`, exactly the window from `since` to `until` is read, such as the minutes a pipeline task ran. Its
+    jobs are kept like any others, but the window is not recorded as finished: it says nothing about the time
+    before it, so the next regular sync still starts where the last one ended.
+
     `sql` is "templates" (keep each query's shape, without literals) or "none" (do not ask BigQuery for SQL)."""
     require(sql != "full", "sql", "Keeping original SQL text is not offered yet: it needs its own access rules. Use templates or none")
     require(sql in ("templates", "none"), "sql", "sql is templates or none")
     require(isinstance(project, str) and project.strip(), "project", "Name the project the jobs ran in")
-    db, until = catalog.db, until or store.now()
-    require(until.tzinfo is not None, "until", "until needs a time zone")
-    cursor = db.execute("SELECT completed_until FROM sync_cursors WHERE source = %s AND execution_project = %s AND location = %s",
+    db, now = catalog.db, store.now()
+    require(until is None or until.tzinfo is not None, "until", "until needs a time zone")
+    until = min(until or now, now)  # no job is created later than now, and a later end would be recorded as read through
+    explicit = since is not None
+    require(not explicit or since.tzinfo is not None, "since", "since needs a time zone")
+    cursor = None if explicit else db.execute("SELECT completed_until FROM sync_cursors WHERE source = %s AND execution_project = %s AND location = %s",
                         (SOURCE, project, EVERYWHERE)).fetchone()
     if cursor:
         unfinished = db.execute("SELECT min(created_at) AS oldest FROM query_jobs WHERE execution_project = %s AND state <> 'DONE'", (project,)).fetchone()["oldest"]
         since = min(cursor["completed_until"] - overlap, unfinished or until)
-    else:
+    elif not explicit:
         since = until - backfill
     since = max(since, until - HISTORY).astimezone(timezone.utc)
-    require(since < until, "until", "until is before the window already read")
+    require(since < until, "until", "since is not before until" if explicit else "until is before the window already read")
     counts = {"jobs": 0, "added": 0, "excluded": 0, "pages": 0}
     unreachable: set[str] = set()
     with reading():
@@ -161,10 +175,10 @@ def sync_jobs(catalog: Catalog, project: str, *, client, until: datetime | None 
                     counts["added"] += _store_job(db, record, template(record.get("sql")) if sql == "templates" else None, sql == "templates")
             counts["pages"] += 1
             unreachable.update(page["unreachable"])
-    if not unreachable:  # a location Google could not reach was not read, so the window is not finished
+    if not unreachable and not explicit:  # a location Google could not reach was not read, so the window is not finished
         db.execute("INSERT INTO sync_cursors (source, execution_project, location, completed_until) VALUES (%s, %s, %s, %s) "
                    "ON CONFLICT (source, execution_project, location) DO UPDATE SET "
                    "completed_until = GREATEST(sync_cursors.completed_until, excluded.completed_until), updated_at = now()",
                    (SOURCE, project, EVERYWHERE, until))
     return {"project": project, "since": store.stamp(since), "until": store.stamp(until), **counts, "sql": sql,
-            "unreachable": sorted(unreachable), "finished": not unreachable}
+            "unreachable": sorted(unreachable), "finished": not unreachable, "window": "explicit" if explicit else "incremental"}

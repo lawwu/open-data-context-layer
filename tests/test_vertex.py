@@ -263,6 +263,12 @@ def test_the_real_client_reads_the_regional_endpoint_and_cloud_storage():
     assert client.read("gs://bucket/dir/model.bin", "5") == b"abc"
     assert session.get.call_args.kwargs["params"] == {"alt": "media", "generation": "5"}
 
+    session.get.side_effect = [Mock(ok=True, json=Mock(return_value={"pipelineJobs": [{"name": "a"}], "nextPageToken": "t"})),
+                               Mock(ok=True, json=Mock(return_value={"pipelineJobs": [{"name": "b"}]}))]
+    assert [j["name"] for j in client.pipeline_jobs("p", vertex._time("2026-10-01T00:00:00Z"))] == ["a", "b"]  # every page
+    assert session.get.call_args.args[0] == "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/pipelineJobs"
+    assert session.get.call_args.kwargs["params"]["filter"] == 'create_time>"2026-10-01T00:00:00Z"' and session.get.call_args.kwargs["params"]["pageToken"] == "t"
+
 
 def test_a_refusal_says_why_google_refused():
     from unittest.mock import Mock
@@ -436,3 +442,87 @@ def test_the_command_line_records_files_and_explains_them(database, monkeypatch,
     assert main([*db, "explain", "dataset", FILE_SET]) == 0
     out = capsys.readouterr().out
     assert "3 objects, generations pinned" in out and "load-data" in out and "hours_at_cutoff  DOUBLE" in out
+
+
+def test_a_model_version_pins_the_revision_of_the_finding_it_relied_on_and_a_correction_shows(catalog, capsys):
+    build(catalog)
+    finding = catalog.put("document", {"repository": "kb", "path": "findings/hours.md", "title": "Hours lag a day", "digest": "a" * 64,
+                                       "text": "Hours land a day late."})["key"]
+    catalog.db.execute("UPDATE revisions SET recorded_at = '2026-09-01T00:00:00Z' WHERE entry_key = %s", (finding,))  # read before training
+    old = catalog.get(finding)["revision"]
+    catalog.put("document", {"repository": "kb", "path": "findings/hours.md", "title": "Hours lag two days", "digest": "b" * 64,
+                             "text": "Corrected: two days."})
+    glossary = catalog.put("document", {"repository": "kb", "path": "glossary.md", "digest": "c" * 64})["key"]
+
+    trained = load("training_manifest.json") | {"relied_on": [{"document": finding, "why": "shift the label by a day"},
+                                                               {"document": glossary, "digest": "c" * 64}]}
+    vertex.import_build(catalog, trained, client=FakeVertex())
+    relied = {d["document"]: d for d in catalog.explain_model("staffing-forecast", "v17")["relied_on"]}
+    assert relied[finding] | {} == {"document": finding, "title": "Hours lag two days", "revision": old, "pinned_by": "at_training",
+                                    "why": "shift the label by a day", "changed_since": True}  # it was built on the old text
+    assert (relied[glossary]["pinned_by"], relied[glossary]["changed_since"]) == ("digest", False)
+    assert catalog.overview()["changed_since_relied_on"] == [{"model": "staffing-forecast", "version": "v17", "document": finding}]
+    [by] = catalog.get(finding)["relied_on_by"]
+    assert (by["model"], by["version"], by["revision"], by["changed_since"]) == ("staffing-forecast", "v17", old, True)
+    assert vertex.import_build(catalog, trained, client=FakeVertex())["change"] == "unchanged"
+
+    with pytest.raises(CatalogError, match="Nothing registered as document:kb/missing.md"):
+        vertex.import_build(catalog, load("training_manifest.json") | {"version": "v18", "relied_on": ["document:kb/missing.md"]}, client=FakeVertex())
+    assert not catalog.db.execute("SELECT 1 FROM model_builds WHERE version = 'v18'").fetchone()  # refused before anything was written
+
+    later = catalog.put("document", {"repository": "kb", "path": "runbook.md"})["key"]  # registered after training: pinned as it is now
+    [added] = [d for d in catalog.rely("staffing-forecast", "v17", [later], why="retraining steps")["relied_on"] if d["document"] == later]
+    assert added["pinned_by"] == "current" and added["why"] == "retraining steps"
+
+
+def test_a_run_is_discovered_and_its_proposed_manifest_imports_once_its_files_are_recorded(catalog, capsys, database, monkeypatch, tmp_path):
+    from odcl import discover
+    from odcl.cli import main
+    job = json.loads(json.dumps(FILE_JOB))
+    trainer = job["jobDetail"]["taskDetails"][1]
+    trainer["outputs"] = {"model": {"artifacts": [{"uri": "gs://demo-models/staffing/v20", "schemaTitle": "system.Model"}]}}
+    metadata = {"model_name": "staffing-forecast", "version": "v20", "git_commit": "90c19d9d6f10b60919d40d73eb4d7a60c9fdcd7f",
+                "feature_columns": ["hours_at_cutoff", "tenure_days"], "label_column": "is_train"}
+    client = FakeVertex(job=job, objects=exported() | {"gs://demo-models/staffing/v20/model.bin": (MODEL, "1788318000000000"),
+                                                       "gs://demo-models/staffing/v20/metadata.json": (json.dumps(metadata).encode(), "5")})
+
+    draft = discover.propose(catalog, client, job["name"])
+    manifest = draft["manifest"]
+    assert (manifest["model"], manifest["version"], manifest["task"], manifest["execution"]) == (
+        "staffing-forecast", "v20", "train", trainer["execution"]["name"])
+    assert manifest["inputs"] == [{"field": "hours_at_cutoff", "role": "feature", "position": 0}, {"field": "tenure_days", "role": "feature", "position": 1},
+                                  {"field": "is_train", "role": "label"}]
+    assert manifest["artifact"] == {"uri": "gs://demo-models/staffing/v20/model.bin", "generation": "1788318000000000", "sha256": hashlib.sha256(MODEL).hexdigest()}
+    assert manifest["dataset_version"] == FILE_SET and draft["sources"]["inputs"] == "gs://demo-models/staffing/v20/metadata.json"
+    assert not draft["ready"] and "odcl record dataset-files" in " ".join(draft["review"])  # the files are not recorded yet
+
+    record_loader_output(catalog, client=client)
+    draft = discover.propose(catalog, client, job["name"])
+    assert draft["ready"] and draft["review"] == [] and draft["missing"] == []
+    assert vertex.import_build(catalog, draft["manifest"], client=client)["change"] == "added"  # the draft passes every check
+
+    client.pipeline_jobs = lambda project, since: [job, {"name": "projects/workforce-demo/locations/us-central1/pipelineJobs/other", "state": "PIPELINE_STATE_RUNNING"}]
+    found = {r["pipeline_run"]: r["model_versions"] for r in discover.runs(catalog, client, "workforce-demo", vertex._time("2026-10-01T00:00:00Z"))}
+    assert found == {job["name"]: ["staffing-forecast v20"], "projects/workforce-demo/locations/us-central1/pipelineJobs/other": []}
+
+    bare = json.loads(json.dumps(FILE_JOB))  # no Model output and no metadata.json: everything to fill in is named
+    draft = discover.propose(catalog, FakeVertex(job=bare, objects=exported()), bare["name"])
+    assert not draft["ready"] and {"model", "task", "artifact", "inputs"} <= set(draft["missing"])
+
+    monkeypatch.setattr(vertex, "client", lambda location: client)
+    out = tmp_path / "manifest.json"
+    assert main(["--database-url", database, "propose", "vertex-manifest", "--pipeline-run", job["name"], "--out", str(out)]) == 0
+    assert "Ready to import." in capsys.readouterr().out and json.loads(out.read_text())["version"] == "v20"
+    assert main(["--database-url", database, "discover", "vertex-runs", "--project", "workforce-demo", "--since", "2026-10-01"]) == 0
+    assert "recorded: staffing-forecast v20" in capsys.readouterr().out
+
+
+def test_files_a_notebook_wrote_say_so_as_stated(catalog):
+    notebook = {"kind": "notebook", "path": "notebooks/export.ipynb", "repository": "https://github.com/o/r", "commit": "abc123"}
+    result = filesets.record(catalog, client=files_client(), uris=[LOADER_OUT], created_by=notebook)
+    trace = builds.explain_dataset(catalog, result["reference"])
+    assert trace["produced_by"] is None and trace["created_by"] == notebook
+    assert "what wrote these files is as ana said (notebook notebooks/export.ipynb), not checked against a run" in trace["missing"]
+    later = filesets.record(catalog, client=files_client(), uris=[LOADER_OUT], created_by=notebook | {"note": "run on 2026-10-05"})
+    assert later["change"] == "changed" and builds.explain_dataset(catalog, result["reference"])["created_by"]["note"] == "run on 2026-10-05"
+    assert filesets.record(catalog, client=files_client(), uris=[LOADER_OUT])["change"] == "unchanged"  # saying nothing keeps it

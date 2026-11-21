@@ -161,3 +161,27 @@ def test_the_web_route_and_the_mcp_tool_answer_what_the_python_read_answers(data
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_a_page_whose_frontmatter_a_linter_owns_puts_the_odcl_block_in_an_html_comment(catalog, tmp_path):
+    page = tmp_path / "kb" / "finding.md"
+    page.parent.mkdir()
+    page.write_text("---\ntitle: Refunds are booked late\nowner: Finance\n---\n# Refunds are booked late\n\n"
+                    "Refunds land a day after the order closes.\n\n<!-- odcl\nkind: finding\ndescribes:\n"
+                    "  - key: column:warehouse.sales.orders.amount\n    says: refunds lag by a day\n-->\n\n## Why\n\nBatch timing.\n")
+    assert docs.import_docs(catalog, [str(page.parent)], repo_url=REPO, commit=COMMIT)["documents"]["added"] == 1
+    found = catalog.get("document:example-org/knowledge-base/finding.md")
+    assert found["doc_kind"] == "finding" and found["owner"] == "Finance" and found["title"] == "Refunds are booked late"
+    assert [(d["key"], d["says"]) for d in found["describes"]] == [("column:warehouse.sales.orders.amount", "refunds lag by a day")]
+    assert "odcl" not in found["text"] and "Batch timing." in found["text"]  # the comment is not part of the page's text
+    page.write_text("# No frontmatter at all\n\n<!-- odcl:\ndescribes:\n  - key: table:warehouse.sales.orders\n-->\n")
+    docs.import_docs(catalog, [str(page)], repo_url=REPO, commit=COMMIT)
+    assert [d["key"] for d in catalog.get("document:example-org/knowledge-base/finding.md")["describes"]] == ["table:warehouse.sales.orders"]
+
+
+def test_an_odcl_comment_shown_as_an_example_in_a_code_block_is_not_the_page_s_block():
+    body = "# How to tag a page\n\n```markdown\n<!-- odcl\nkind: finding\n-->\n```\n\nThat is all.\n"
+    block, kept = docs.odcl_block(None, body)
+    assert block is None and kept == body
+    block, kept = docs.odcl_block(None, body + "\n<!-- odcl\nkind: guide\n-->\n")
+    assert block == {"kind": "guide"} and "kind: finding" in kept

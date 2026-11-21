@@ -22,12 +22,15 @@ def sha256(path) -> str:
 
 
 def build(*, model: str, version: str, pipeline_run: str, task: str, training_commit: str | None, prediction_cutoff: str | None,
-          dataset_version: str, inputs: list[dict], artifact_uri: str, artifact_path, generation: str, execution: str | None = None) -> dict:
+          dataset_version: str, inputs: list[dict], artifact_uri: str, artifact_path, generation: str, execution: str | None = None,
+          relied_on: list | None = None) -> dict:
     """A manifest for an artifact already uploaded to `artifact_uri` (at object `generation`) from `artifact_path`.
 
     `inputs` are the fields of the training matrix as the code used them, each {"field", "role", "position"},
     built from the matrix at fit time rather than from configuration. `dataset_version` is the identifier the
-    build handed to training, project.dataset.snapshot@time."""
+    build handed to training, project.dataset.snapshot@time. `relied_on` names documents the model was built on, such
+    as a finding about a field: each a document key, or {"document", "digest" or "revision", "why"}. Without a digest
+    or revision, the catalog pins the revision current when the training task ended."""
     for item in inputs:
         if item.get("role") not in ROLES or not item.get("field"):
             raise ValueError(f"Each input needs a field and a role, one of {', '.join(ROLES)}: {item}")
@@ -35,4 +38,5 @@ def build(*, model: str, version: str, pipeline_run: str, task: str, training_co
             **({"execution": execution} if execution else {}), "training_commit": training_commit, "prediction_cutoff": prediction_cutoff,
             "dataset_version": dataset_version,
             "inputs": [{"field": i["field"], "role": i["role"], **({"position": i["position"]} if i.get("position") is not None else {})} for i in inputs],
-            "artifact": {"uri": artifact_uri, "generation": str(generation), "sha256": sha256(Path(artifact_path))}}
+            "artifact": {"uri": artifact_uri, "generation": str(generation), "sha256": sha256(Path(artifact_path))},
+            **({"relied_on": relied_on} if relied_on else {})}

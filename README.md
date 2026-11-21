@@ -34,7 +34,7 @@ A model version's pins reach its project's `uses` links. Importing the newest ve
 
 ## Try it
 
-You need a PostgreSQL database the catalog may create its tables in.
+You need Python 3.14 or later and a PostgreSQL database the catalog may create its tables in.
 
 ```sh
 uv sync --all-extras
@@ -73,12 +73,22 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 | `odcl add table\|column\|project ...` | Register by hand |
 | `odcl import --dbt PATH [--select MODEL...]` | Read a dbt project |
 | `odcl import --bigquery TABLE...` | Read tables and their columns from BigQuery |
-| `odcl sync bigquery-jobs --project PROJECT` | Read the query jobs a project ran since the last sync |
+| `odcl import --postgres URL [--schema S...]` | Read a PostgreSQL database's tables, views, view lineage and foreign keys |
+| `odcl sync bigquery-jobs --project PROJECT [--since T --until T \| --pipeline-run JOB [--task T]]` | Read the query jobs a project ran since the last sync, or in one window |
 | `odcl history table KEY [--since 7d] [--patterns]` | Which query jobs read or wrote this table? |
 | `odcl import --dataform INVOCATION` | Read what a Dataform run compiled and how each action ran |
 | `odcl handoff --invocation INVOCATION --target TABLE --snapshot SNAPSHOT` | Record that a build handed on a snapshot of its output |
 | `odcl explain dataset SNAPSHOT[@TIME]` | Which build, job, file and inputs a dataset version came from |
 | `odcl record dataset-files --pipeline-run JOB --task TASK --output NAME [--from-table TABLE] [--export-job P:L.JOB \| --find-export-job]` | Record the files a pipeline task exported as a dataset version, bound to the BigQuery job that wrote them |
+| `odcl import --sql-definitions FILE.jsonl` | Read tables and the SELECT that builds each, from any source |
+| `odcl created-by TABLE SCRIPT\|NOTEBOOK\|URL [--command] [--note]` | Say what created a table or file |
+| `odcl references COLUMN TARGET...` | Say which column a column's values are drawn from (a foreign key) |
+| `odcl instances DEFINITION PATTERN...` | Say which tables are copies of a definition, so lineage and users go through them |
+| `odcl privacy set KEY... [--pii] [--data-category] [--retention] [--scrubbing]` | Say which data is personal, how it is scrubbed and kept |
+| `odcl privacy export [--pii-only] [--table T]` | Every column with its privacy fields, as CSV |
+| `odcl discover vertex-runs --project P` | Which pipeline runs have a model version recorded? |
+| `odcl propose vertex-manifest --pipeline-run JOB [--out FILE]` | Draft a run's training manifest for review |
+| `odcl rely MODEL --version V DOCUMENT...` | Record that a model version relied on documents, at the revision it was trained on |
 | `odcl import --vertex-manifest PATH\|gs://...` | Check a training manifest against Vertex AI and Cloud Storage, and record the model version |
 | `odcl explain model NAME --version V` | Which run, artifact, dataset version and raw columns a model version came from |
 | `odcl overview` | Counts, and data that changed after a project used it |
@@ -105,10 +115,10 @@ The database is one PostgreSQL database: `--database-url`, else `$ODCL_DATABASE_
 
 ## Importing from BigQuery
 
-The BigQuery commands need the `bigquery` extra and Python 3.14 or later, because they read through [Sounding](https://github.com/lawwu/sounding). Sign in once with `gcloud auth application-default login`. Every call is free: `tables.get` for schemas and `jobs.list` for jobs. No query is run.
+The BigQuery commands need the `bigquery` extra, and read through [Sounding](https://github.com/lawwu/sounding). Sign in once with `gcloud auth application-default login`. Every call is free: `tables.get` for schemas and `jobs.list` for jobs. No query is run.
 
 ```sh
-uv sync --all-extras --python 3.14
+uv sync --all-extras
 uv run odcl import --bigquery my-project.features.shift_inputs my-project.raw.shift_totals
 uv run odcl sync bigquery-jobs --project my-job-project
 uv run odcl history table my-project.features.shift_inputs --since 7d --patterns
@@ -119,6 +129,11 @@ uv run odcl history table my-project.features.shift_inputs --since 7d --patterns
 **Job history.** `sync bigquery-jobs` reads the query jobs created in one project, the project the jobs ran in, which may differ from where the tables live. Reading other people's jobs needs `bigquery.jobs.listAll` on that project.
 
 - The first sync goes back 7 days (`--backfill`, up to the 180 days BigQuery keeps). Each later sync starts 6 hours before the last finished window ended, or at the oldest job still running, and keeps every job once.
+- To read one window instead, such as the minutes a pipeline task ran, give `--since` and `--until` (ISO 8601, UTC unless it says; `--since` also takes a span back from now like `12h`), or `--pipeline-run JOB` and optionally `--task NAME` to use the window that run or task reports. Its jobs are kept like any others, but the window is not recorded as read through, so the next regular sync still starts where the last one ended. An `--until` later than now is read as now, so a regular sync is never recorded as read past the present.
+
+  ```sh
+  uv run odcl sync bigquery-jobs --project my-job-project --pipeline-run projects/P/locations/L/pipelineJobs/J --task load-data
+  ```
 - A sync that is interrupted keeps the pages it read but does not record the window as finished, so the next sync reads it again.
 - A job that finished is never replaced by an older reading that says it is still running.
 - Jobs labelled as a metadata collector's own (`sounding_action`, `odcl_action`) are left out.
@@ -131,6 +146,23 @@ A job shows that a table was queried. It does not show which fields a model was 
 
 Grouping uses the catalog's own digest of the shape. BigQuery's normalized query hash is only in `INFORMATION_SCHEMA`, which costs a query to read.
 
+## Importing from PostgreSQL
+
+odcl reads a PostgreSQL database's own catalog: its tables (ordinary, partitioned and foreign), views and materialized views, their columns, and their foreign keys. It reads no rows.
+
+```sh
+uv run odcl import --postgres postgresql://reader@db.internal/shop --schema public sales
+```
+
+Keep the password out of the URL, where it would land in shell history: set `PGPASSWORD` or use a `~/.pgpass` file, which libpq reads.
+
+- **Keys** are `database.schema.table` (`--database-name` to key them by another name), lower-cased, like every key. The URL, and any password in it, is not kept.
+- **Descriptions** are the tables' and columns' comments; each column keeps its type, position and whether it may be null.
+- **View lineage.** Each view's SQL is read with every table it reads named by its schema, and each of its columns is traced through it as a Dataform definition is, in PostgreSQL's dialect: through CTEs and `SELECT *`, from views to the tables under them, and tagged `lineage:partial` when only partly traced. Quoted mixed-case names match their lower-cased keys.
+- **Foreign keys** become `references` links. A partitioned table's key is read once, not again for each partition. A key to a schema not read is named in `skipped`, as is a name the catalog cannot key (and any key on such a column), and a second table or column whose name differs from another's only in case.
+- **Tables in schemas not read**, that a view reads, are registered by name and named in `skipped` on every import until something registers them. The column names a view's SQL gives them are not taken as their full list, so importing again traces the view the same way.
+- Entries merge with what other importers said, under `postgres` in `source`, and are applied together. Importing again changes nothing unless the database changed.
+
 ## Importing from Dataform
 
 ```sh
@@ -142,10 +174,27 @@ This reads one workflow invocation and the compilation result it ran, with free 
 
 - **Definitions.** Every table the compilation declares or builds becomes a table entry, with its file and the tables it reads. Every column the compiled query selects becomes a column entry with its expression and the columns it is computed from, traced by [sqlglot](https://github.com/tobymao/sqlglot). A column it cannot trace fully is tagged `lineage:partial`; SQL it cannot read marks the table's columns partial and drops their old definitions.
 - **Runs.** The invocation and each action are recorded as executions: state, times, and the BigQuery job ID. The job itself is looked up in synced query history when a trace is read, so `odcl sync bigquery-jobs` may run before or after the import.
-- **Shared entries.** BigQuery and Dataform describe the same physical tables and columns, so they share keys. Each import adds what it knows (BigQuery the types, Dataform the expressions) and keeps what the other said. Each keeps its own details under its name in `source`.
+- **Shared entries.** BigQuery and Dataform describe the same physical tables and columns, so they share keys. Each import adds what it knows (BigQuery the types, Dataform the expressions) and keeps what the other said. Each keeps its own details under its name in `source`, tags included: an import replaces only the tags that importer set before, and keeps tags people and other importers added.
 - **Order.** An invocation's definitions are applied only if its compilation is at least as new as the newest already imported from that repository. An older invocation imported late still has its runs recorded, without a pinned definition, and its trace says so.
 
 Import an invocation by name for now. Discovering invocations is not built yet.
+
+## Importing SQL definitions from anywhere
+
+A registry, a hand-kept list of views, or any tool odcl has no importer for can write its definitions as JSON Lines, one table per line, and odcl reads them the way it reads a Dataform compilation: each column is traced through the SELECT, `SELECT *` expands to what the catalog knows of the tables read, and a column traced only in part is tagged `lineage:partial`.
+
+```json
+{"target": "proj.ds.orders", "declaration": true, "description": "Orders, as the billing system loads them"}
+{"target": "proj.ds.by_region", "type": "view", "file": "views/by_region.sql", "description": "Totals by region", "select": "SELECT region, SUM(amount) AS total FROM proj.ds.orders GROUP BY region", "dependencies": [], "columns": {"total": "Order amount, summed"}}
+```
+
+```sh
+uv run odcl import --sql-definitions definitions.jsonl            # --dialect for SQL other than BigQuery's (--system if not the dialect's name)
+```
+
+`target` is required, and so is `select` unless the line is a `declaration` (a source table with no SQL). `dependencies` adds tables the SELECT does not name. Entries merge with what other importers said, under `sql_definitions` in `source`; the whole file is applied together, and a line that cannot be read is refused with its line number before anything is written.
+
+The result names what could not be linked rather than failing: `unresolved`, the tables read that are neither defined in the file nor registered (registered by name only), and `untraced`, the targets whose SQL sqlglot cannot read. A Dataform import reports the same two lists.
 
 ## Binding data to the build that made it
 
@@ -245,6 +294,18 @@ staffing-forecast / v17
 
 Redefining the feature and training a later version leaves this answer unchanged. A model trained on a file set traces to the files (how many objects, generations pinned), the task that wrote them and the table they were exported from, and stops there. Its project's `uses` link points at that table. `odcl` reads Google with your Application Default Credentials, which bill each request to their quota project. If that project has no billing, Google refuses with a billing error; set `GOOGLE_CLOUD_QUOTA_PROJECT` to one that does.
 
+### Finding runs and drafting their manifests
+
+A training task that does not write a manifest can still be imported. odcl lists a project's pipeline runs, says which already have a model version recorded, and drafts a manifest for one from what the run left behind:
+
+```sh
+uv run odcl discover vertex-runs --project workforce-demo --location us-central1 --since 14d
+uv run odcl propose vertex-manifest --pipeline-run projects/P/locations/L/pipelineJobs/J --out manifest.json
+uv run odcl import --vertex-manifest manifest.json        # after reviewing it
+```
+
+The draft takes the trainer from the task with a Model output, the artifact from the one file in it (its generation and SHA-256 read from Cloud Storage), and the inputs from the `metadata.json` beside it: `feature_columns` in order, the `label_column`, and the model name, version and commit when it says them. The dataset version is the data loader's output, named as `odcl record dataset-files` names it. It says where each value came from and lists what to review: a guess (several tasks that could be the trainer, a version taken from the job id), anything not found, and the files to record first. `--trainer`, `--loader`, `--loader-output`, `--model` and `--version` settle any guess. Nothing is written until the draft is imported, and the import checks it like any other manifest.
+
 ## OpenLineage
 
 Any tool with an [OpenLineage](https://openlineage.io) integration (Airflow, Spark, dbt, Dagster, Flink, …) can report its runs to the catalog. Point its HTTP transport at a server started with `odcl serve --accept-lineage`. Events are posted to `/api/v1/lineage`, the same path Marquez uses, so the usual configuration works:
@@ -324,7 +385,16 @@ uv run odcl import --docs ../knowledge-base/docs
 uv run odcl docs warehouse.sales.orders.status_code
 ```
 
-- **Importing.** `import --docs` reads every `*.md` file with an `odcl:` block under the folders it is given and counts the others as skipped. A page becomes a `document` entry keyed `document:<repo>/<path>`, holding its title, owner, kind, text, headings with their anchors, commit, web address and content digest.
+- **When another tool owns the frontmatter**, such as a linter that allows only its own keys, put the block in an HTML comment anywhere in the page instead (outside code blocks: one shown as an example in a fence is left alone). It holds what the `odcl:` key would, and is left out of the page's text:
+
+  ```markdown
+  <!-- odcl
+  kind: finding
+  describes:
+    - key: column:warehouse.sales.orders.amount
+  -->
+  ```
+- **Importing.** `import --docs` reads every `*.md` file with an `odcl:` block (or `<!-- odcl -->` comment) under the folders it is given and counts the others as skipped. A page becomes a `document` entry keyed `document:<repo>/<path>`, holding its title, owner, kind, text, headings with their anchors, commit, web address and content digest.
 - **Commit and web address.** They come from git when the page is in a checkout, else from `--commit` and `--repo-url`.
 - **Revisions.** Importing an unchanged page changes nothing; an edited one is a new revision.
 - **Search** covers the title, headings and text.
@@ -337,7 +407,54 @@ uv run odcl docs warehouse.sales.orders.status_code
 
 The web page has a page for each document, with its links grouped by section and its text shown as text; nothing in a page runs. Every entry has a "Documented in" panel, and search finds documents. The MCP server has a `documents_for` tool, and `find_data` returns documents. `Catalog.put("document", …)` and `odcl.docs.import_docs` are the Python interface.
 
-Not built yet: a model version that relied on a document revision (`relied_on`), and the frontmatter in an HTML comment for pages whose frontmatter a linter owns.
+**A model version can rely on a document**, such as a finding about how a field behaves. The training manifest lists it under `relied_on` (a document key, or `{"document", "digest" or "revision", "why"}`), or `odcl rely MODEL --version V DOCUMENT… --why TEXT` records it afterwards. Each is pinned at one revision: the one the manifest names or whose content digest it gives, else the one current when the training task ended. When the page is corrected later, `odcl explain model`, the model and document pages and `odcl overview` say which model versions used the old text.
+
+## What created a table or file
+
+Some data is made by a script or a notebook rather than a pipeline the catalog reads. A table (which in odcl also stands for a view or a file) can say what created it: its kind (`script`, `notebook`, `query`, `job`, `manual` or `other`), path, repository, commit, link, the command that ran it and a note.
+
+```sh
+uv run odcl created-by lake.cohorts.monthly notebooks/build_cohort.ipynb --note "run by hand each month"
+uv run odcl created-by warehouse.ref.holidays make_holidays.py --command "python make_holidays.py --year 2027"
+uv run odcl record dataset-files --uri gs://bucket/cohort/2026-10 --created-by notebooks/export.ipynb
+```
+
+Given a local file, the repository, the path in it, the commit that last changed it and a link come from git, and the kind from its extension (`.ipynb` is a notebook). A file with uncommitted changes is marked so, because that commit is not the code that ran. A link or a path in `--repo-url` works too. It is what a person said, not something odcl checked: the web page and `odcl explain` show it "as stated". For files a pipeline task did not write, `record dataset-files --created-by` fills the "written by" a URI alone leaves unknown. Imports that merge keep it; `--clear` forgets it.
+
+## Foreign keys
+
+A column can say which column its values are drawn from: a `references` link, pinned like every other link. It is not lineage, so it changes neither what a column is built from nor who uses it. A column lists what it references and what references it, and a table lists its foreign keys and the columns of other tables that reference it.
+
+```sh
+uv run odcl references shop.public.orders.customer_id shop.public.customers.id     # no target clears them
+uv run odcl add column shop.public.orders customer_id --references shop.public.customers.id
+```
+
+Importers fill them in: BigQuery's table constraints and Postgres foreign keys. A key to a table that is neither registered nor in the same import is left out and named in the import's result: `unresolved_references` for BigQuery, `skipped` for Postgres.
+
+## Copies of one definition
+
+One definition is often deployed many times: the same table in every tenant's project, say. A definition table can name its copies by glob patterns over their paths, and the catalog links each match with an `instance_of` link:
+
+```sh
+uv run odcl instances core.sales.daily_totals 't-*.sales.daily_totals'
+```
+
+- **Lineage goes through copies.** A copy is read as built from its definition, and each of its columns from the definition's column of the same name. So the lineage of a model's input runs from the tenant copy it read to the definition's SQL and on to what that reads, and the definition's columns show the projects that use any copy.
+- **Patterns** are kept on the definition and resolved whenever it is written. A table registered later that matches is linked when it is registered; an import links all the copies it registered at its end, in one new revision of the definition.
+- **Shown** on both: a definition lists its patterns and copies, and a copy names its definition. `Catalog.set_instances` is the Python interface; `odcl instances DEFINITION` with no patterns clears them.
+
+## Privacy
+
+Tables and columns can say whether they hold personal data (`pii`), how it is scrubbed (`scrubbing`: hashed, truncated, removed…), their data category (`data_category`) and how long they are kept (`retention`). A column that names no category or retention of its own takes its table's. Only what is said is kept: a column that says nothing about `pii` is unknown, not "no".
+
+```sh
+uv run odcl privacy set warehouse.crm.customers --data-category contact --retention 400d
+uv run odcl privacy set warehouse.crm.customers.email --pii yes --scrubbing hashed
+uv run odcl privacy export --pii-only > privacy.csv        # or --json; --table for one table
+```
+
+`odcl add table|column` take the same flags. A dbt project can say them in `meta` (directly, or under `meta.privacy`) on a source, a model or a column. Imports that merge (BigQuery, Dataform, SQL definitions, OpenLineage) keep what was set; a dbt import says everything about its models, so for those keep the fields in dbt's `meta`. The web page shows them on each entry, and `GET /v1/privacy` answers what `privacy export` does.
 
 ## For agents
 
@@ -358,7 +475,7 @@ with Catalog() as catalog:
     catalog.used_by("churn.bronze.accounts.plan")
 ```
 
-`Catalog` is the whole interface: `put`, `apply`, `use`, `find`, `get`, `lineage`, `used_by`, `uses`, `table_history`, `query_jobs`, `tables`, `projects`, `runs`, `models`, `overview`. `apply` registers a batch in one transaction: all of it, or none. With `merge=True`, fields a payload leaves out keep what the entry already says. Builds are read and written through `odcl.dataform.import_invocation`, `odcl.builds.record_handoff` and `odcl.builds.explain_dataset`; model versions through `odcl.vertex.import_build` and `Catalog.explain_model`; OpenLineage events through `odcl.openlineage.ingest`. `odcl.server.make_server` returns the HTTP server.
+`Catalog` is the whole interface: `put`, `apply`, `use`, `find`, `get`, `lineage`, `used_by`, `uses`, `table_history`, `query_jobs`, `tables`, `projects`, `runs`, `models`, `overview`. `apply` registers a batch in one transaction: all of it, or none. It takes every entry lock first (512 stripes that keys hash to, in order), so an import of any size fits PostgreSQL's lock table and two imports run one after the other rather than deadlock. With `merge=True`, fields a payload leaves out keep what the entry already says, and the tags a payload sends belong to the one importer named in its `source`, so they replace only that importer's earlier tags. Without `merge` a payload says the whole entry, except what is said beside it by its own commands: copies (`instances`), `created_by`, a column's `references` and the privacy fields are kept when the payload leaves them out, and cleared when it sets them to null. So a dbt import, which does not merge, keeps them. Builds are read and written through `odcl.dataform.import_invocation`, `odcl.builds.record_handoff` and `odcl.builds.explain_dataset`; model versions through `odcl.vertex.import_build` and `Catalog.explain_model`; OpenLineage events through `odcl.openlineage.ingest`. `odcl.server.make_server` returns the HTTP server.
 
 ## Developing
 
@@ -421,7 +538,7 @@ The tag starts `release.yml`, which refuses a tag that isn't on `main`, whose ve
 ## Not built yet
 
 - The machine-learning shape on top: training and serving features, labels, training datasets and model cards.
-- Discovering Vertex AI pipeline runs; a model version is imported from its manifest for now.
+- Proposing manifests for pipelines laid out differently from a trainer with a Model output and a `metadata.json` beside it.
 - Sending the catalog's runs and lineage out as OpenLineage events.
 - Discovering Dataform invocations, and Dataform runs started from the CLI rather than the managed service.
 - Sign-in and permissions. Today anyone who can reach the database can read and write the catalog.

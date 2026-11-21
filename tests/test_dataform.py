@@ -50,7 +50,7 @@ def snapshot_facts(base=TARGET, time="2026-09-02T02:00:00Z", extra_fields=()):
 
 def sync_history(catalog, extra=()):
     """Read the fixture's BigQuery job history into the catalog the way `odcl sync bigquery-jobs` does."""
-    pytest.importorskip("sounding", reason="query history is read through Sounding, which needs Python 3.14")
+    pytest.importorskip("sounding", reason="the BigQuery importer needs the bigquery extra")
     from types import SimpleNamespace as NS
 
     from google.cloud import bigquery as gbq
@@ -91,7 +91,7 @@ def test_an_invocation_registers_its_definitions_and_records_its_runs(catalog):
 
 
 def test_bigquery_and_dataform_describe_the_same_columns_once(catalog):
-    pytest.importorskip("sounding", reason="the BigQuery importer needs Sounding, which needs Python 3.14")
+    pytest.importorskip("sounding", reason="the BigQuery importer needs the bigquery extra")
     from google.cloud import bigquery as gbq
 
     from odcl import bigquery as bq
@@ -241,7 +241,7 @@ def test_the_real_client_pages_through_every_action():
 
 
 def test_the_command_line_imports_a_build_records_its_handoff_and_explains_it(database, monkeypatch, capsys):
-    pytest.importorskip("sounding", reason="reading the snapshot goes through Sounding, which needs Python 3.14")
+    pytest.importorskip("sounding", reason="the BigQuery importer needs the bigquery extra")
     from odcl import bigquery as bq
     from odcl.cli import main
     monkeypatch.setattr(dataform, "client", lambda: FakeDataform())

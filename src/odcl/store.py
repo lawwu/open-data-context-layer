@@ -27,6 +27,7 @@ import os
 import re
 import uuid
 from collections import deque
+from fnmatch import fnmatchcase
 from datetime import datetime, timedelta, timezone
 from importlib import resources
 
@@ -40,12 +41,15 @@ DOCUMENT = re.compile(r"^[a-z0-9_][a-z0-9_.\-/@~+]{0,499}$")
 PATH = re.compile(r"^[a-z0-9_][a-z0-9_.\-$]{0,299}$")
 COLUMN = re.compile(r"^[a-z0-9_][a-z0-9_.\-$]{0,149}$")  # dots separate the levels of a nested field
 NAME = re.compile(r"^[a-z0-9_][a-z0-9_.\-]{0,99}$")
+GLOB = re.compile(r"^[a-z0-9_.\-$*?\[\]!]{1,300}$")  # a pattern over table paths, such as t-*.sales.daily_totals
 TEXT = {"table": {"system": 100, "layer": 50, "owner": 200, "type": 50},
         "column": {"dtype": 200, "definition": 4000, "owner": 200},
         "project": {"owner": 200, "repository": 500, "status": 50}}
+PRIVACY = {"data_category": 100, "retention": 100, "scrubbing": 200}  # with `pii`, on tables and columns: kept only when said
 HOW = ("direct", "column", "table", "downstream")  # how a project comes to depend on an entry, strongest first
 
 MIGRATIONS_LOCK = 0x6F64636C  # "odcl": one migration run at a time per database
+ENTRY_LOCKS = 512  # entries are locked by stripe, so an import of any size holds at most this many locks
 TOKEN = re.compile(r"[a-z0-9]+")
 
 
@@ -94,9 +98,34 @@ def stamp(at: datetime) -> str:
 
 def search_text(body: dict) -> str:
     """The words an entry is found by, split the same way a query is."""
-    words = " ".join(str(body.get(f) or "") for f in ("title", "description", "definition", "owner", "layer", "system", "dtype", "doc_kind", "text"))
+    words = " ".join(str(body.get(f) or "") for f in ("title", "description", "definition", "owner", "layer", "system", "dtype", "doc_kind", "text",
+                                                      "data_category"))
+    words += " pii" if body.get("pii") else ""
+    words += " " + " ".join(str((body.get("created_by") or {}).get(f) or "") for f in ("kind", "path", "note"))
     words += " " + " ".join(h["text"] for h in body.get("headings") or [])
     return " ".join(TOKEN.findall((words + " " + " ".join(body["tags"])).lower()))
+
+
+def _edges(mine: str, other: str) -> str:
+    """The lineage edges at `reach.key`, for a recursive walk: its derived_from links, found by index, and the edges
+    copies of a definition add (the `copies` CTE, read once from copy_edges). `mine` is the column `reach.key` is in."""
+    return (f"(SELECT c.{mine} AS near, c.{other} AS far, c.target_revision, c.target_head FROM current_links c "
+            f"WHERE c.relation = 'derived_from' AND c.{mine} = reach.key "
+            f"UNION ALL SELECT i.{mine}, i.{other}, i.target_revision, i.target_head FROM copies i WHERE i.{mine} = reach.key)")
+
+
+def reference_entries(catalog, foreign_keys, registering: set[str]) -> tuple[list[tuple[str, dict]], list[str]]:
+    """Entries that give columns their foreign keys, for an importer to apply after the tables and columns it read.
+    `foreign_keys` is (table path, column name, referenced column key) for each column of each key. A referenced column
+    that is neither registered nor among the keys being registered is left out and named in the second list."""
+    wanted: dict[tuple[str, str], list[str]] = {}
+    unresolved = []
+    for table, column, target in foreign_keys:
+        if target in registering or catalog._head(target):
+            wanted.setdefault((table, column), []).append(target)
+        else:
+            unresolved.append(f"column:{table}.{column} -> {target}")
+    return [("column", {"table": f"table:{t}", "name": c, "references": sorted(set(targets))}) for (t, c), targets in sorted(wanted.items())], unresolved
 
 
 class CatalogError(Exception):
@@ -133,6 +162,11 @@ class Catalog:
     def __init__(self, dsn: str | None = None, actor: str | None = None):
         self.actor = (actor or os.environ.get("ODCL_USER") or getpass.getuser())[:200]
         self.db = connect(dsn, autocommit=True)
+        self._importing = 0     # > 0 inside apply(), which holds every entry lock
+        self._new_tables = None  # inside apply(), tables first registered, to link to their definitions once at the end
+        # Catalog reads are many short index lookups. A recursive walk's cost is estimated high enough that PostgreSQL
+        # would compile it (JIT), which takes far longer than running it, so compilation is off for this connection.
+        self.db.execute("SET jit = off")
         try:
             version = self.db.execute("SELECT max(version) AS version FROM schema_migrations").fetchone()["version"] or 0
         except psycopg.errors.UndefinedTable:
@@ -169,8 +203,19 @@ class Catalog:
         return self.db.execute("SELECT r.* FROM entries e JOIN revisions r ON r.id=e.head_revision WHERE e.key=%s", (key,)).fetchone()
 
     def _lock(self, key: str) -> None:
-        """Hold an entry, registered yet or not, until the transaction ends, so its head is compared and moved by one writer at a time."""
-        self.db.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (key,))
+        """Hold an entry, registered yet or not, until the transaction ends, so its head is compared and moved by one writer at a time.
+
+        The lock is one of ENTRY_LOCKS stripes that keys hash to, not one per key: an import writes every entry in one
+        transaction, and one lock per entry would run past PostgreSQL's lock table (max_locks_per_transaction) at a few
+        thousand entries. An import holds every stripe already (see `_lock_all`), so it takes none here."""
+        if self._importing:
+            return
+        self.db.execute("SELECT pg_advisory_xact_lock(%s, (hashtextextended(%s, 0) & %s)::int)", (MIGRATIONS_LOCK, key, ENTRY_LOCKS - 1))
+
+    def _lock_all(self) -> None:
+        """Hold every stripe, in order, until the transaction ends. An import takes them all before it writes, so two
+        imports run one after the other instead of each holding stripes the other waits for (a deadlock)."""
+        self.db.execute("SELECT count(pg_advisory_xact_lock(%s, s)) FROM generate_series(0, %s) AS s", (MIGRATIONS_LOCK, ENTRY_LOCKS - 1))
 
     @staticmethod
     def _view(row) -> dict:
@@ -214,14 +259,31 @@ class Catalog:
                 if prior:
                     said = prior["body"]
                     kept = {"description": said["description"] or None, **{f: said.get(f) for f in TEXT[kind]}, "tags": said["tags"],
-                            "derived_from": [link["to"] for link in said["links"] if link["relation"] == "derived_from"]}
+                            **({f: said.get(f) for f in ("pii", *PRIVACY)} if kind != "project" else {}),
+                            **({"instances": said.get("instances"), "created_by": said.get("created_by")} if kind == "table" else {}),
+                            "derived_from": [link["to"] for link in said["links"] if link["relation"] == "derived_from"],
+                            **({"references": [link["to"] for link in said["links"] if link["relation"] == "references"]} if kind == "column" else {})}
                     require(isinstance(payload.get("source") or {}, dict), "source", "source is a small object saying where the entry came from")
                     p = {**kept, **{k: v for k, v in payload.items() if v is not None}, "source": {**said["source"], **(payload.get("source") or {})}}
+                p = self._own_tags(p, payload, prior["body"] if prior else None)
+            elif kind != "project":
+                p = self._keep_annotations(kind, key, p)
             if kind != "project":
                 for parent in names(p.get("derived_from"), "derived_from"):
                     parent = self.resolve(parent, (kind,))
                     require(parent != key, "derived_from", f"{key} cannot be derived from itself")
                     links.append({"relation": "derived_from", "to": parent, "revision": self._head(parent)["id"]})
+            if kind == "column":  # a foreign key: the columns this one's values are drawn from; not lineage
+                for target in names(p.get("references"), "references", 20):
+                    target = self.resolve(target, ("column",))
+                    require(target != key, "references", f"{key} cannot reference itself")
+                    links.append({"relation": "references", "to": target, "revision": self._head(target)["id"]})
+            instances = None
+            if kind == "table" and p.get("instances") is not None:
+                instances = names(p["instances"], "instances", 50)
+                instances = sorted({i.lower().removeprefix("table:") for i in instances})
+                require(all(GLOB.match(i) for i in instances), "instances", "An instance pattern is a table path with * ? or [ ] in it, like t-*.sales.orders")
+                links += self._instance_links(key, instances)
             tags = p.get("tags") or []
             require(isinstance(tags, list) and len(tags) <= 30 and all(isinstance(t, str) and 0 < len(t) <= 60 for t in tags), "tags", "Use at most 30 short tags")
             source = p.get("source") or {}
@@ -229,8 +291,85 @@ class Catalog:
             body = {"key": key, "kind": kind, "title": title, **extra,
                     "description": text(p.get("description"), "description", 4000, optional=kind != "project") or "",
                     **{field: text(p.get(field), field, limit, optional=True) for field, limit in TEXT[kind].items()},
+                    **(self._privacy(p) if kind != "project" else {}), **({"instances": instances} if instances else {}),
+                    **({"created_by": created} if kind == "table" and (created := self._created_by(p)) else {}),
                     "tags": sorted(set(tags)), "source": source, "links": links}
-            return self._write(body)
+            written = self._write(body)
+            if kind == "table" and written["change"] == "added":
+                if self._new_tables is not None:
+                    self._new_tables.append(key)
+                else:
+                    self._link_to_definitions([key])
+            return written
+
+    def _keep_annotations(self, kind: str, key: str, p: dict) -> dict:
+        """Without `merge`, a payload says the whole entry, but an importer such as dbt does not know what was said
+        beside it: the copies of a definition, what created a table, a column's foreign keys and the privacy fields.
+        Those it leaves out (the field is absent, not None) keep what the entry says now; their own commands change them."""
+        fields = ("pii", *PRIVACY, *(("instances", "created_by") if kind == "table" else ()), *(("references",) if kind == "column" else ()))
+        if all(f in p for f in fields):
+            return p
+        self._lock(key)
+        prior = self._head(key)
+        if not prior:
+            return p
+        said = prior["body"]
+        kept = {f: said[f] for f in fields if f not in p and f in said}
+        if "references" in fields and "references" not in p:
+            kept["references"] = [link["to"] for link in said["links"] if link["relation"] == "references"] or None
+        return {**p, **{k: v for k, v in kept.items() if v is not None}}
+
+    def _instance_links(self, key: str, patterns: list[str]) -> list[dict]:
+        """`instance_of` links from a definition table to every other table whose path one of its patterns matches."""
+        found = [r for r in self.db.execute("SELECT key, head_revision FROM entries WHERE kind = 'table' ORDER BY key")
+                 if r["key"] != key and any(fnmatchcase(r["key"][6:], p) for p in patterns)]
+        return [{"relation": "instance_of", "to": r["key"], "revision": r["head_revision"]} for r in found]
+
+    def _link_to_definitions(self, keys: list[str]) -> None:
+        """Tables registered for the first time may be copies of definitions; write each such definition again, once,
+        to link them."""
+        if not keys:
+            return
+        for r in self.db.execute("""SELECT r.body FROM revisions r JOIN entries e ON e.key = r.entry_key AND e.head_revision = r.id
+                                    WHERE r.body ? 'instances' ORDER BY r.entry_key""").fetchall():
+            if any(key != r["body"]["key"] and fnmatchcase(key[6:], p) for key in keys for p in r["body"]["instances"]):
+                self.put("table", {"path": r["body"]["path"]}, merge=True)
+
+    @staticmethod
+    def _created_by(p: dict) -> dict | None:
+        from .provenance import check
+        return check(p.get("created_by"))
+
+    @staticmethod
+    def _privacy(p: dict) -> dict:
+        """Whether a table or column holds personal data, its data category, how long it is kept and how it is scrubbed.
+        Only what is said is kept, so entries that say none of it read as they did before these fields existed."""
+        pii = p.get("pii")
+        if isinstance(pii, str):
+            require(pii.lower() in ("yes", "no", "true", "false"), "pii", "pii is yes or no")
+            pii = pii.lower() in ("yes", "true")
+        require(pii is None or isinstance(pii, bool), "pii", "pii is yes or no")
+        found = {field: text(p.get(field), field, limit, optional=True) for field, limit in PRIVACY.items()}
+        return {k: v for k, v in {"pii": pii, **found}.items() if v is not None}
+
+    @staticmethod
+    def _own_tags(p: dict, payload: dict, said: dict | None) -> dict:
+        """Under `merge`, the tags an importer sends are its own: kept under its name in `source`, so a later import
+        by it replaces only those and keeps what people and other importers tagged. An importer is the one name in
+        the payload's `source`. An entry an importer wrote before tags were kept this way records no owner, so that
+        importer's next import takes its tags over; after each importer has imported once more, their tags add up."""
+        source, tags = payload.get("source"), payload.get("tags")
+        if tags is None or not isinstance(source, dict) or len(source) != 1 or not isinstance(next(iter(source.values())), dict):
+            return p
+        name = next(iter(source))
+        require(isinstance(tags, list) and all(isinstance(t, str) for t in tags), "tags", "Use at most 30 short tags")
+        before = (said or {}).get("source", {}).get(name)
+        if not said:
+            theirs, others = set(), set()
+        else:  # an importer that wrote this entry before its tags were kept apart owned them all, as far as anyone can tell
+            theirs = set(said["tags"]) if isinstance(before, dict) and "tags" not in before else set((before or {}).get("tags") or [])
+            others = set(said["tags"]) - theirs
+        return {**p, "tags": sorted(others | set(tags)), "source": {**p["source"], name: {**p["source"][name], "tags": sorted(set(tags))}}}
 
     def _document(self, p: dict) -> dict:
         """A document entry: a Markdown page and the entries it describes. `describes` is a list of {key, section,
@@ -261,11 +400,27 @@ class Catalog:
         return self._write(body)
 
     def apply(self, entries, merge: bool = False) -> dict:
-        """Register many (kind, payload) entries in order, as an importer produces them. All of them, or none."""
+        """Register many (kind, payload) entries in order, as an importer produces them. All of them, or none.
+
+        Every entry lock is taken first, so imports never deadlock one another. Tables first registered here that are
+        copies of a definition are linked to it at the end, so a definition gets one new revision per import, not
+        one per copy."""
         counts = {"added": 0, "changed": 0, "unchanged": 0}
+        outer = self._new_tables is None
         with self.db.transaction():
-            for kind, payload in entries:
-                counts[self.put(kind, payload, merge)["change"]] += 1
+            self._lock_all()
+            self._importing += 1
+            if outer:
+                self._new_tables = []
+            try:
+                for kind, payload in entries:
+                    counts[self.put(kind, payload, merge)["change"]] += 1
+                if outer:
+                    self._link_to_definitions(self._new_tables)
+            finally:
+                self._importing -= 1
+                if outer:
+                    self._new_tables = None
         return counts
 
     def use(self, project: str, keys: list[str], purpose: str | None = None) -> dict:
@@ -333,18 +488,63 @@ class Catalog:
         return [r["key"] for r in rows]
 
     def _summary(self, key: str, users=False) -> dict:
-        row = self._head(key)
-        body = row["body"]
-        table = self._head(body["table"])["body"] if body["kind"] == "column" else body
-        out = {"key": key, "kind": body["kind"], "title": body["title"], "description": body["description"], "owner": body.get("owner") or table.get("owner"),
-               "revision": row["id"]}
-        if body["kind"] == "document":
-            return out | {"doc_kind": body.get("doc_kind"), "retired": body.get("retired", False)}
-        if body["kind"] != "project":
-            out.update(layer=table.get("layer"), system=table.get("system"), dtype=body.get("dtype"))
-            if users:
-                out["used_by"] = len(self._users(key))
+        return self._summaries([key], users)[0]
+
+    def _heads(self, keys) -> dict[str, dict]:
+        """The head revisions of many entries, by key, in one query."""
+        return {r["entry_key"]: r for r in self.db.execute(
+            "SELECT r.* FROM entries e JOIN revisions r ON r.id = e.head_revision WHERE e.key = ANY(%s)", (list(set(keys)),))}
+
+    def _summaries(self, keys: list[str], users=False) -> list[dict]:
+        """`_summary` of many entries, in the order given, in a few queries rather than a few per entry."""
+        heads = self._heads(keys)
+        tables = self._heads({heads[k]["body"]["table"] for k in keys if heads[k]["body"]["kind"] == "column"})
+        counts = self._user_counts([k for k in keys if heads[k]["body"]["kind"] in ("table", "column")]) if users else {}
+        out = []
+        for key in keys:
+            row = heads[key]
+            body = row["body"]
+            table = tables[body["table"]]["body"] if body["kind"] == "column" else body
+            summary = {"key": key, "kind": body["kind"], "title": body["title"], "description": body["description"],
+                       "owner": body.get("owner") or table.get("owner"), "revision": row["id"]}
+            if body["kind"] == "document":
+                summary |= {"doc_kind": body.get("doc_kind"), "retired": body.get("retired", False)}
+            elif body["kind"] != "project":
+                summary.update(layer=table.get("layer"), system=table.get("system"), dtype=body.get("dtype"))
+                if users:
+                    summary["used_by"] = counts[key]
+            out.append(summary)
         return out
+
+    def _user_counts(self, keys: list[str]) -> dict[str, int]:
+        """How many projects depend on each table or column, counted the way `_users` finds them, for many entries
+        at once: one recursive query walks lineage down from all of them, and one more reads the uses."""
+        if not keys:
+            return {}
+        reach: dict[str, set[str]] = {key: {key} for key in keys}
+        for r in self.db.execute("""
+                WITH RECURSIVE copies AS MATERIALIZED (SELECT * FROM copy_edges), reach(origin, key) AS (
+                  SELECT k COLLATE "C", k COLLATE "C" FROM unnest(%s::text[]) AS k
+                  UNION
+                  SELECT reach.origin, l.far FROM reach CROSS JOIN LATERAL """ + _edges("target_key", "source_key") + """ l)
+                SELECT origin, key FROM reach""", (list(keys),)):
+            reach[r["origin"]].add(r["key"])
+        nodes = set().union(*reach.values())
+        table_of = {r["key"]: r["tbl"] for r in self.db.execute(
+            "SELECT e.key, r.body ->> 'table' AS tbl FROM entries e JOIN revisions r ON r.id = e.head_revision "
+            "WHERE e.kind = 'column' AND e.key = ANY(%s)", (list(nodes),))}
+        columns_of: dict[str, list[str]] = {}
+        for r in self.db.execute("SELECT e.key, r.body ->> 'table' AS tbl FROM entries e JOIN revisions r ON r.id = e.head_revision "
+                                 "WHERE e.kind = 'column' AND r.body ->> 'kind' = 'column' AND r.body ->> 'table' = ANY(%s)",
+                                 (list(nodes - table_of.keys()),)):
+            columns_of.setdefault(r["tbl"], []).append(r["key"])
+        through = {key: {t for node in found for t in ([node, table_of[node]] if node in table_of else [node, *columns_of.get(node, [])])}
+                   for key, found in reach.items()}
+        projects: dict[str, set[str]] = {}
+        for r in self.db.execute("SELECT DISTINCT source_key, target_key FROM current_links WHERE relation = 'uses' AND target_key = ANY(%s)",
+                                 (list(set().union(*through.values())),)):
+            projects.setdefault(r["target_key"], set()).add(r["source_key"])
+        return {key: len(set().union(*(projects.get(t, ()) for t in found))) for key, found in through.items()}
 
     def _linked(self, key: str, relation: str, direction: str, revision: str | None = None) -> list[dict]:
         """Entries one link away: what `key` points at (up), or what points at it (down). Up can be asked of an
@@ -356,31 +556,31 @@ class Catalog:
         else:
             rows = self.db.execute("SELECT source_key AS other, target_revision, purpose, target_head FROM current_links "
                                    "WHERE target_key = %s AND relation = %s ORDER BY source_key", (key, relation)).fetchall()
-        return [{**self._summary(r["other"]), "linked_revision": r["target_revision"], "changed_since": r["target_revision"] != r["target_head"],
-                 **({"purpose": r["purpose"]} if relation == "uses" else {})} for r in rows]
+        return [{**summary, "linked_revision": r["target_revision"], "changed_since": r["target_revision"] != r["target_head"],
+                 **({"purpose": r["purpose"]} if relation == "uses" else {})} for r, summary in zip(rows, self._summaries([r["other"] for r in rows]), strict=True)]
 
     def _walk(self, key: str, direction: str) -> list[dict]:
         """Every entry reachable along lineage from `key`, nearest first. One recursive query reads the edges."""
         mine, other = ("source_key", "target_key") if direction == "up" else ("target_key", "source_key")
         edges: dict[str, list[dict]] = {}
         for r in self.db.execute(f"""
-                WITH RECURSIVE reach(key) AS (
+                WITH RECURSIVE copies AS MATERIALIZED (SELECT * FROM copy_edges), reach(key) AS (
                   SELECT %s::text COLLATE "C"
                   UNION
-                  SELECT l.{other} FROM reach JOIN current_links l ON l.{mine} = reach.key AND l.relation = 'derived_from')
-                SELECT l.{mine} AS near, l.{other} AS far, l.target_revision, l.target_head
-                FROM reach JOIN current_links l ON l.{mine} = reach.key AND l.relation = 'derived_from'
-                ORDER BY l.{other}""", (key,)):
+                  SELECT l.far FROM reach CROSS JOIN LATERAL {_edges(mine, other)} l)
+                SELECT l.near, l.far, l.target_revision, l.target_head
+                FROM reach CROSS JOIN LATERAL {_edges(mine, other)} l
+                ORDER BY l.far""", (key,)):
             edges.setdefault(r["near"], []).append(r)
-        seen, out, queue = {key}, [], deque([(key, 0)])
+        seen, found, queue = {key}, [], deque([(key, 0)])
         while queue:
             current, depth = queue.popleft()
             for r in edges.get(current, []):
                 if r["far"] not in seen:
                     seen.add(r["far"])
-                    out.append({**self._summary(r["far"]), "depth": depth + 1, "via": current, "changed_since": r["target_revision"] != r["target_head"]})
+                    found.append((r["far"], {"depth": depth + 1, "via": current, "changed_since": r["target_revision"] != r["target_head"]}))
                     queue.append((r["far"], depth + 1))
-        return out
+        return [{**summary, **how} for (_, how), summary in zip(found, self._summaries([k for k, _ in found]), strict=True)]
 
     def _users(self, key: str) -> list[dict]:
         """Projects that depend on a table or column, each once, by the strongest way it does."""
@@ -419,15 +619,10 @@ class Catalog:
                                    "ORDER BY ts_rank(e.search, q) DESC, e.key LIMIT 2000", (" & ".join(w + ":*" for w in words), kind, kind)).fetchall()
         else:
             rows = self.db.execute("SELECT key FROM entries WHERE (%s::text IS NULL OR kind = %s) ORDER BY key LIMIT 2000", (kind, kind)).fetchall()
-        out = []
-        for r in rows:
-            summary = self._summary(r["key"], users=True)
-            if layer and summary.get("layer") != layer:
-                continue
-            out.append(summary)
-            if len(out) >= limit:
-                break
-        return out
+        keys = [r["key"] for r in rows]
+        if layer:
+            keys = [s["key"] for s in self._summaries(keys) if s.get("layer") == layer]
+        return self._summaries(keys[:limit], users=True)
 
     def get(self, name: str) -> dict:
         """One entry in full: what it says, what it is built from, what is built from it, who uses it, and its history."""
@@ -438,6 +633,10 @@ class Catalog:
             "SELECT id, actor, recorded_at FROM revisions WHERE entry_key = %s ORDER BY recorded_at DESC, seq DESC", (key,))]
         if out["kind"] == "document":
             out["describes"] = self._described(out["revision"])
+            out["relied_on_by"] = [{"model": r["project_key"].removeprefix("project:"), "version": r["version"], "revision": r["document_revision"],
+                                    "pinned_by": r["pinned_by"], "why": r["why"], "changed_since": r["document_revision"] != out["revision"]}
+                                   for r in self.db.execute("""SELECT b.project_key, b.version, d.* FROM build_documents d JOIN model_builds b ON b.id = d.build_id
+                                                               WHERE d.document_key = %s ORDER BY b.recorded_at DESC, b.id DESC""", (key,))]
             return out
         out["documents"] = self.documents(key)
         if out["kind"] == "project":
@@ -446,17 +645,46 @@ class Catalog:
             return out
         out.update(derived_from=self._linked(key, "derived_from", "up"), feeds=self._linked(key, "derived_from", "down"), used_by=self._users(key))
         if out["kind"] == "table":
-            out["columns"] = [self._summary(column) for column in self._columns(key)]
+            out["columns"] = self._summaries(self._columns(key))
+            out["copies"] = self._linked(key, "instance_of", "up")         # what this definition is copied to
+            out["copy_of"] = self._linked(key, "instance_of", "down")      # the definitions this table is a copy of
+            out["foreign_keys"], out["referenced_by"] = self._foreign_keys(key)
+        elif out["kind"] == "column":
+            out["references"] = self._linked(key, "references", "up")
+            out["referenced_by"] = self._linked(key, "references", "down")
         else:
             out["layer"] = self._summary(key)["layer"]
         return out
+
+    def _foreign_keys(self, table: str) -> tuple[list[dict], list[dict]]:
+        """A table's foreign keys, column by column, and the columns of other tables that reference its columns."""
+        columns = self._columns(table)
+        out = self.db.execute("SELECT source_key, target_key, target_revision <> target_head AS changed FROM current_links "
+                              "WHERE relation = 'references' AND source_key = ANY(%s) ORDER BY source_key, target_key", (columns,)).fetchall()
+        into = self.db.execute("SELECT source_key, target_key FROM current_links WHERE relation = 'references' AND target_key = ANY(%s) "
+                               "ORDER BY source_key, target_key", (columns,)).fetchall()
+        tables = {r["entry_key"]: r["body"]["table"] for r in self._heads({r["target_key"] for r in out} | {r["source_key"] for r in into}).values()}
+        return ([{"column": r["source_key"], "references": r["target_key"], "table": tables[r["target_key"]], "changed_since": r["changed"]} for r in out],
+                [{"column": r["source_key"], "table": tables[r["source_key"]], "references": r["target_key"]} for r in into
+                 if tables[r["source_key"]] != table])
+
+    def set_created_by(self, table: str, created_by: dict | None) -> dict:
+        """Say what created a table or file (a script, a notebook, a query), keeping everything else it says. None clears it."""
+        body = self._head(self.resolve(table, ("table",)))["body"]
+        return self.put("table", {"path": body["path"], "created_by": created_by or {}}, merge=True)  # {} says it outright: nothing
+
+    def set_references(self, column: str, targets: list[str]) -> dict:
+        """Say which columns a column's values are drawn from (a foreign key), keeping everything else it says. No
+        targets clears them."""
+        body = self._head(self.resolve(column, ("column",)))["body"]
+        return self.put("column", {"table": body["table"], "name": body["name"], "references": targets}, merge=True)
 
     def _described(self, revision: str) -> list[dict]:
         rows = self.db.execute("""SELECT l.target_key, l.target_revision, l.section, l.says, t.head_revision FROM revision_links l
                                   JOIN entries t ON t.key = l.target_key WHERE l.source_revision = %s AND l.relation = 'describes'
                                   ORDER BY l.section NULLS FIRST, l.target_key""", (revision,)).fetchall()
-        return [{**self._summary(r["target_key"]), "linked_revision": r["target_revision"], "changed_since": r["target_revision"] != r["head_revision"],
-                 "section": r["section"], "says": r["says"]} for r in rows]
+        return [{**summary, "linked_revision": r["target_revision"], "changed_since": r["target_revision"] != r["head_revision"],
+                 "section": r["section"], "says": r["says"]} for r, summary in zip(rows, self._summaries([r["target_key"] for r in rows]), strict=True)]
 
     def documents(self, name: str) -> list[dict]:
         """The documents that describe an entry now, with the part of the page and what it says. A column also gets
@@ -508,6 +736,11 @@ class Catalog:
                         reached.append({k: v for k, v in node.items() if k not in ("depth", "via", "changed_since")})
             out["built_from"] = sorted(reached, key=lambda n: n["key"])
         return out
+
+    def rely(self, name: str, version: str, documents: list[str], why: str | None = None) -> dict:
+        """Record that a model version relied on these documents, each at the revision current when it was trained."""
+        from .vertex import rely
+        return rely(self, name, version, documents, why)
 
     def explain_model(self, name: str, version: str) -> dict:
         """One model version traced from its training task back to the raw column behind each input field."""
@@ -605,13 +838,54 @@ class Catalog:
         """Every table, by key: its layer and system, how many columns it has, how many projects depend on it, and
         when it last changed."""
         rows = self.db.execute("""
-            SELECT e.key, r.recorded_at,
-                   (SELECT count(*) FROM entries c JOIN revisions cr ON cr.id = c.head_revision
-                    WHERE c.kind = 'column' AND cr.body ->> 'table' = e.key) AS columns
+            SELECT e.key, r.recorded_at, coalesce(c.n, 0) AS columns
             FROM entries e JOIN revisions r ON r.id = e.head_revision
+            LEFT JOIN (SELECT cr.body ->> 'table' AS tbl, count(*) AS n FROM entries c JOIN revisions cr ON cr.id = c.head_revision
+                       WHERE c.kind = 'column' AND cr.body ->> 'kind' = 'column' GROUP BY 1) c ON c.tbl = e.key
             WHERE e.kind = 'table' AND (%(layer)s::text IS NULL OR r.body ->> 'layer' = %(layer)s)
               AND (%(system)s::text IS NULL OR r.body ->> 'system' = %(system)s) ORDER BY e.key""", {"layer": layer, "system": system}).fetchall()
-        return [{**self._summary(r["key"], users=True), "columns": r["columns"], "changed": stamp(r["recorded_at"])} for r in rows]
+        return [{**summary, "columns": r["columns"], "changed": stamp(r["recorded_at"])}
+                for r, summary in zip(rows, self._summaries([r["key"] for r in rows], users=True), strict=True)]
+
+    def set_instances(self, definition: str, patterns: list[str]) -> dict:
+        """Say which tables are copies of a definition table, by glob patterns over their paths (t-*.sales.orders).
+        Each match is linked now, and a table registered later that matches is linked then. No patterns clears them."""
+        body = self._head(self.resolve(definition, ("table",)))["body"]
+        return self.put("table", {"path": body["path"], "instances": patterns}, merge=True)
+
+    def set_privacy(self, keys: list[str], **fields) -> list[dict]:
+        """Say whether tables or columns hold personal data, how they are scrubbed, their data category or how long they
+        are kept (`pii`, `scrubbing`, `data_category`, `retention`), keeping everything else they say. All, or none."""
+        unknown = set(fields) - {"pii", *PRIVACY}
+        require(not unknown, "privacy", f"Privacy fields are pii, {', '.join(PRIVACY)}")
+        said = {k: v for k, v in fields.items() if v is not None}
+        require(said, "privacy", "Say at least one of pii, data_category, retention or scrubbing")
+        require(keys, "keys", "Name at least one table or column")
+        out = []
+        with self.db.transaction():
+            for name in keys:
+                body = self._head(self.resolve(name, ("table", "column")))["body"]
+                where = {"path": body["path"]} if body["kind"] == "table" else {"table": body["table"], "name": body["name"]}
+                out.append(self.put(body["kind"], {**where, **said}, merge=True))
+        return out
+
+    def privacy(self, pii_only: bool = False, table: str | None = None) -> list[dict]:
+        """Every column with what the catalog says about its privacy: whether it holds personal data, how it is
+        scrubbed, its data category and how long it is kept. A column that names no category or retention of its own
+        takes its table's, and says which it took. With `pii_only`, only columns marked as personal data."""
+        table = self.resolve(table, ("table",)) if table else None
+        out = []
+        for r in self.db.execute("""
+                SELECT c.key, cr.body AS col, tr.body AS tbl FROM entries c JOIN revisions cr ON cr.id = c.head_revision
+                JOIN entries t ON t.key = cr.body ->> 'table' JOIN revisions tr ON tr.id = t.head_revision
+                WHERE c.kind = 'column' AND cr.body ->> 'kind' = 'column' AND (%(table)s::text IS NULL OR cr.body ->> 'table' = %(table)s)
+                  AND (NOT %(pii)s OR (cr.body ->> 'pii')::boolean) ORDER BY c.key""", {"table": table, "pii": pii_only}):
+            col, tbl = r["col"], r["tbl"]
+            inherited = [f for f in ("data_category", "retention") if col.get(f) is None and tbl.get(f) is not None]
+            out.append({"key": r["key"], "table": col["table"], "column": col["name"], "dtype": col.get("dtype"), "pii": col.get("pii"),
+                        "scrubbing": col.get("scrubbing"), **{f: col.get(f) or tbl.get(f) for f in ("data_category", "retention")},
+                        "owner": col.get("owner") or tbl.get("owner"), "table_pii": tbl.get("pii"), "inherited": inherited})
+        return out
 
     def projects(self) -> list[dict]:
         """Every project: how much data it uses, how much of that changed after it was used, and its latest model version."""
@@ -634,5 +908,9 @@ class Catalog:
             "SELECT source_key, target_key FROM current_links WHERE relation = 'uses' AND target_revision <> target_head ORDER BY source_key, target_key")]
         described = [{"document": r["source_key"], "key": r["target_key"]} for r in self.db.execute(
             "SELECT source_key, target_key FROM current_links WHERE relation = 'describes' AND target_revision <> target_head ORDER BY source_key, target_key")]
+        relied = [{"model": r["project_key"].removeprefix("project:"), "version": r["version"], "document": r["document_key"]} for r in self.db.execute(
+            """SELECT b.project_key, b.version, d.document_key FROM build_documents d JOIN model_builds b ON b.id = d.build_id
+               JOIN entries e ON e.key = d.document_key WHERE e.head_revision <> d.document_revision ORDER BY b.project_key, b.version, d.document_key""")]
         info = self.db.info
-        return {"counts": counts, "changed_since_used": stale, "changed_since_described": described, "database": f"{info.host}:{info.port}/{info.dbname}"}
+        return {"counts": counts, "changed_since_used": stale, "changed_since_described": described, "changed_since_relied_on": relied,
+                "database": f"{info.host}:{info.port}/{info.dbname}"}
