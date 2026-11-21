@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 from psycopg.types.json import Jsonb
@@ -44,6 +44,18 @@ class Client:
 
     def get(self, name: str) -> dict:
         return self._get(f"https://{self.location}-aiplatform.googleapis.com/v1/{name}").json()
+
+    def pipeline_jobs(self, project: str, since: datetime) -> list[dict]:
+        """The pipeline jobs created in a project and this client's location since a time, newest first (pipelineJobs.list)."""
+        found, token = [], None
+        while True:
+            page = self._get(f"https://{self.location}-aiplatform.googleapis.com/v1/projects/{quote(project, safe='')}/locations/{self.location}/pipelineJobs",
+                             filter=f'create_time>"{since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}"', orderBy="create_time desc",
+                             pageSize="100", **({"pageToken": token} if token else {})).json()
+            found += page.get("pipelineJobs") or []
+            token = page.get("nextPageToken")
+            if not token:
+                return found
 
     def object(self, uri: str, missing_ok: bool = False) -> dict | None:
         """An object's metadata, or None when `missing_ok` and it is not there."""

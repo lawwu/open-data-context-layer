@@ -198,6 +198,15 @@ def lines(command: str, result) -> list[str]:
         return [f"applied {name}" for name in result["applied"]] or ["The database is up to date."]
     if command == "import-sqlite":
         return [f"{result['entries']} entries, {result['revisions']} revisions and {result['links']} pinned links imported from {result['source']}"]
+    if command == "discover":
+        return [f"{r['created'] or '?'}  {r['state'] or '?':<26}  {r['pipeline_run']}" + (f"  {r['display_name']}" if r["display_name"] else "")
+                + (f"\n    recorded: {', '.join(r['model_versions'])}" if r["model_versions"] else "") for r in result["runs"]] or ["No pipeline run in that window."]
+    if command == "propose":
+        out = [json.dumps(result["manifest"], indent=2), "", "Where each value came from:"]
+        out += [f"  {k}: {v}" for k, v in result["sources"].items()]
+        out += ["", "Ready to import." if result["ready"] else "Review before importing:"] + [f"  - {r}" for r in result["review"]]
+        out += [f"  missing: {', '.join(result['missing'])}"] if result["missing"] else []
+        return out + ([f"\nWritten to {result['written_to']}: odcl import --vertex-manifest {result['written_to']}"] if result["written_to"] else [])
     if command == "rely":
         return [f"{result['model']} {result['version']} relied on:"] + _relied(result["relied_on"])
     if command == "instances":
@@ -282,6 +291,20 @@ def run(catalog: Catalog, args):
         return builds.explain_dataset(catalog, args.reference)
     if args.command == "history":
         return catalog.table_history(args.key, span(args.since), args.patterns, args.limit)
+    if args.command == "discover":
+        from . import discover, vertex
+        return {"runs": discover.runs(catalog, vertex.client(args.location), args.project, moment(args.since, "since"))}
+    if args.command == "propose":
+        from . import discover, vertex
+        location = vertex.JOB.match(args.pipeline_run or "")
+        require(location, "pipeline_run", "--pipeline-run is a Vertex AI pipeline job: projects/P/locations/L/pipelineJobs/J")
+        found = discover.propose(catalog, vertex.client(location.group(2)), args.pipeline_run, trainer=args.trainer, loader=args.loader,
+                                 loader_output=args.loader_output, model=args.model, version=args.version)
+        if args.out:
+            with open(args.out, "w", encoding="utf-8") as f:
+                json.dump(found["manifest"], f, indent=2)
+                f.write("\n")
+        return {**found, "written_to": args.out}
     if args.command == "rely":
         return catalog.rely(args.model, args.version, args.documents, args.why)
     if args.command == "instances":
@@ -398,6 +421,24 @@ def parser() -> argparse.ArgumentParser:
     for k in (t, c):
         k.add_argument("--derived-from", nargs="+", default=[], metavar="KEY", help="what it is built from")
         privacy_flags(k)
+
+    s = sub.add_parser("discover", help="find runs whose model versions the catalog has not recorded")
+    kinds = s.add_subparsers(dest="what", required=True)
+    d = kinds.add_parser("vertex-runs", help="the Vertex AI pipeline runs of a project, and which already have a model version recorded")
+    d.add_argument("--project", required=True)
+    d.add_argument("--location", default="us-central1")
+    d.add_argument("--since", default="7d", metavar="TIME", help="runs created since this time or span (default: 7d)")
+
+    s = sub.add_parser("propose", help="draft something for a person to review before it is imported")
+    kinds = s.add_subparsers(dest="what", required=True)
+    d = kinds.add_parser("vertex-manifest", help="a training manifest for a pipeline run, from its trainer's metadata.json and its loader's output")
+    d.add_argument("--pipeline-run", required=True, metavar="JOB")
+    d.add_argument("--trainer", metavar="TASK", help="the task that trained the model (default: the one with a Model output)")
+    d.add_argument("--loader", metavar="TASK", help="the task that wrote the training data (default: the one with a Dataset output)")
+    d.add_argument("--loader-output", metavar="NAME", help="the loader's output the model read (default: the one named for training)")
+    d.add_argument("--model", help="the model's name, when metadata.json does not say it")
+    d.add_argument("--version", help="the model version, when metadata.json does not say it (default: the pipeline job's id)")
+    d.add_argument("--out", metavar="FILE", help="also write the draft manifest here, to review and then import with --vertex-manifest")
 
     s = sub.add_parser("rely", help="record that a model version relied on documents, such as a finding, at the revision it was trained on")
     s.add_argument("model")

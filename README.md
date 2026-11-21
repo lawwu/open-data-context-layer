@@ -279,6 +279,18 @@ staffing-forecast / v17
 
 Redefining the feature and training a later version leaves this answer unchanged. A model trained on a file set traces to the files (how many objects, generations pinned), the task that wrote them and the table they were exported from, and stops there. Its project's `uses` link points at that table. `odcl` reads Google with your Application Default Credentials, which bill each request to their quota project. If that project has no billing, Google refuses with a billing error; set `GOOGLE_CLOUD_QUOTA_PROJECT` to one that does.
 
+### Finding runs and drafting their manifests
+
+A training task that does not write a manifest can still be imported. odcl lists a project's pipeline runs, says which already have a model version recorded, and drafts a manifest for one from what the run left behind:
+
+```sh
+uv run odcl discover vertex-runs --project workforce-demo --location us-central1 --since 14d
+uv run odcl propose vertex-manifest --pipeline-run projects/P/locations/L/pipelineJobs/J --out manifest.json
+uv run odcl import --vertex-manifest manifest.json        # after reviewing it
+```
+
+The draft takes the trainer from the task with a Model output, the artifact from the one file in it (its generation and SHA-256 read from Cloud Storage), and the inputs from the `metadata.json` beside it: `feature_columns` in order, the `label_column`, and the model name, version and commit when it says them. The dataset version is the data loader's output, named as `odcl record dataset-files` names it. It says where each value came from and lists what to review: a guess (several tasks that could be the trainer, a version taken from the job id), anything not found, and the files to record first. `--trainer`, `--loader`, `--loader-output`, `--model` and `--version` settle any guess. Nothing is written until the draft is imported, and the import checks it like any other manifest.
+
 ## OpenLineage
 
 Any tool with an [OpenLineage](https://openlineage.io) integration (Airflow, Spark, dbt, Dagster, Flink, …) can report its runs to the catalog. Point its HTTP transport at a server started with `odcl serve --accept-lineage`. Events are posted to `/api/v1/lineage`, the same path Marquez uses, so the usual configuration works:
