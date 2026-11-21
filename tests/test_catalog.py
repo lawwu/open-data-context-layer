@@ -260,3 +260,40 @@ def test_dbt_meta_says_what_is_personal_data(database, tmp_path):
         assert (c.get(BRONZE)["data_category"], c.get(BRONZE)["retention"]) == ("customer", "7 years")
         assert (c.get(f"{BRONZE}.account_id")["pii"], c.get(f"{BRONZE}.account_id")["scrubbing"]) == (True, "hashed")
         assert "pii" not in c.get(f"{BRONZE}.plan")  # only what is said is kept
+
+
+def test_copies_of_a_definition_are_linked_by_pattern_and_lineage_and_users_go_through_them(database, capsys):
+    definition, copy = "core.sales.daily_totals", "t-1.sales.daily_totals"
+    with Catalog(database, actor="ana") as c:
+        c.put("table", {"path": "core.ref.discounts"})
+        c.put("column", {"table": "core.ref.discounts", "name": "discounted"})
+        c.put("table", {"path": definition, "derived_from": ["table:core.ref.discounts"]})
+        c.put("column", {"table": definition, "name": "net_total", "definition": "SUM(IF(discounted, amount, 0))", "derived_from": ["column:core.ref.discounts.discounted"]})
+        for tenant in ("t-1", "t-2"):
+            c.put("table", {"path": f"{tenant}.sales.daily_totals", "system": "bigquery"})
+            c.put("column", {"table": f"{tenant}.sales.daily_totals", "name": "net_total", "dtype": "FLOAT64"})
+        c.put("project", {"name": "revenue-model", "description": "Revenue forecast"})
+        c.use("revenue-model", [f"column:{copy}.net_total"])
+        assert c.used_by(f"{definition}.net_total")["projects"] == []  # not connected yet
+
+        linked = c.set_instances(definition, ["t-*.sales.daily_totals"])
+        assert [link["to"] for link in linked["links"] if link["relation"] == "instance_of"] == [f"table:{copy}", "table:t-2.sales.daily_totals"]
+        [user] = c.used_by(f"{definition}.net_total")["projects"]
+        assert (user["project"], user["how"], user["through"]) == ("project:revenue-model", "downstream", f"column:{copy}.net_total")
+        assert {t["key"]: t["used_by"] for t in c.tables()}[f"table:{definition}"] == 1
+        up = [n["key"] for n in c.lineage(f"{copy}.net_total", "up")["upstream"]]
+        assert up == [f"column:{definition}.net_total", "column:core.ref.discounts.discounted"]  # through the copy to the definition and its input
+        assert "column:core.ref.discounts.discounted" in [n["key"] for n in c.uses("revenue-model", upstream=True)["built_from"]]
+
+        c.put("table", {"path": "t-3.sales.daily_totals"})  # a tenant added later is linked when it is registered
+        c.put("column", {"table": "t-3.sales.daily_totals", "name": "net_total"})
+        shown = c.get(definition)
+        assert [t["key"] for t in shown["copies"]] == [f"table:{copy}", "table:t-2.sales.daily_totals", "table:t-3.sales.daily_totals"]
+        assert [t["key"] for t in c.get("t-3.sales.daily_totals")["copy_of"]] == [f"table:{definition}"]
+        assert "column:t-3.sales.daily_totals.net_total" in [n["key"] for n in c.lineage(f"{definition}.net_total", "down")["downstream"]]
+        assert c.put("table", {"path": definition, "description": "Net totals"}, merge=True)["instances"] == ["t-*.sales.daily_totals"]  # kept
+
+        c.set_instances(definition, [])
+        assert c.get(definition)["copies"] == [] and c.used_by(f"{definition}.net_total")["projects"] == []
+    assert main(["--database-url", database, "instances", definition, "t-*.sales.daily_totals"]) == 0
+    assert "copy: table:t-3.sales.daily_totals" in capsys.readouterr().out

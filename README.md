@@ -382,6 +382,18 @@ The web page has a page for each document, with its links grouped by section and
 
 Not built yet: a model version that relied on a document revision (`relied_on`).
 
+## Copies of one definition
+
+One definition is often deployed many times: the same table in every tenant's project, say. A definition table can name its copies by glob patterns over their paths, and the catalog links each match with an `instance_of` link:
+
+```sh
+uv run odcl instances core.sales.daily_totals 't-*.sales.daily_totals'
+```
+
+- **Lineage goes through copies.** A copy is read as built from its definition, and each of its columns from the definition's column of the same name. So the lineage of a model's input runs from the tenant copy it read to the definition's SQL and on to what that reads, and the definition's columns show the projects that use any copy.
+- **Patterns** are kept on the definition and resolved whenever it is written. A table registered later that matches is linked when it is registered.
+- **Shown** on both: a definition lists its patterns and copies, and a copy names its definition. `Catalog.set_instances` is the Python interface; `odcl instances DEFINITION` with no patterns clears them.
+
 ## Privacy
 
 Tables and columns can say whether they hold personal data (`pii`), how it is scrubbed (`scrubbing`: hashed, truncated, removed…), their data category (`data_category`) and how long they are kept (`retention`). A column that names no category or retention of its own takes its table's. Only what is said is kept: a column that says nothing about `pii` is unknown, not "no".

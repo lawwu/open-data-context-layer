@@ -27,6 +27,7 @@ import os
 import re
 import uuid
 from collections import deque
+from fnmatch import fnmatchcase
 from datetime import datetime, timedelta, timezone
 from importlib import resources
 
@@ -40,6 +41,7 @@ DOCUMENT = re.compile(r"^[a-z0-9_][a-z0-9_.\-/@~+]{0,499}$")
 PATH = re.compile(r"^[a-z0-9_][a-z0-9_.\-$]{0,299}$")
 COLUMN = re.compile(r"^[a-z0-9_][a-z0-9_.\-$]{0,149}$")  # dots separate the levels of a nested field
 NAME = re.compile(r"^[a-z0-9_][a-z0-9_.\-]{0,99}$")
+GLOB = re.compile(r"^[a-z0-9_.\-$*?\[\]!]{1,300}$")  # a pattern over table paths, such as t-*.sales.daily_totals
 TEXT = {"table": {"system": 100, "layer": 50, "owner": 200, "type": 50},
         "column": {"dtype": 200, "definition": 4000, "owner": 200},
         "project": {"owner": 200, "repository": 500, "status": 50}}
@@ -103,6 +105,14 @@ def search_text(body: dict) -> str:
     return " ".join(TOKEN.findall((words + " " + " ".join(body["tags"])).lower()))
 
 
+def _edges(mine: str, other: str) -> str:
+    """The lineage edges at `reach.key`, for a recursive walk: its derived_from links, found by index, and the edges
+    copies of a definition add (the `copies` CTE, read once from copy_edges). `mine` is the column `reach.key` is in."""
+    return (f"(SELECT c.{mine} AS near, c.{other} AS far, c.target_revision, c.target_head FROM current_links c "
+            f"WHERE c.relation = 'derived_from' AND c.{mine} = reach.key "
+            f"UNION ALL SELECT i.{mine}, i.{other}, i.target_revision, i.target_head FROM copies i WHERE i.{mine} = reach.key)")
+
+
 class CatalogError(Exception):
     """A request the catalog refuses, with a short code a caller can branch on."""
 
@@ -137,6 +147,9 @@ class Catalog:
     def __init__(self, dsn: str | None = None, actor: str | None = None):
         self.actor = (actor or os.environ.get("ODCL_USER") or os.environ.get("FATHOM_USER") or getpass.getuser())[:200]
         self.db = connect(dsn, autocommit=True)
+        # Catalog reads are many short index lookups. A recursive walk's cost is estimated high enough that PostgreSQL
+        # would compile it (JIT), which takes far longer than running it, so compilation is off for this connection.
+        self.db.execute("SET jit = off")
         try:
             version = self.db.execute("SELECT max(version) AS version FROM schema_migrations").fetchone()["version"] or 0
         except psycopg.errors.UndefinedTable:
@@ -223,6 +236,7 @@ class Catalog:
                     said = prior["body"]
                     kept = {"description": said["description"] or None, **{f: said.get(f) for f in TEXT[kind]}, "tags": said["tags"],
                             **({f: said.get(f) for f in ("pii", *PRIVACY)} if kind != "project" else {}),
+                            **({"instances": said.get("instances")} if kind == "table" else {}),
                             "derived_from": [link["to"] for link in said["links"] if link["relation"] == "derived_from"]}
                     require(isinstance(payload.get("source") or {}, dict), "source", "source is a small object saying where the entry came from")
                     p = {**kept, **{k: v for k, v in payload.items() if v is not None}, "source": {**said["source"], **(payload.get("source") or {})}}
@@ -232,6 +246,12 @@ class Catalog:
                     parent = self.resolve(parent, (kind,))
                     require(parent != key, "derived_from", f"{key} cannot be derived from itself")
                     links.append({"relation": "derived_from", "to": parent, "revision": self._head(parent)["id"]})
+            instances = None
+            if kind == "table" and p.get("instances") is not None:
+                instances = names(p["instances"], "instances", 50)
+                instances = sorted({i.lower().removeprefix("table:") for i in instances})
+                require(all(GLOB.match(i) for i in instances), "instances", "An instance pattern is a table path with * ? or [ ] in it, like t-*.sales.orders")
+                links += self._instance_links(key, instances)
             tags = p.get("tags") or []
             require(isinstance(tags, list) and len(tags) <= 30 and all(isinstance(t, str) and 0 < len(t) <= 60 for t in tags), "tags", "Use at most 30 short tags")
             source = p.get("source") or {}
@@ -239,9 +259,25 @@ class Catalog:
             body = {"key": key, "kind": kind, "title": title, **extra,
                     "description": text(p.get("description"), "description", 4000, optional=kind != "project") or "",
                     **{field: text(p.get(field), field, limit, optional=True) for field, limit in TEXT[kind].items()},
-                    **(self._privacy(p) if kind != "project" else {}),
+                    **(self._privacy(p) if kind != "project" else {}), **({"instances": instances} if instances else {}),
                     "tags": sorted(set(tags)), "source": source, "links": links}
-            return self._write(body)
+            written = self._write(body)
+            if kind == "table" and written["change"] == "added":
+                self._link_to_definitions(key)
+            return written
+
+    def _instance_links(self, key: str, patterns: list[str]) -> list[dict]:
+        """`instance_of` links from a definition table to every other table whose path one of its patterns matches."""
+        found = [r for r in self.db.execute("SELECT key, head_revision FROM entries WHERE kind = 'table' ORDER BY key")
+                 if r["key"] != key and any(fnmatchcase(r["key"][6:], p) for p in patterns)]
+        return [{"relation": "instance_of", "to": r["key"], "revision": r["head_revision"]} for r in found]
+
+    def _link_to_definitions(self, key: str) -> None:
+        """A table registered for the first time may be a copy of a definition; write that definition again to link it."""
+        for r in self.db.execute("""SELECT r.body FROM revisions r JOIN entries e ON e.key = r.entry_key AND e.head_revision = r.id
+                                    WHERE r.body ? 'instances'""").fetchall():
+            if r["body"]["key"] != key and any(fnmatchcase(key[6:], p) for p in r["body"]["instances"]):
+                self.put("table", {"path": r["body"]["path"]}, merge=True)
 
     @staticmethod
     def _privacy(p: dict) -> dict:
@@ -410,10 +446,10 @@ class Catalog:
             return {}
         reach: dict[str, set[str]] = {key: {key} for key in keys}
         for r in self.db.execute("""
-                WITH RECURSIVE reach(origin, key) AS (
+                WITH RECURSIVE copies AS MATERIALIZED (SELECT * FROM copy_edges), reach(origin, key) AS (
                   SELECT k COLLATE "C", k COLLATE "C" FROM unnest(%s::text[]) AS k
                   UNION
-                  SELECT reach.origin, l.source_key FROM reach JOIN current_links l ON l.target_key = reach.key AND l.relation = 'derived_from')
+                  SELECT reach.origin, l.far FROM reach CROSS JOIN LATERAL """ + _edges("target_key", "source_key") + """ l)
                 SELECT origin, key FROM reach""", (list(keys),)):
             reach[r["origin"]].add(r["key"])
         nodes = set().union(*reach.values())
@@ -451,23 +487,23 @@ class Catalog:
         mine, other = ("source_key", "target_key") if direction == "up" else ("target_key", "source_key")
         edges: dict[str, list[dict]] = {}
         for r in self.db.execute(f"""
-                WITH RECURSIVE reach(key) AS (
+                WITH RECURSIVE copies AS MATERIALIZED (SELECT * FROM copy_edges), reach(key) AS (
                   SELECT %s::text COLLATE "C"
                   UNION
-                  SELECT l.{other} FROM reach JOIN current_links l ON l.{mine} = reach.key AND l.relation = 'derived_from')
-                SELECT l.{mine} AS near, l.{other} AS far, l.target_revision, l.target_head
-                FROM reach JOIN current_links l ON l.{mine} = reach.key AND l.relation = 'derived_from'
-                ORDER BY l.{other}""", (key,)):
+                  SELECT l.far FROM reach CROSS JOIN LATERAL {_edges(mine, other)} l)
+                SELECT l.near, l.far, l.target_revision, l.target_head
+                FROM reach CROSS JOIN LATERAL {_edges(mine, other)} l
+                ORDER BY l.far""", (key,)):
             edges.setdefault(r["near"], []).append(r)
-        seen, out, queue = {key}, [], deque([(key, 0)])
+        seen, found, queue = {key}, [], deque([(key, 0)])
         while queue:
             current, depth = queue.popleft()
             for r in edges.get(current, []):
                 if r["far"] not in seen:
                     seen.add(r["far"])
-                    out.append({**self._summary(r["far"]), "depth": depth + 1, "via": current, "changed_since": r["target_revision"] != r["target_head"]})
+                    found.append((r["far"], {"depth": depth + 1, "via": current, "changed_since": r["target_revision"] != r["target_head"]}))
                     queue.append((r["far"], depth + 1))
-        return out
+        return [{**summary, **how} for (_, how), summary in zip(found, self._summaries([k for k, _ in found]), strict=True)]
 
     def _users(self, key: str) -> list[dict]:
         """Projects that depend on a table or column, each once, by the strongest way it does."""
@@ -529,6 +565,8 @@ class Catalog:
         out.update(derived_from=self._linked(key, "derived_from", "up"), feeds=self._linked(key, "derived_from", "down"), used_by=self._users(key))
         if out["kind"] == "table":
             out["columns"] = self._summaries(self._columns(key))
+            out["copies"] = self._linked(key, "instance_of", "up")         # what this definition is copied to
+            out["copy_of"] = self._linked(key, "instance_of", "down")      # the definitions this table is a copy of
         else:
             out["layer"] = self._summary(key)["layer"]
         return out
@@ -695,6 +733,12 @@ class Catalog:
               AND (%(system)s::text IS NULL OR r.body ->> 'system' = %(system)s) ORDER BY e.key""", {"layer": layer, "system": system}).fetchall()
         return [{**summary, "columns": r["columns"], "changed": stamp(r["recorded_at"])}
                 for r, summary in zip(rows, self._summaries([r["key"] for r in rows], users=True), strict=True)]
+
+    def set_instances(self, definition: str, patterns: list[str]) -> dict:
+        """Say which tables are copies of a definition table, by glob patterns over their paths (t-*.sales.orders).
+        Each match is linked now, and a table registered later that matches is linked then. No patterns clears them."""
+        body = self._head(self.resolve(definition, ("table",)))["body"]
+        return self.put("table", {"path": body["path"], "instances": patterns}, merge=True)
 
     def set_privacy(self, keys: list[str], **fields) -> list[dict]:
         """Say whether tables or columns hold personal data, how they are scrubbed, their data category or how long they

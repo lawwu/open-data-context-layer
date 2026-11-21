@@ -191,6 +191,9 @@ def lines(command: str, result) -> list[str]:
         return [f"applied {name}" for name in result["applied"]] or ["The database is up to date."]
     if command == "import-sqlite":
         return [f"{result['entries']} entries, {result['revisions']} revisions and {result['links']} pinned links imported from {result['source']}"]
+    if command == "instances":
+        copies = [f"  copy: {link['to']}" for link in result["links"] if link["relation"] == "instance_of"]
+        return [f"{result['key']}  {result['change']}  ({result['revision']})"] + (copies or ["  no table matches yet"])
     if command in ("add", "use"):
         return [f"{result['key']}  {result['change']}  ({result['revision']})"]
     return [json.dumps(result, indent=2)]
@@ -270,6 +273,8 @@ def run(catalog: Catalog, args):
         return builds.explain_dataset(catalog, args.reference)
     if args.command == "history":
         return catalog.table_history(args.key, span(args.since), args.patterns, args.limit)
+    if args.command == "instances":
+        return catalog.set_instances(args.definition, args.patterns)
     if args.command == "privacy" and args.what == "set":
         return {"entries": catalog.set_privacy(args.keys, pii=args.pii, data_category=args.data_category, retention=args.retention, scrubbing=args.scrubbing)}
     if args.command == "privacy":
@@ -382,6 +387,10 @@ def parser() -> argparse.ArgumentParser:
     for k in (t, c):
         k.add_argument("--derived-from", nargs="+", default=[], metavar="KEY", help="what it is built from")
         privacy_flags(k)
+
+    s = sub.add_parser("instances", help="say which tables are copies of a definition table, by patterns over their paths")
+    s.add_argument("definition", help="the definition table, e.g. core.sales.daily_totals")
+    s.add_argument("patterns", nargs="*", metavar="PATTERN", help="globs over table paths, e.g. 't-*.sales.daily_totals'; none clears them")
 
     s = sub.add_parser("privacy", help="which tables and columns hold personal data, their data category and retention")
     kinds = s.add_subparsers(dest="what", required=True)
