@@ -515,3 +515,14 @@ def test_a_run_is_discovered_and_its_proposed_manifest_imports_once_its_files_ar
     assert "Ready to import." in capsys.readouterr().out and json.loads(out.read_text())["version"] == "v20"
     assert main(["--database-url", database, "discover", "vertex-runs", "--project", "workforce-demo", "--since", "2026-10-01"]) == 0
     assert "recorded: staffing-forecast v20" in capsys.readouterr().out
+
+
+def test_files_a_notebook_wrote_say_so_as_stated(catalog):
+    notebook = {"kind": "notebook", "path": "notebooks/export.ipynb", "repository": "https://github.com/o/r", "commit": "abc123"}
+    result = filesets.record(catalog, client=files_client(), uris=[LOADER_OUT], created_by=notebook)
+    trace = builds.explain_dataset(catalog, result["reference"])
+    assert trace["produced_by"] is None and trace["created_by"] == notebook
+    assert "what wrote these files is as ana said (notebook notebooks/export.ipynb), not checked against a run" in trace["missing"]
+    later = filesets.record(catalog, client=files_client(), uris=[LOADER_OUT], created_by=notebook | {"note": "run on 2026-10-05"})
+    assert later["change"] == "changed" and builds.explain_dataset(catalog, result["reference"])["created_by"]["note"] == "run on 2026-10-05"
+    assert filesets.record(catalog, client=files_client(), uris=[LOADER_OUT])["change"] == "unchanged"  # saying nothing keeps it

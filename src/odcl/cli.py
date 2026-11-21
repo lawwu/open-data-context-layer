@@ -43,6 +43,14 @@ def _defined(defined: dict) -> str:
     return f"{defined['file']} at commit {defined['commit']}" if defined.get("commit") else f"{defined['file']} (no git commit)"
 
 
+def _created(c: dict | None) -> str:
+    if not c:
+        return "unknown"
+    where = c.get("path") or c.get("url") or c.get("command") or ""
+    return (f"{c['kind']} {where}" + (f" at {c['commit'][:12]}" if c.get("commit") else "") + (" (with uncommitted changes)" if c.get("uncommitted") else "")
+            + (f" in {c['repository']}" if c.get("repository") else "") + "  (as stated)")
+
+
 def _relied(documents: list[dict]) -> list[str]:
     return [f"  {d['document']} at {d['revision']} ({d['pinned_by'].replace('_', ' ')})" + (f"  for: {d['why']}" if d["why"] else "")
             + ("  (corrected since)" if d["changed_since"] else "") for d in documents]
@@ -105,7 +113,8 @@ def lines(command: str, result) -> list[str]:
                f"  produced by   {produced['pipeline_run']} / task {produced['task']}",
                f"  artifact      {artifact['uri']}#{artifact['generation']}  sha256 {artifact['sha256'][:12]}…",
                f"  read          {read['uri']}  ({_count(read['objects'], 'object')}, generations pinned)",
-               "  written by    " + (f"{read['produced_by']['pipeline_run']} / task {read['produced_by']['task']}" if read["produced_by"] else "unknown"),
+               "  written by    " + (f"{read['produced_by']['pipeline_run']} / task {read['produced_by']['task']}" if read["produced_by"]
+                                    else _created(read.get("created_by"))),
                "  exported from " + (f"{read['exported_from']['table']}" + ("  (changed since)" if read["exported_from"]["changed_since"] else "")
                                      if read["exported_from"] else "not recorded")]
         for j in read.get("exported_by") or []:
@@ -145,7 +154,8 @@ def lines(command: str, result) -> list[str]:
     if command == "explain" and result.get("kind") == "gcs_files":
         produced, exported = result["produced_by"], result["exported_from"]
         out = [result["reference"], f"  files         {result['uri']}  ({_count(len(result['objects']), 'object')}, generations pinned)",
-               "  written by    " + (f"{produced['pipeline_run']} / task {produced['task']}  {produced['state']}" if produced else "unknown"),
+               "  written by    " + (f"{produced['pipeline_run']} / task {produced['task']}  {produced['state']}" if produced
+                                    else _created(result.get("created_by"))),
                "  exported from " + (f"{exported['table']}" + ("  (changed since)" if exported["changed_since"] else "") if exported else "not recorded")]
         for j in result.get("exported_by") or []:
             out.append(f"  exported by   BigQuery job ({j['job']})  {j['statement_type']}" + (f"  {j['rows']:,} rows" if j["rows"] is not None else ""))
@@ -212,6 +222,9 @@ def lines(command: str, result) -> list[str]:
     if command == "instances":
         copies = [f"  copy: {link['to']}" for link in result["links"] if link["relation"] == "instance_of"]
         return [f"{result['key']}  {result['change']}  ({result['revision']})"] + (copies or ["  no table matches yet"])
+    if command == "created-by":
+        return [f"{result['key']}  {result['change']}  ({result['revision']})", f"  created by {_created(result.get('created_by'))}"
+                if result.get("created_by") else "  nothing recorded"]
     if command == "references":
         return [f"{result['key']}  {result['change']}  ({result['revision']})"] + [
             f"  references {link['to']}" for link in result["links"] if link["relation"] == "references"]
@@ -284,9 +297,11 @@ def run(catalog: Catalog, args):
         from . import filesets, vertex
         location = vertex.JOB.match(args.pipeline_run or "")
         require(location or not args.pipeline_run, "files", "--pipeline-run is a Vertex AI pipeline job: projects/P/locations/L/pipelineJobs/J")
+        from .provenance import describe
+        created = describe(args.created_by, note=args.created_by_note) if args.created_by or args.created_by_note else None
         return filesets.record(catalog, client=vertex.client(location.group(2) if location else "us-central1"), pipeline_run=args.pipeline_run,
                                task=args.task, output=args.output, uris=args.uri, from_table=args.from_table, export_jobs=args.export_job,
-                               find_export_job=args.find_export_job, sql=args.sql)
+                               find_export_job=args.find_export_job, sql=args.sql, created_by=created)
     if args.command == "explain" and args.what == "model":
         return catalog.explain_model(args.name, args.version)
     if args.command == "explain":
@@ -310,6 +325,10 @@ def run(catalog: Catalog, args):
         return {**found, "written_to": args.out}
     if args.command == "rely":
         return catalog.rely(args.model, args.version, args.documents, args.why)
+    if args.command == "created-by":
+        from .provenance import describe
+        return catalog.set_created_by(args.table, None if args.clear else describe(args.what, kind=args.kind, command=args.command_line, note=args.note,
+                                                                                   repo_url=args.repo_url, commit=args.commit))
     if args.command == "references":
         return catalog.set_references(args.column, args.targets)
     if args.command == "instances":
@@ -395,6 +414,9 @@ def parser() -> argparse.ArgumentParser:
                    help="the BigQuery EXPORT DATA job that wrote the files; each field is traced through its SELECT (repeat for several)")
     f.add_argument("--find-export-job", action="store_true", help="with --pipeline-run: find the EXPORT DATA job among the jobs created while the task ran")
     f.add_argument("--sql", choices=["templates", "none"], default="templates", help="keep the export job's SQL as its shape (default), or not at all")
+    f.add_argument("--created-by", metavar="SCRIPT", help="what wrote the files, when no pipeline task did: a script or notebook (a local file, read "
+                                                         "from git) or a link")
+    f.add_argument("--created-by-note", metavar="TEXT", help="how it was run, or anything else worth knowing")
 
     s = sub.add_parser("explain", help="where something came from, as recorded")
     kinds = s.add_subparsers(dest="what", required=True)
@@ -451,6 +473,16 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--version", required=True)
     s.add_argument("documents", nargs="+", metavar="DOCUMENT")
     s.add_argument("--why", help="what the model took from them")
+
+    s = sub.add_parser("created-by", help="say what created a table or file: a script, a notebook, a query run by hand")
+    s.add_argument("table", help="the table, view or file entry")
+    s.add_argument("what", nargs="?", help="a local file (its repository, commit and link are read from git), a link, or a path in --repo-url")
+    s.add_argument("--kind", choices=["script", "notebook", "query", "job", "manual", "other"], help="default: from the file's extension")
+    s.add_argument("--command", dest="command_line", metavar="CMD", help="how it was run, e.g. python make_features.py --month 2026-10")
+    s.add_argument("--note", help="anything else worth knowing")
+    s.add_argument("--repo-url", help="the repository, when the file is not in a local checkout")
+    s.add_argument("--commit", help="the commit, when git cannot say")
+    s.add_argument("--clear", action="store_true", help="forget what created it")
 
     s = sub.add_parser("references", help="say which columns a column's values are drawn from: a foreign key")
     s.add_argument("column")

@@ -80,6 +80,7 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 | `odcl explain dataset SNAPSHOT[@TIME]` | Which build, job, file and inputs a dataset version came from |
 | `odcl record dataset-files --pipeline-run JOB --task TASK --output NAME [--from-table TABLE] [--export-job P:L.JOB \| --find-export-job]` | Record the files a pipeline task exported as a dataset version, bound to the BigQuery job that wrote them |
 | `odcl import --sql-definitions FILE.jsonl` | Read tables and the SELECT that builds each, from any source |
+| `odcl created-by TABLE SCRIPT\|NOTEBOOK\|URL [--command] [--note]` | Say what created a table or file |
 | `odcl references COLUMN TARGET...` | Say which column a column's values are drawn from (a foreign key) |
 | `odcl instances DEFINITION PATTERN...` | Say which tables are copies of a definition, so lineage and users go through them |
 | `odcl privacy set KEY... [--pii] [--data-category] [--retention] [--scrubbing]` | Say which data is personal, how it is scrubbed and kept |
@@ -401,6 +402,18 @@ uv run odcl docs warehouse.sales.orders.status_code
 The web page has a page for each document, with its links grouped by section and its text shown as text; nothing in a page runs. Every entry has a "Documented in" panel, and search finds documents. The MCP server has a `documents_for` tool, and `find_data` returns documents. `Catalog.put("document", …)` and `odcl.docs.import_docs` are the Python interface.
 
 **A model version can rely on a document**, such as a finding about how a field behaves. The training manifest lists it under `relied_on` (a document key, or `{"document", "digest" or "revision", "why"}`), or `odcl rely MODEL --version V DOCUMENT… --why TEXT` records it afterwards. Each is pinned at one revision: the one the manifest names or whose content digest it gives, else the one current when the training task ended. When the page is corrected later, `odcl explain model`, the model and document pages and `odcl overview` say which model versions used the old text.
+
+## What created a table or file
+
+Some data is made by a script or a notebook rather than a pipeline the catalog reads. A table (which in odcl also stands for a view or a file) can say what created it: its kind (`script`, `notebook`, `query`, `job`, `manual` or `other`), path, repository, commit, link, the command that ran it and a note.
+
+```sh
+uv run odcl created-by lake.cohorts.monthly notebooks/build_cohort.ipynb --note "run by hand each month"
+uv run odcl created-by warehouse.ref.holidays make_holidays.py --command "python make_holidays.py --year 2027"
+uv run odcl record dataset-files --uri gs://bucket/cohort/2026-10 --created-by notebooks/export.ipynb
+```
+
+Given a local file, the repository, the path in it, the commit that last changed it and a link come from git, and the kind from its extension (`.ipynb` is a notebook). A file with uncommitted changes is marked so, because that commit is not the code that ran. A link or a path in `--repo-url` works too. It is what a person said, not something odcl checked: the web page and `odcl explain` show it "as stated". For files a pipeline task did not write, `record dataset-files --created-by` fills the "written by" a URI alone leaves unknown. Imports that merge keep it; `--clear` forgets it.
 
 ## Foreign keys
 

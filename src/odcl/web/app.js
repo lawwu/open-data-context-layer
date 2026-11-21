@@ -280,6 +280,7 @@ async function entryPage(key) {
       ["Layer", entry.layer], ["System", entry.system], ["Owner", entry.owner], ["Status", entry.status],
       ["Repository", entry.repository],
       ["Tags", (entry.tags || []).join(", ")],
+      ["Created by", createdBy(entry.created_by)],
       ["References", (entry.references || []).length ? entry.references.map((d, n) => [n ? ", " : "", entryLink(d.key, d.title), d.changed_since ? [" ", changedBadge()] : ""]) : null],
       ["Foreign keys", (entry.foreign_keys || []).length ? entry.foreign_keys.map((f, n) => [n ? "; " : "", entryLink(f.column, f.column.split(".").pop()), " → ", entryLink(f.references, f.references.replace(/^column:/, ""))]) : null],
       ["Referenced by", (entry.referenced_by || []).length ? entry.referenced_by.map((d, n) => [n ? ", " : "", entryLink(d.key || d.column, (d.title || d.column).replace(/^column:/, ""))]) : null],
@@ -430,12 +431,25 @@ function missingList(missing) {
     missing.length ? missing.map((m) => h("div", { class: "missing" }, "△ ", m)) : h("p", { class: "status good" }, "✓ Every link of this trace is recorded.")];
 }
 
+// what a person said created a table or file: a script, a notebook, a query; links only to http(s) addresses
+function createdBy(c) {
+  if (!c) return null;
+  const where = c.path || c.url || c.command || "";
+  const safe = /^https?:\/\//.test(c.url || "") ? c.url : null;
+  return h("span", {}, h("span", { class: "badge" }, c.kind), " ", safe ? h("a", { href: safe, target: "_blank", rel: "noopener noreferrer" }, where, " ↗") : h("code", {}, where),
+    c.commit ? h("span", { class: "muted" }, ` at ${c.commit.slice(0, 12)}`) : null,
+    c.uncommitted ? h("span", { class: "status warning", title: "The file had changes not in that commit" }, " △ uncommitted changes") : null,
+    c.command && c.command !== where ? h("div", {}, h("code", {}, c.command)) : null, c.note ? h("div", { class: "muted" }, c.note) : null,
+    h("div", { class: "muted" }, "as stated; not checked against a run"));
+}
+
 function filesSteps(files) {
   const written = files.produced_by;
   const exported = files.exported_from;
   return [
-    step("Written by", written ? `${written.pipeline_run.split("/").pop()} / task ${written.task}` : "not recorded",
-      written ? h("span", {}, written.pipeline_run, " ", consoleLink(gcp.pipelineRun(written.pipeline_run))) : "the files were named by URI, not read from a pipeline task's output",
+    step("Written by", written ? `${written.pipeline_run.split("/").pop()} / task ${written.task}` : files.created_by ? files.created_by.kind : "not recorded",
+      written ? h("span", {}, written.pipeline_run, " ", consoleLink(gcp.pipelineRun(written.pipeline_run)))
+        : files.created_by ? createdBy(files.created_by) : "the files were named by URI, not read from a pipeline task's output",
       written?.state ? h("span", {}, stateBadge(written.state)) : null),
     step("Exported from", exported ? entryLink(`table:${exported.table}`, exported.table) : "not recorded",
       exported ? h("span", {}, "table-level lineage only, pinned when the files were recorded",

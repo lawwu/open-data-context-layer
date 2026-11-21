@@ -101,6 +101,7 @@ def search_text(body: dict) -> str:
     words = " ".join(str(body.get(f) or "") for f in ("title", "description", "definition", "owner", "layer", "system", "dtype", "doc_kind", "text",
                                                       "data_category"))
     words += " pii" if body.get("pii") else ""
+    words += " " + " ".join(str((body.get("created_by") or {}).get(f) or "") for f in ("kind", "path", "note"))
     words += " " + " ".join(h["text"] for h in body.get("headings") or [])
     return " ".join(TOKEN.findall((words + " " + " ".join(body["tags"])).lower()))
 
@@ -250,7 +251,7 @@ class Catalog:
                     said = prior["body"]
                     kept = {"description": said["description"] or None, **{f: said.get(f) for f in TEXT[kind]}, "tags": said["tags"],
                             **({f: said.get(f) for f in ("pii", *PRIVACY)} if kind != "project" else {}),
-                            **({"instances": said.get("instances")} if kind == "table" else {}),
+                            **({"instances": said.get("instances"), "created_by": said.get("created_by")} if kind == "table" else {}),
                             "derived_from": [link["to"] for link in said["links"] if link["relation"] == "derived_from"],
                             **({"references": [link["to"] for link in said["links"] if link["relation"] == "references"]} if kind == "column" else {})}
                     require(isinstance(payload.get("source") or {}, dict), "source", "source is a small object saying where the entry came from")
@@ -280,6 +281,7 @@ class Catalog:
                     "description": text(p.get("description"), "description", 4000, optional=kind != "project") or "",
                     **{field: text(p.get(field), field, limit, optional=True) for field, limit in TEXT[kind].items()},
                     **(self._privacy(p) if kind != "project" else {}), **({"instances": instances} if instances else {}),
+                    **({"created_by": created} if kind == "table" and (created := self._created_by(p)) else {}),
                     "tags": sorted(set(tags)), "source": source, "links": links}
             written = self._write(body)
             if kind == "table" and written["change"] == "added":
@@ -298,6 +300,11 @@ class Catalog:
                                     WHERE r.body ? 'instances'""").fetchall():
             if r["body"]["key"] != key and any(fnmatchcase(key[6:], p) for p in r["body"]["instances"]):
                 self.put("table", {"path": r["body"]["path"]}, merge=True)
+
+    @staticmethod
+    def _created_by(p: dict) -> dict | None:
+        from .provenance import check
+        return check(p.get("created_by"))
 
     @staticmethod
     def _privacy(p: dict) -> dict:
@@ -610,6 +617,11 @@ class Catalog:
         return ([{"column": r["source_key"], "references": r["target_key"], "table": tables[r["target_key"]], "changed_since": r["changed"]} for r in out],
                 [{"column": r["source_key"], "table": tables[r["source_key"]], "references": r["target_key"]} for r in into
                  if tables[r["source_key"]] != table])
+
+    def set_created_by(self, table: str, created_by: dict | None) -> dict:
+        """Say what created a table or file (a script, a notebook, a query), keeping everything else it says. None clears it."""
+        body = self._head(self.resolve(table, ("table",)))["body"]
+        return self.put("table", {"path": body["path"], "created_by": created_by or {}}, merge=True)  # {} says it outright: nothing
 
     def set_references(self, column: str, targets: list[str]) -> dict:
         """Say which columns a column's values are drawn from (a foreign key), keeping everything else it says. No

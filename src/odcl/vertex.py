@@ -367,6 +367,7 @@ def explain_model(catalog: Catalog, name: str, version: str) -> dict:
             "model": manifest["model"], "version": row["version"], "produced_by": produced, "artifact": artifact,
             "read": {"dataset_version": data["reference"], "kind": "gcs_files", "uri": data["uri"], "objects": len(data["objects"]), "generations_pinned": True,
                      "produced_by": {k: data["produced_by"][k] for k in ("pipeline_run", "task", "state")} if data["produced_by"] else None,
+                     **({"created_by": data["created_by"]} if data.get("created_by") else {}),
                      "exported_from": data["exported_from"],
                      **({"exported_by": data["exported_by"], "row_filter": data["row_filter"]} if data["exported_by"] else {})},
             "inputs": [_file_input(i, columns.get(i["field_path"], {}), bool(data["exported_by"]))
