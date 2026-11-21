@@ -1,5 +1,6 @@
 # The docs site on GitHub Pages (https://lawwu.github.io/open-data-context-layer/), built
-# with MkDocs from README.md, CHANGELOG.md and docs/ (mkdocs.yml). Every push to main
+# with Zensical from README.md, CHANGELOG.md and docs/ (zensical.toml, scripts/docs.py,
+# which assembles them into build/docs/ first). Every push to main
 # publishes it; pull requests only build it, in strict mode, so a broken link fails there.
 # On a push to main rather than a release: main is what GitHub shows, and the github-pages
 # environment only deploys from the default branch until told otherwise. Needs Settings →
@@ -29,9 +30,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: false # nothing cached is carried into what gets published
-      - run: uv run --locked --only-group site mkdocs build --strict
-        env:
-          NO_MKDOCS_2_WARNING: '1'
+      - run: uv run --locked --only-group site --python 3.14 python scripts/docs.py build
       - if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v5.0.0
         with:

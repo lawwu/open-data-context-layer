@@ -12,6 +12,6 @@ section says how a release is cut.
   them as a GitHub release with this changelog's notes; a `latest` tag follows the newest
   release.
 - Docs: a site on GitHub Pages, https://lawwu.github.io/open-data-context-layer/, built with
-  MkDocs from the README, this changelog and `docs/`, and published on every push to `main`.
+  Zensical from the README, this changelog and `docs/`, and published on every push to `main`.
 - Workflows: every action is locked to a commit in `.github/workflows/actions.lock`, checked
   on every pull request with zizmor.

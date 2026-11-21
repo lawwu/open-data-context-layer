@@ -6,3 +6,4 @@ dist/
 .ruff_cache/
 .fathom/
 site/
+build/

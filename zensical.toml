@@ -1,0 +1,54 @@
+# The docs site on GitHub Pages (.github/workflows/pages.yml), built with Zensical. Build
+# it with scripts/docs.py, which assembles README.md, CHANGELOG.md and docs/ into
+# build/docs/ first:
+#   uv run --only-group site python scripts/docs.py build   # or: serve
+[project]
+site_name = "Open Data Context Layer"
+site_description = "What data exists, how it connects, and which projects use it."
+site_url = "https://lawwu.github.io/open-data-context-layer/"
+repo_url = "https://github.com/lawwu/open-data-context-layer"
+repo_name = "lawwu/open-data-context-layer"
+docs_dir = "build/docs"
+site_dir = "site"
+nav = [
+  { "Home" = "index.md" },
+  { "Implementation plan" = "implementation-plan.md" },
+  { "Changelog" = "changelog.md" },
+]
+
+[project.theme]
+language = "en"
+features = [
+  "content.code.copy",
+  "navigation.instant",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.highlight = {}
+pymdownx.superfences = {}

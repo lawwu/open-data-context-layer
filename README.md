@@ -385,10 +385,11 @@ ODCL_TEST_DATABASE_URL=postgresql://localhost/odcl_test uv run pytest -q
 
 Without `ODCL_TEST_DATABASE_URL` the database tests are skipped locally and fail in CI. Schema changes go in a new numbered file in `src/odcl/migrations/`.
 
-**The docs site**, https://lawwu.github.io/open-data-context-layer/, is drawn from this README, [`CHANGELOG.md`](CHANGELOG.md) and the pages in `docs/` with MkDocs ([`mkdocs.yml`](mkdocs.yml)), so there is no second copy to keep in step. Links written for GitHub are pointed at the site's pages, or at the file on GitHub when the site has none ([`scripts/mkdocs_hooks.py`](scripts/mkdocs_hooks.py)). Every push to `main` publishes it (`.github/workflows/pages.yml`, which needs **Settings → Pages → Source: GitHub Actions**); pull requests build it in strict mode, so a broken link or anchor fails there. A new page in `docs/` goes in `nav` in `mkdocs.yml`.
+**The docs site**, https://lawwu.github.io/open-data-context-layer/, is drawn from this README, [`CHANGELOG.md`](CHANGELOG.md) and the pages in `docs/` with [Zensical](https://zensical.org) ([`zensical.toml`](zensical.toml)), so there is no second copy to keep in step. [`scripts/docs.py`](scripts/docs.py) assembles those files into `build/docs/` first, pointing links written for GitHub at the site's pages, or at the file on GitHub when the site has none. Every push to `main` publishes it (`.github/workflows/pages.yml`); pull requests build it in strict mode, so a broken link or anchor fails there. A new page in `docs/` goes in `nav` in `zensical.toml`.
 
 ```sh
-uv run --only-group site mkdocs serve   # then http://127.0.0.1:8000/
+uv run --only-group site python scripts/docs.py serve   # then http://127.0.0.1:8000/; restart after editing
+uv run --only-group site python scripts/docs.py build   # strict, into site/
 ```
 
 **The workflows** (`.github/workflows/`): `ci.yml` runs ruff and the tests on PostgreSQL 16 and merges Dependabot's minor and patch updates once they pass; `pages.yml` builds and publishes the docs; `release.yml` and `latest.yml` cut releases (below); `actions.yml` checks the workflows themselves. They name exact action versions, and `.github/workflows/actions.lock` records each one's commit, so a release tag moved to other code later can't change what runs. After changing a workflow, relock with GitHub's [gh-actions-lock](https://github.com/github/gh-actions-lock) and check it with [zizmor](https://docs.zizmor.sh), as CI does:
