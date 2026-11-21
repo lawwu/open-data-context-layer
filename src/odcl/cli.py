@@ -17,6 +17,20 @@ def span(value: str) -> timedelta:
     return timedelta(**{"days" if found.group(2) == "d" else "hours": int(found.group(1))})
 
 
+def moment(value: str, name: str):
+    """A time as ISO 8601 (a date, or a date and time; UTC unless it says), or a span back from now such as 7d."""
+    from datetime import datetime, timezone
+
+    from . import store
+    if re.fullmatch(r"\d{1,4}[dh]", value or ""):
+        return store.now() - span(value)
+    try:
+        when = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        raise CatalogError(name, f"{value!r} is not a time: write 2026-10-05T09:00:00Z, 2026-10-05, or a span back from now like 12h") from None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
 def flag(entry) -> str:
     return "  (changed since)" if entry.get("changed_since") else ""
 
@@ -143,6 +157,7 @@ def lines(command: str, result) -> list[str]:
         return out + [f"missing: {m}" for m in result["missing"]]
     if command == "sync":
         return [f"{result['jobs']} jobs read, {result['added']} new, from {result['since']} to {result['until']}"
+                + (" (this window only: the next sync starts where the last one ended)" if result.get("window") == "explicit" else "")
                 + (f" ({result['excluded']} monitoring jobs left out)" if result["excluded"] else "")
                 + ("" if result["finished"] else f"\nNot recorded as finished: Google could not reach {', '.join(result['unreachable'])}")]
     if command == "history":
@@ -200,9 +215,18 @@ def run(catalog: Catalog, args):
         return catalog.apply(dbt_entries(args.dbt, args.select))
     if args.command == "sync":
         from . import bigquery
+        since = moment(args.since, "since") if args.since else None
+        until = moment(args.until, "until") if args.until else None
+        require(not args.task or args.pipeline_run, "task", "--task names a task of the --pipeline-run")
+        if args.pipeline_run:
+            from . import vertex
+            require(not (since or until), "since", "Give --pipeline-run or --since/--until, not both")
+            location = vertex.JOB.match(args.pipeline_run)
+            require(location, "pipeline_run", "--pipeline-run is a Vertex AI pipeline job: projects/P/locations/L/pipelineJobs/J")
+            since, until = vertex.run_window(vertex.client(location.group(2)).get(args.pipeline_run), args.pipeline_run, args.task)
         client = bigquery.client(args.project)
         try:
-            return bigquery.sync_jobs(catalog, args.project, client=client, backfill=span(args.backfill), sql=args.sql)
+            return bigquery.sync_jobs(catalog, args.project, client=client, since=since, until=until, backfill=span(args.backfill), sql=args.sql)
         finally:
             client.close()
     if args.command == "handoff":
@@ -329,6 +353,11 @@ def parser() -> argparse.ArgumentParser:
     b = kinds.add_parser("bigquery-jobs", help="the query jobs a BigQuery project ran since the last sync")
     b.add_argument("--project", required=True, help="the project the jobs ran in, which may differ from where the tables live")
     b.add_argument("--backfill", default="7d", metavar="SPAN", help="how far back the first sync reads (default: 7d)")
+    b.add_argument("--since", metavar="TIME", help="read exactly the jobs created from this time (ISO 8601, or a span back from now like 12h); "
+                                                   "the regular sync still starts where it last ended")
+    b.add_argument("--until", metavar="TIME", help="read the jobs created up to this time (default: now)")
+    b.add_argument("--pipeline-run", metavar="JOB", help="read the jobs created while this Vertex AI pipeline job ran")
+    b.add_argument("--task", help="with --pipeline-run: only while this task of it ran")
     b.add_argument("--sql", choices=["templates", "none"], default="templates",
                    help="templates keeps each query's shape without its literals; none does not read SQL at all")
 

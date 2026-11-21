@@ -218,6 +218,14 @@ def task_detail(job: dict, pipeline_run: str, name: str) -> dict:
     return task
 
 
+def run_window(job: dict, pipeline_run: str, task: str | None = None) -> tuple[datetime, datetime | None]:
+    """When a pipeline run, or one of its tasks, ran: (start, end). End is None while it is still running."""
+    found = task_detail(job, pipeline_run, task) if task else job
+    start = _time(found.get("startTime") or found.get("createTime"))
+    require(start, "pipeline_run", f"{task or pipeline_run} reports no start time yet")
+    return start, _time(found.get("endTime"))
+
+
 def record_task(db, job: dict, task: dict, pipeline_run: str, name: str) -> int:
     """Record a pipeline run and one of its tasks as executions; the task's id."""
     run = _execution(db, {"native_key": pipeline_run, "kind": "pipeline_run", "parent_id": None, "state": job.get("state") or "UNKNOWN",

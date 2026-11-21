@@ -133,6 +133,11 @@ uv run odcl history table my-project.features.shift_inputs --since 7d --patterns
 **Job history.** `sync bigquery-jobs` reads the query jobs created in one project, the project the jobs ran in, which may differ from where the tables live. Reading other people's jobs needs `bigquery.jobs.listAll` on that project.
 
 - The first sync goes back 7 days (`--backfill`, up to the 180 days BigQuery keeps). Each later sync starts 6 hours before the last finished window ended, or at the oldest job still running, and keeps every job once.
+- To read one window instead, such as the minutes a pipeline task ran, give `--since` and `--until` (ISO 8601, UTC unless it says; `--since` also takes a span back from now like `12h`), or `--pipeline-run JOB` and optionally `--task NAME` to use the window that run or task reports. Its jobs are kept like any others, but the window is not recorded as read through, so the next regular sync still starts where the last one ended.
+
+  ```sh
+  uv run odcl sync bigquery-jobs --project my-job-project --pipeline-run projects/P/locations/L/pipelineJobs/J --task load-data
+  ```
 - A sync that is interrupted keeps the pages it read but does not record the window as finished, so the next sync reads it again.
 - A job that finished is never replaced by an older reading that says it is still running.
 - Jobs labelled as a metadata collector's own (`sounding_action`, `odcl_action`) are left out.
