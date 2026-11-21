@@ -394,6 +394,12 @@ async function entryPage(key) {
       parts.push(h("h2", {}, `Columns (${entry.columns.length})`),
         table(["Column", "Type", "Description"], entry.columns.map((c) => [entryLink(c.key, c.title.split(".").pop()), c.dtype || "", c.description || ""]),
           "No columns are registered."));
+      const proposals = await api(`/v1/privacy/proposals?table=${enc(entry.key)}&min_confidence=medium`).catch(() => []);
+      if (proposals.length) {
+        parts.push(h("details", {}, h("summary", { class: "muted" }, `${plural(proposals.length, "column")} may hold personal data and say nothing about it yet`),
+          h("p", { class: "muted" }, "Proposed from their names, glossary terms and descriptions, not their values. Review with odcl privacy propose --write FILE."),
+          table(["Column", "Category", "Why", "Confidence"], proposals.map((p) => [entryLink(p.key, p.key.split(".").pop()), p.data_category, p.reason, p.confidence]))));
+      }
       if ((entry.retired_columns || []).length) {
         parts.push(h("details", {}, h("summary", { class: "muted" }, `${plural(entry.retired_columns.length, "column")} no longer at the source`),
           table(["Column", "Type", "Description"], entry.retired_columns.map((c) => [entryLink(c.key, c.title.split(".").pop()), c.dtype || "", c.description || ""]))));

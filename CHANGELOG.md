@@ -8,6 +8,10 @@ section says how a release is cut.
 
 ## Unreleased
 
+- `odcl privacy propose` suggests `pii` and a data category for columns that say nothing yet,
+  from their names, glossary terms and descriptions, with a reason and a confidence;
+  `--write` puts them in a file to review and `odcl privacy apply` records the accepted ones.
+  `GET /v1/privacy/proposals`; table pages list such columns.
 - **Glossary terms and domains**: two new kinds of entry. Columns and tables `means` terms;
   tables, projects and terms are `in_domain` a domain (`odcl term add`, `odcl domain add`,
   `odcl means`, `odcl in-domain`, `odcl glossary`, `/v1/glossary`, `/v1/terms`, `/v1/domains`).

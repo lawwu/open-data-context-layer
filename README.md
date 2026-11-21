@@ -590,7 +590,16 @@ uv run odcl privacy set warehouse.crm.customers.email --pii yes --scrubbing hash
 uv run odcl privacy export --pii-only > privacy.csv        # or --json; --table for one table
 ```
 
-`odcl add table|column` take the same flags. A dbt project can say them in `meta` (directly, or under `meta.privacy`) on a source, a model or a column. Imports that merge (BigQuery, Dataform, SQL definitions, OpenLineage) keep what was set; a dbt import says everything about its models, so for those keep the fields in dbt's `meta`. The web page shows them on each entry, and `GET /v1/privacy` answers what `privacy export` does.
+`odcl add table|column` take the same flags. A dbt project can say them in `meta` (directly, or under `meta.privacy`) on a source, a model or a column. Imports keep what was set, including a dbt import, which says everything else about its models; what dbt's `meta` says replaces it. The web page shows them on each entry, and `GET /v1/privacy` answers what `privacy export` does.
+
+**Proposing privacy fields.** `odcl privacy propose` suggests `pii` and a `data_category` for columns that say nothing about `pii` yet, from the words in each column's name, the glossary terms it means and its description, with the reason and a confidence (`high`: `email`, `date_of_birth`, `passport`; `medium`: an address, an IP, `customer_id`, or `name` on a table of people; `low`: `name` elsewhere, or a term or description that mentions such a thing). It reads no rows, so it cannot tell a column of people's names from one of product names: that is what the review is for. Nothing is written until a person accepts:
+
+```sh
+uv run odcl privacy propose --min-confidence medium --write review.jsonl   # set "accept": true on the right lines, fix what is wrong
+uv run odcl privacy apply review.jsonl                                     # records the accepted lines, all or none
+```
+
+`--all` also proposes for columns that already say, `--table` limits it to one table, and `GET /v1/privacy/proposals` returns the same. A table's page lists its columns that may hold personal data.
 
 ## For agents
 
