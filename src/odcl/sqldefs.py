@@ -51,7 +51,10 @@ def action(line: dict, where: str) -> dict:
     if isinstance(columns, list):  # [{"name": ..., "description": ...}] is accepted as well as {name: description}
         require(all(isinstance(c, dict) and c.get("name") for c in columns), "sql_definitions", f"{where}: each column has a name")
         columns = {c["name"]: c.get("description") for c in columns}
-    require(isinstance(columns, dict), "sql_definitions", f"{where}: columns maps each column's name to its description")
+    require(isinstance(columns, dict) and all(isinstance(t, str) or t is None for t in columns.values()), "sql_definitions",
+            f"{where}: columns maps each column's name to its description")
+    require(line.get("type") is None or isinstance(line["type"], str), "sql_definitions", f"{where}: type is text, such as table or view")
+    require(all(isinstance(d, str) for d in dependencies), "sql_definitions", f"{where}: dependencies is a list of table names")
     return {"target": target, "filePath": line.get("file"), "relation": {
         "selectQuery": line["select"], "dependencyTargets": [_target(d, where) for d in dependencies], "relationType": line.get("type") or "table",
         "relationDescriptor": {"description": description, "columns": [{"path": str(name).split("."), "description": text}
@@ -78,11 +81,12 @@ def read(path: str) -> list[dict]:
     return out
 
 
-def import_definitions(catalog: Catalog, path: str, *, repository: str | None = None, system: str = "bigquery", dialect: str = "bigquery") -> dict:
+def import_definitions(catalog: Catalog, path: str, *, repository: str | None = None, system: str | None = None, dialect: str = "bigquery") -> dict:
     """Register every table a definitions file names, and each column with what it is computed from. All, or none."""
     from .dataform import definition_entries
     actions = read(path)
-    found = definition_entries(catalog, repository or Path(path).name, actions, importer=IMPORTER, system=system, dialect=dialect)
+    found = definition_entries(catalog, repository or Path(path).name, actions, importer=IMPORTER, system=system or dialect, dialect=dialect)
     counts = catalog.apply(found.entries, merge=True)
     traced = [status for columns in found.traced.values() for status in columns.values()]
-    return {**counts, "definitions": len(actions), "columns_traced": traced.count("resolved"), "columns_partial": traced.count("partial")}
+    return {**counts, "definitions": len(actions), "columns_traced": traced.count("resolved"), "columns_partial": traced.count("partial"),
+            "unresolved": found.unresolved, "untraced": found.unreadable}

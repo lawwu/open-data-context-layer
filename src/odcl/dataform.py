@@ -72,6 +72,12 @@ def _time(value: str | None) -> datetime | None:
 
 
 # ---- definitions ---------------------------------------------------------------------------------------------
+def named_only(body: dict) -> bool:
+    """Whether an entry was registered only because a query named it: every source that said it says just that."""
+    source = body.get("source") or {}
+    return bool(source) and all(isinstance(v, dict) and v.get("named_by_query") for v in source.values())
+
+
 class Definitions:
     """Builds the catalog entries for one compilation result, dependencies before what depends on them."""
 
@@ -82,22 +88,42 @@ class Definitions:
         self.tables: set[str] = set()
         self.columns: dict[str, set[str]] = {}  # table fqn -> column names registered in this batch
         self.traced: dict[str, dict] = {}       # target fqn -> {column name: "resolved" | "partial"}
+        self.by_name: set[str] = set()          # tables read but neither defined here nor registered: registered by name only
+        self.unreadable: list[str] = []         # targets whose SQL names no columns sqlglot can read, so nothing is traced
+
+    @property
+    def unresolved(self) -> list[str]:
+        """Tables the definitions read that are neither defined here nor registered, so they are registered by name."""
+        return sorted(self.by_name)
 
     def known_columns(self, table: str) -> set[str]:
-        prefix = f"column:{table}."
-        known = {key[len(prefix):] for key in self.catalog._columns(f"table:{table}")} if self.catalog._head(f"table:{table}") else set()
+        """A table's columns, for sqlglot to qualify a query by and expand `*` to. A column an importer registered only
+        because a query named it (marked `named_by_query` in its source, and said by nothing else) does not count: the
+        next import would qualify against that partial list and lose what the first one traced."""
+        known = {r["name"] for r in self.catalog.db.execute(
+            """SELECT r.body ->> 'name' AS name, r.body -> 'source' AS source FROM entries e JOIN revisions r ON r.id = e.head_revision
+               WHERE e.kind = 'column' AND r.body ->> 'kind' = 'column' AND r.body ->> 'table' = %s""", (f"table:{table}",))
+                 if not named_only(r)}
         return {c for c in known | self.columns.get(table, set()) if "." not in c}
 
     def table(self, table: str, payload: dict | None = None) -> None:
-        if payload is not None or (table not in self.tables and not self.catalog._head(f"table:{table}")):
-            self.entries.append(("table", {"path": table, "system": self.system, **(payload or {})}))
+        if payload is not None:
+            self.entries.append(("table", {"path": table, "system": self.system, **payload}))
+            self.by_name.discard(table)
+        elif table not in self.tables:
+            head = self.catalog._head(f"table:{table}")
+            if not head:
+                self.entries.append(("table", {"path": table, "system": self.system, "source": {self.importer: {"named_by_query": True}}}))
+            if not head or named_only(head["body"]):
+                self.by_name.add(table)
         self.tables.add(table)
 
     def column(self, table: str, name: str, payload: dict | None = None) -> str:
         self.table(table)
         key = f"column:{table}.{name}"
         if payload is not None or (name not in self.columns.get(table, set()) and not self.catalog._head(key)):
-            self.entries.append(("column", {"table": f"table:{table}", "name": name, **(payload or {})}))
+            self.entries.append(("column", {"table": f"table:{table}", "name": name,
+                                            **(payload or {"source": {self.importer: {"named_by_query": True}}})}))
         self.columns.setdefault(table, set()).add(name)
         return key
 
@@ -131,6 +157,7 @@ class Definitions:
         outputs = lineage.selected(sql, self.dialect, schema)
         traced: dict[str, str] = {}
         if not outputs:  # SQL nothing can read: whatever the catalog knew of these columns is no longer this definition
+            self.unreadable.append(target)
             for name in sorted(self.known_columns(target)):
                 self.column(target, name, {"definition": "", "derived_from": [], "tags": ["lineage:partial"], "source": {self.importer: {"file": action.get("filePath")}}})
         for name in outputs:
@@ -247,4 +274,5 @@ def import_invocation(catalog: Catalog, name: str, *, client) -> dict:
                                    **({"columns": pinned["columns"]} if pinned else {})})})
             recorded.append({"target": target, "state": action.get("state"), "job_id": job})
     return {"invocation": name, "compilation_result": compilation_name, "commit": commit, "entries": counts,
-            "definitions": "applied" if current else "kept newer", "actions": recorded}
+            "definitions": "applied" if current else "kept newer", "actions": recorded,
+            "unresolved": definitions.unresolved if current else [], "untraced": definitions.unreadable if current else []}

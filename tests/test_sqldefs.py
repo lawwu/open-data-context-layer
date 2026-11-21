@@ -64,3 +64,26 @@ def test_what_is_refused_names_the_line(catalog, tmp_path):
 def test_the_command_line_imports_a_definitions_file(database, tmp_path, capsys):
     assert main(["--database-url", database, "import", "--sql-definitions", write(tmp_path, LINES)]) == 0
     assert "2 definitions" in capsys.readouterr().out
+
+
+def test_tables_that_are_neither_defined_nor_registered_and_sql_not_traced_are_named(catalog, tmp_path, capsys):
+    lines = [{"target": "hub.summary.a", "select": "SELECT org_id FROM hub.raw.shifts", "dependencies": ["hub.raw.missing"]},
+             {"target": "hub.summary.b", "select": "SELEC garbage FROM"}]
+    result = import_definitions(catalog, write(tmp_path, lines))
+    assert result["unresolved"] == ["hub.raw.missing"] and result["untraced"] == ["hub.summary.b"]
+    assert main(["--database-url", catalog.db.info.dsn, "import", "--sql-definitions", write(tmp_path, lines)]) == 0
+    out = capsys.readouterr().out
+    assert "registered by name only: hub.raw.missing" in out and "not traced" in out and "hub.summary.b" in out
+
+
+@pytest.mark.parametrize("line", [{"target": "hub.s.a", "select": "SELECT 1 AS x", "columns": {"x": 5}},
+                                  {"target": "hub.s.a", "select": "SELECT 1 AS x", "type": 7},
+                                  {"target": "hub.s.a", "select": "SELECT 1 AS x", "dependencies": [3]}])
+def test_a_malformed_line_is_refused_by_name(catalog, tmp_path, line):
+    with pytest.raises(CatalogError, match="line 1"):
+        import_definitions(catalog, write(tmp_path, [line]))
+
+
+def test_the_system_follows_the_dialect_unless_named(catalog, tmp_path):
+    import_definitions(catalog, write(tmp_path, [{"target": "w.s.t", "select": "SELECT 1 AS x"}]), dialect="postgres")
+    assert catalog.get("w.s.t")["system"] == "postgres"

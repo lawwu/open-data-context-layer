@@ -168,10 +168,13 @@ odcl reads a PostgreSQL database's own catalog: its tables (ordinary, partitione
 uv run odcl import --postgres postgresql://reader@db.internal/shop --schema public sales
 ```
 
+Keep the password out of the URL, where it would land in shell history: set `PGPASSWORD` or use a `~/.pgpass` file, which libpq reads.
+
 - **Keys** are `database.schema.table` (`--database-name` to key them by another name), lower-cased, like every key. The URL, and any password in it, is not kept.
 - **Descriptions** are the tables' and columns' comments; each column keeps its type, position and whether it may be null.
 - **View lineage.** Each view's SQL is read with every table it reads named by its schema, and each of its columns is traced through it as a Dataform definition is, in PostgreSQL's dialect: through CTEs and `SELECT *`, from views to the tables under them, and tagged `lineage:partial` when only partly traced. Quoted mixed-case names match their lower-cased keys.
-- **Foreign keys** become `references` links. A key to a schema not read is named in `skipped`, as is a name the catalog cannot key.
+- **Foreign keys** become `references` links. A partitioned table's key is read once, not again for each partition. A key to a schema not read is named in `skipped`, as is a name the catalog cannot key (and any key on such a column), and a second table or column whose name differs from another's only in case.
+- **Tables in schemas not read**, that a view reads, are registered by name and named in `skipped` on every import until something registers them. The column names a view's SQL gives them are not taken as their full list, so importing again traces the view the same way.
 - Entries merge with what other importers said, under `postgres` in `source`, and are applied together. Importing again changes nothing unless the database changed.
 
 ## Importing from Dataform
@@ -200,10 +203,12 @@ A registry, a hand-kept list of views, or any tool odcl has no importer for can 
 ```
 
 ```sh
-uv run odcl import --sql-definitions definitions.jsonl            # --dialect for SQL other than BigQuery's
+uv run odcl import --sql-definitions definitions.jsonl            # --dialect for SQL other than BigQuery's (--system if not the dialect's name)
 ```
 
 `target` is required, and so is `select` unless the line is a `declaration` (a source table with no SQL). `dependencies` adds tables the SELECT does not name. Entries merge with what other importers said, under `sql_definitions` in `source`; the whole file is applied together, and a line that cannot be read is refused with its line number before anything is written.
+
+The result names what could not be linked rather than failing: `unresolved`, the tables read that are neither defined in the file nor registered (registered by name only), and `untraced`, the targets whose SQL sqlglot cannot read. A Dataform import reports the same two lists.
 
 ## Binding data to the build that made it
 
@@ -439,7 +444,7 @@ uv run odcl references shop.public.orders.customer_id shop.public.customers.id  
 uv run odcl add column shop.public.orders customer_id --references shop.public.customers.id
 ```
 
-Importers fill them in: BigQuery's table constraints and Postgres foreign keys. A key to a table that is neither registered nor in the same import is left out and named in the import's result as `unresolved_references`.
+Importers fill them in: BigQuery's table constraints and Postgres foreign keys. A key to a table that is neither registered nor in the same import is left out and named in the import's result: `unresolved_references` for BigQuery, `skipped` for Postgres.
 
 ## Copies of one definition
 
@@ -450,7 +455,7 @@ uv run odcl instances core.sales.daily_totals 't-*.sales.daily_totals'
 ```
 
 - **Lineage goes through copies.** A copy is read as built from its definition, and each of its columns from the definition's column of the same name. So the lineage of a model's input runs from the tenant copy it read to the definition's SQL and on to what that reads, and the definition's columns show the projects that use any copy.
-- **Patterns** are kept on the definition and resolved whenever it is written. A table registered later that matches is linked when it is registered.
+- **Patterns** are kept on the definition and resolved whenever it is written. A table registered later that matches is linked when it is registered; an import links all the copies it registered at its end, in one new revision of the definition.
 - **Shown** on both: a definition lists its patterns and copies, and a copy names its definition. `Catalog.set_instances` is the Python interface; `odcl instances DEFINITION` with no patterns clears them.
 
 ## Privacy
@@ -484,7 +489,7 @@ with Catalog() as catalog:
     catalog.used_by("churn.bronze.accounts.plan")
 ```
 
-`Catalog` is the whole interface: `put`, `apply`, `use`, `find`, `get`, `lineage`, `used_by`, `uses`, `table_history`, `query_jobs`, `tables`, `projects`, `runs`, `models`, `overview`. `apply` registers a batch in one transaction: all of it, or none. With `merge=True`, fields a payload leaves out keep what the entry already says, and the tags a payload sends belong to the one importer named in its `source`, so they replace only that importer's earlier tags. Builds are read and written through `odcl.dataform.import_invocation`, `odcl.builds.record_handoff` and `odcl.builds.explain_dataset`; model versions through `odcl.vertex.import_build` and `Catalog.explain_model`; OpenLineage events through `odcl.openlineage.ingest`. `odcl.server.make_server` returns the HTTP server.
+`Catalog` is the whole interface: `put`, `apply`, `use`, `find`, `get`, `lineage`, `used_by`, `uses`, `table_history`, `query_jobs`, `tables`, `projects`, `runs`, `models`, `overview`. `apply` registers a batch in one transaction: all of it, or none. It takes every entry lock first (512 stripes that keys hash to, in order), so an import of any size fits PostgreSQL's lock table and two imports run one after the other rather than deadlock. With `merge=True`, fields a payload leaves out keep what the entry already says, and the tags a payload sends belong to the one importer named in its `source`, so they replace only that importer's earlier tags. Without `merge` a payload says the whole entry, except what is said beside it by its own commands: copies (`instances`), `created_by`, a column's `references` and the privacy fields are kept when the payload leaves them out, and cleared when it sets them to null. So a dbt import, which does not merge, keeps them. Builds are read and written through `odcl.dataform.import_invocation`, `odcl.builds.record_handoff` and `odcl.builds.explain_dataset`; model versions through `odcl.vertex.import_build` and `Catalog.explain_model`; OpenLineage events through `odcl.openlineage.ingest`. `odcl.server.make_server` returns the HTTP server.
 
 ## Developing
 

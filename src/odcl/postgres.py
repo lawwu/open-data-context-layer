@@ -54,7 +54,7 @@ def read(dsn: str, schemas: list[str] | None = None) -> dict:
                          JOIN pg_attribute a ON a.attrelid = k.confrelid AND a.attnum = u.n ORDER BY u.i) AS to_columns
             FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace
             JOIN pg_class f ON f.oid = k.confrelid JOIN pg_namespace fn ON fn.oid = f.relnamespace
-            WHERE k.contype = 'f' AND {where} ORDER BY n.nspname, c.relname, k.conname""", params).fetchall()
+            WHERE k.contype = 'f' AND k.conparentid = 0 AND NOT c.relispartition AND {where} ORDER BY n.nspname, c.relname, k.conname""", params).fetchall()
     return {"database": database, "relations": relations, "columns": columns, "foreign_keys": keys}
 
 
@@ -83,7 +83,10 @@ def entries(catalog: Catalog, found: dict, database: str | None = None) -> tuple
     by_oid = {r["oid"]: r for r in found["relations"]}
     relations, skipped = {}, []
     for r in found["relations"]:
-        if PATH.match(path(r["schema"], r["name"])):
+        if path(r["schema"], r["name"]) in relations:  # "Orders" and orders: one key, so the second is left out
+            other = relations[path(r["schema"], r["name"])]
+            skipped.append(f"{r['schema']}.{r['name']}: the same name as {other['schema']}.{other['name']} once lower-cased")
+        elif PATH.match(path(r["schema"], r["name"])):
             relations[path(r["schema"], r["name"])] = r
         else:
             skipped.append(f"{r['schema']}.{r['name']}: not a name the catalog keys")
@@ -94,10 +97,13 @@ def entries(catalog: Catalog, found: dict, database: str | None = None) -> tuple
     for c in found["columns"]:
         r = by_oid.get(c["oid"])
         table = path(r["schema"], r["name"]) if r else None
-        if table not in relations:
+        if table not in relations or relations[table]["oid"] != c["oid"]:  # a relation skipped above: its columns are too
             continue
         if not COLUMN.match(c["name"].lower()):
             skipped.append(f"{table}.{c['name']}: not a name the catalog keys")
+            continue
+        if c["name"].lower() in columns[table]:
+            skipped.append(f"{table}.{c['name']}: the same name as another column once lower-cased")
             continue
         columns[table][c["name"].lower()] = {"table": f"table:{table}", "name": c["name"].lower(), "dtype": c["dtype"],
                                              "description": (c["comment"] or "")[:4000] or None,
@@ -137,8 +143,6 @@ def entries(catalog: Catalog, found: dict, database: str | None = None) -> tuple
             physical = tables[payload["path"]][1]
             payload = {**physical, "derived_from": payload.get("derived_from") or [],
                        "source": {"postgres": {**physical["source"]["postgres"], "query_sha256": (said or {}).get("query_sha256")}}}
-        elif kind == "table":
-            skipped.append(f"{payload['path']}: read by a view but not in the schemas read; registered by name only")
         elif kind == "column":
             table, name = payload["table"].removeprefix("table:"), payload["name"]
             physical = columns.get(table, {}).get(name)
@@ -150,11 +154,15 @@ def entries(catalog: Catalog, found: dict, database: str | None = None) -> tuple
                 continue  # a column of a table read, named by a view: registered above
         out.append((kind, payload))
     out += [("column", p) for t in sql for name, p in columns[t].items() if (t, name) not in traced]  # a view column its SQL did not name
+    skipped += [f"{t}: read by a view but not in the schemas read; registered by name only" for t in definitions.unresolved]
+    skipped += [f"{t}: its SQL names no columns sqlglot can read, so its lineage is not traced" for t in definitions.unreadable]
 
     keys = [(path(k["schema"], k["name_from"]), a.lower(), f"column:{path(k['to_schema'], k['name_to'])}.{b.lower()}")
             for k in found["foreign_keys"] for a, b in zip(k["from_columns"], k["to_columns"], strict=True)]
     registering = {f"column:{t}.{c}" for t, cs in columns.items() for c in cs}
-    references, unresolved = reference_entries(catalog, keys, registering)
+    own = [k for k in keys if f"column:{k[0]}.{k[1]}" in registering]  # a key on a column skipped above is skipped with it
+    skipped += [f"foreign key column:{t}.{c} -> {target}: its column was skipped" for t, c, target in keys if f"column:{t}.{c}" not in registering]
+    references, unresolved = reference_entries(catalog, own, registering)
     return out + references, skipped + [f"foreign key {u}: the referenced table was not read" for u in unresolved], len(order)
 
 

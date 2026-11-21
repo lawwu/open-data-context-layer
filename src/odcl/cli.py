@@ -10,6 +10,12 @@ from datetime import timedelta
 from .store import Catalog, CatalogError, migrate, require
 
 
+
+def _not_linked(result: dict) -> list[str]:
+    """What an import of SQL definitions read but could not link or trace, one line each."""
+    return ([f"  not defined or registered, so registered by name only: {t}" for t in result.get("unresolved") or []]
+            + [f"  SQL not traced (sqlglot could not read its columns): {t}" for t in result.get("untraced") or []])
+
 def span(value: str) -> timedelta:
     """7d or 12h as a length of time."""
     found = re.fullmatch(r"(\d{1,4})([dh])", value or "")
@@ -143,14 +149,15 @@ def lines(command: str, result) -> list[str]:
         counts = result["entries"]
         return ([f"{counts['added']} added, {counts['changed']} changed, {counts['unchanged']} unchanged from {result['compilation_result']}"]
                 + (["Definitions not applied: a newer compilation of this repository was imported before"] if result["definitions"] != "applied" else [])
-                + [f"  {a['target']}  {a['state']}" + (f"  job {a['job_id']}" if a["job_id"] else "") for a in result["actions"]])
+                + [f"  {a['target']}  {a['state']}" + (f"  job {a['job_id']}" if a["job_id"] else "") for a in result["actions"]]
+                + _not_linked(result))
     if command == "import" and "views_traced" in result:
         return ([f"{result['relations']} relations from {result['database']}: {result['added']} entries added, {result['changed']} changed, "
                  f"{result['unchanged']} unchanged; {result['views_traced']} views traced, {result['foreign_keys']} foreign keys"]
                 + [f"  skipped: {s}" for s in result["skipped"]])
     if command == "import" and "definitions" in result:
         return [f"{result['definitions']} definitions: {result['added']} entries added, {result['changed']} changed, {result['unchanged']} unchanged; "
-                f"{result['columns_traced']} columns traced, {result['columns_partial']} in part"]
+                f"{result['columns_traced']} columns traced, {result['columns_partial']} in part"] + _not_linked(result)
     if command == "import":
         return [f"{result['added']} added, {result['changed']} changed, {result['unchanged']} unchanged"]
     if command == "handoff":
@@ -251,7 +258,7 @@ def run(catalog: Catalog, args):
             return import_database(catalog, args.postgres, schemas=args.schema, database=args.database_name)
         if args.sql_definitions:
             from .sqldefs import import_definitions
-            return import_definitions(catalog, args.sql_definitions, dialect=args.dialect)
+            return import_definitions(catalog, args.sql_definitions, dialect=args.dialect, system=args.system)
         if args.docs:
             from .docs import import_docs
             return import_docs(catalog, args.docs, repo_url=args.repo_url, commit=args.commit)
@@ -405,6 +412,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--database-name", metavar="NAME", help="with --postgres: the name to key its tables by (default: the database's own)")
     s.add_argument("--sql-definitions", metavar="FILE", help="JSON Lines of tables and the SELECT that builds each: target, select, dependencies, "
                                                              "description, columns, type, file (or declaration: true)")
+    s.add_argument("--system", help="with --sql-definitions: the system the tables live in (default: the dialect)")
     s.add_argument("--dialect", default="bigquery", help="with --sql-definitions: the SQL dialect, as sqlglot names it (default: bigquery)")
     s.add_argument("--project", help="with --bigquery: the project the API calls are made from (default: your credentials' project)")
 
