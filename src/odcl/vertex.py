@@ -348,13 +348,32 @@ def _file_input(i: dict, column: dict, bound: bool) -> dict:
     return out
 
 
+def _quality_at(catalog: Catalog, row: dict, inputs: list[dict] | None = None) -> list[dict]:
+    """The tests that were failing, when this version was trained, on the columns its inputs came from and their tables."""
+    from .quality import BAD, latest
+    if inputs is None:
+        inputs = []
+    keys = set()
+    for i in inputs:
+        for c in [i.get("column"), *(i.get("derived_from") or [])]:
+            c = c.get("column") if isinstance(c, dict) else c
+            if not isinstance(c, str) or not c:
+                continue
+            c = c if c.startswith("column:") else f"column:{c}"  # traces name columns by path
+            head = catalog._head(c)
+            if head:
+                keys |= {c, head["body"]["table"]}
+    at = row.get("trained_at") or row["recorded_at"]
+    return [r for r in latest(catalog, sorted(keys), at) if r["status"] in BAD] if keys else []
+
+
 def explain_model(catalog: Catalog, name: str, version: str) -> dict:
     """Everything recorded about one model version: the task that trained it, its artifact, the dataset version it
     read, and for each input field, the build, job, file, expression and raw columns behind it, all as pinned
     when it was trained. `missing` names every link that could not be established."""
     from .builds import explain_dataset
     db = catalog.db
-    row = db.execute("""SELECT b.*, d.reference, t.native_key AS execution, t.evidence AS task FROM model_builds b
+    row = db.execute("""SELECT b.*, d.reference, t.native_key AS execution, t.evidence AS task, t.ended_at AS trained_at FROM model_builds b
                         JOIN dataset_versions d ON d.id = b.dataset_version_id JOIN executions t ON t.id = b.producing_execution
                         WHERE b.project_key = %s AND b.version = %s""", (f"project:{name.strip().lower()}", str(version))).fetchone()
     require(row, "not_found", f"No build of {name} {version} is recorded. Import its training manifest with odcl import --vertex-manifest")
@@ -365,7 +384,7 @@ def explain_model(catalog: Catalog, name: str, version: str) -> dict:
                 "training_commit": row["training_commit"], "prediction_cutoff": manifest.get("prediction_cutoff")}
     artifact = {"uri": row["artifact_uri"], "generation": row["artifact_generation"], "sha256": row["artifact_sha256"]}
     if data.get("kind") == "gcs_files":
-        return {
+        out = {
             "model": manifest["model"], "version": row["version"], "produced_by": produced, "artifact": artifact,
             "read": {"dataset_version": data["reference"], "kind": "gcs_files", "uri": data["uri"], "objects": len(data["objects"]), "generations_pinned": True,
                      "produced_by": {k: data["produced_by"][k] for k in ("pipeline_run", "task", "state")} if data["produced_by"] else None,
@@ -377,6 +396,7 @@ def explain_model(catalog: Catalog, name: str, version: str) -> dict:
             "relied_on": relied_on(catalog, row["id"]),
             "missing": data["missing"],
         }
+        return {**out, "quality_at_training": _quality_at(catalog, row, out["inputs"])}
     inputs = []
     for i in db.execute("SELECT * FROM build_inputs WHERE build_id = %s ORDER BY position NULLS LAST, role, field", (row["id"],)):
         column = columns.get(i["field_path"], {})
@@ -392,4 +412,5 @@ def explain_model(catalog: Catalog, name: str, version: str) -> dict:
         "inputs": inputs,
         "relied_on": relied_on(catalog, row["id"]),
         "missing": data["missing"],
+        "quality_at_training": _quality_at(catalog, row, inputs),
     }

@@ -747,11 +747,13 @@ class Catalog:
             out["copies"] = self._linked(key, "instance_of", "up")         # what this definition is copied to
             out["copy_of"] = self._linked(key, "instance_of", "down")      # the definitions this table is a copy of
             out["foreign_keys"], out["referenced_by"] = self._foreign_keys(key)
-        elif out["kind"] == "column":
+        if out["kind"] in ("table", "column"):
+            from .quality import for_entry
+            found = for_entry(self, key)
+            out["quality"] = {"status": found["status"], "results": found["results"]}
+        if out["kind"] == "column":
             out["references"] = self._linked(key, "references", "up")
             out["referenced_by"] = self._linked(key, "references", "down")
-        else:
-            out["layer"] = self._summary(key)["layer"]
         return out
 
     def _foreign_keys(self, table: str) -> tuple[list[dict], list[dict]]:
@@ -1028,6 +1030,7 @@ class Catalog:
                JOIN entries e ON e.key = d.document_key WHERE e.head_revision <> d.document_revision ORDER BY b.project_key, b.version, d.document_key""")]
         info = self.db.info
         stale = [x for x in stale if {"project": x["project"], "key": x["key"]} not in gone]  # a retired entry is listed as gone, not as changed
-        return {"counts": counts, "retired": retired, "changed_since_used": stale, "retired_but_used": gone,
+        from .quality import failing_and_used
+        return {"counts": counts, "retired": retired, "changed_since_used": stale, "retired_but_used": gone, "failing_and_used": failing_and_used(self),
                 "changed_since_described": described, "changed_since_relied_on": relied,
                 "database": f"{info.host}:{info.port}/{info.dbname}"}

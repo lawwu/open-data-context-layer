@@ -288,6 +288,10 @@ async function overviewPage() {
     h("h2", {}, "Gone from its source while a project uses it"),
     table(["Project", "Uses", ""], (overview.retired_but_used || []).map((c) => [entryLink(c.project), entryLink(c.key), retiredBadge()]),
       `Nothing a project uses has been retired.${overview.retired ? ` ${plural(overview.retired, "table or column", "tables and columns")} retired in all.` : ""}`),
+    h("h2", {}, "Failing a test while a project uses it"),
+    table(["Project", "Uses", "Failing", "Test"], (overview.failing_and_used || []).map((c) => [entryLink(c.project), entryLink(c.key),
+      c.failing === c.key ? "itself" : entryLink(c.failing, short(c.failing).split(".").pop()), [c.test, " ", qualityBadge("fail")]]),
+      "Nothing a project uses is failing a test, as far as the results recorded say."),
     h("h2", {}, "Redefined after a document described it"),
     table(["Document", "Describes", ""], (overview.changed_since_described || []).map((c) => [entryLink(c.document), entryLink(c.key), changedBadge()]),
       "Every document describes data as it is defined now."),
@@ -377,6 +381,9 @@ async function entryPage(key) {
     if (entry.kind === "table") parts.push(await historySection(entry.key));
   }
   parts.push(documentedIn(entry));
+  if ((entry.quality?.results || []).length) {
+    parts.push(h("h2", {}, ["Quality ", qualityBadge(entry.quality.status)]), qualityTable(entry.quality.results, entry.key));
+  }
   if (entry.kind === "table" || entry.kind === "column") {
     const changes = await changesSection(entry.key);
     parts.push(h("h2", {}, "What changed"), changes,
@@ -486,6 +493,25 @@ function step(label, what, ...details) {
   return h("li", {}, h("div", { class: "step" }, label), h("div", { class: "what" }, what), details.filter(Boolean).map((d) => h("div", { class: "muted" }, d)));
 }
 
+function failingAtTraining(trace) {
+  const failing = trace.quality_at_training || [];
+  return failing.length ? [h("h2", {}, `Failing a test when it was trained (${failing.length})`),
+    qualityTable(failing)] : [];
+}
+
+function qualityBadge(status) {
+  const cls = { fail: "status critical", error: "status critical", warn: "status warning", pass: "status good" }[status] || "status";
+  return h("span", { class: cls }, status);
+}
+
+function qualityTable(results, key) {
+  return table(["Test", "On", "Status", "Failing", "When", "Source"], results.map((r) => [
+    r.kind && r.kind !== r.test ? [r.test, h("span", { class: "muted" }, ` · ${r.kind}`)] : r.test,
+    r.entry === key ? "this entry" : entryLink(r.entry, short(r.entry).split(".").pop()), qualityBadge(r.status),
+    r.failures ? r.failures.toLocaleString() : "", [when(r.observed_at), r.current === false ? h("div", { class: "muted" }, "before its latest revision") : null],
+    r.source]));
+}
+
 function reliedOn(trace) {
   return (trace.relied_on || []).length ? [h("h2", {}, `Relied on (${trace.relied_on.length})`),
     table(["Document", "Revision", "For", ""], trace.relied_on.map((d) => [entryLink(d.document, d.title), h("code", {}, d.revision), d.why || "",
@@ -566,7 +592,7 @@ async function modelPage(name, version) {
             consoleLink(gcp.job(i.executed_as.project, i.executed_as.location, i.executed_as.job_id))) : null),
         step("Defined in", i.defined_in.file || "?", i.defined_in.commit ? `commit ${i.defined_in.commit}` : "no git commit"),
         step("From raw columns", i.derived_from.length ? i.derived_from.map((c, n) => [n ? ", " : "", entryLink(`column:${c}`, c)]) : "?")))),
-    ...reliedOn(trace), ...missingList(trace.missing));
+    ...reliedOn(trace), ...failingAtTraining(trace), ...missingList(trace.missing));
 }
 
 function modelOnFilesPage(trace) {
@@ -589,7 +615,7 @@ function modelOnFilesPage(trace) {
     table(["Field", "Role", "Type", "Expression", "From", "Lineage"], trace.inputs.map((i) => [h("strong", {}, i.field),
       `${i.role}${i.position !== null ? ` #${i.position}` : ""}`, i.dtype || "?", i.expression ? h("code", {}, i.expression) : "", fieldSources(i),
       lineageCell(i.lineage)])),
-    ...reliedOn(trace), ...missingList(trace.missing));
+    ...reliedOn(trace), ...failingAtTraining(trace), ...missingList(trace.missing));
 }
 
 function filesPage(d) {

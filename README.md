@@ -68,6 +68,7 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 | `odcl show KEY` | Everything about one entry, with its history |
 | `odcl lineage KEY` | What is it built from, and what is built from it? |
 | `odcl diff KEY [--since REV\|TIME] [--until REV\|TIME]` | What changed, and does it break what uses it? |
+| `odcl import --quality FILE.jsonl` or `--dbt-tests TARGET`; `odcl quality KEY [--at TIME]` | Was it passing its tests, now or then? |
 | `odcl alerts subscribe\|list\|remove\|send` | Tell the people behind a project when data it uses changes or goes |
 | `odcl used-by KEY` | Which projects depend on it? |
 | `odcl uses PROJECT [--upstream] [--revision REV]` | What did this project use, now or at an older revision of it? |
@@ -233,6 +234,28 @@ uv run odcl diff core.sales.daily_totals --since 7d      # or a revision (rev_..
 ```
 
 What a project uses carries the worst change since it used it (`severity` on `get` of a project, `uses` and `overview`'s `changed_since_used`), measured from when the use was recorded. A used table counts as changed when one of its columns changed, even if the table's own revision did not. The same diff is `GET /v1/entries/{key}/diff?since=&until=`, the `what_changed` MCP tool and `Catalog.diff`, and an entry's page shows it, with "changes since" on each revision in its history.
+
+## Data quality
+
+odcl runs no tests. It keeps what your tests said, pinned to the revision of the table or column that was current when each ran, so "was this column failing when the model trained on it?" has an answer.
+
+```sh
+uv run odcl import --dbt-tests target/                       # run_results.json and manifest.json, after dbt test or dbt build
+uv run odcl import --quality results.jsonl --source great_expectations
+uv run odcl quality core.sales.daily_totals                  # the newest result of each test, on the table and its columns
+uv run odcl quality core.sales.daily_totals --at 2026-11-01  # as they stood then
+```
+
+Anything that can write a line of JSON per result works, such as Great Expectations, Dataform assertions, Soda or a notebook:
+
+```json
+{"entry": "core.sales.daily_totals.amount", "test": "amount_not_negative", "status": "fail", "failures": 12, "observed_at": "2026-11-20T06:00:00Z", "run": "nightly-2026-11-20", "kind": "expression", "message": "12 rows below 0"}
+```
+
+- A status is `pass`, `warn`, `fail`, `error` or `skip`. A result is kept once per source, run, test and entry, so importing again changes nothing. An entry that is not registered is named in `unresolved`, not refused; a malformed line refuses the whole file.
+- Each result pins the revision current when the test ran. A result from before the entry's latest revision says so (`current: false`).
+- An entry's page and `get` show its newest results, a table with its columns'. `overview` lists `failing_and_used`: projects that use a column failing a test, or its table. A model version's trace lists `quality_at_training`: tests failing, when it was trained, on the columns its inputs came from and their tables.
+- Over HTTP: `GET /v1/entries/{key}/quality?at=` and `POST /v1/quality` (importer). Run `odcl migrate` for migration 0013.
 
 ## Alerts
 

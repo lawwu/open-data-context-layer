@@ -104,6 +104,12 @@ def lines(command: str, result) -> list[str]:
             out += [f"  subscription {m['subscription']} ({m['channel']}): {len(m['alerts'])} alert(s)"] + (
                 ["    " + line for line in m["text"].splitlines()] if result["dry_run"] else [])
         return out + [f"  subscription {m['subscription']} failed: {m['error']}" for m in result["failed"]]
+    if command == "quality":
+        return [f"{result['key']}: {result['status'] or 'no results'}" + (f" (as of {result['at']})" if result["at"] else "")] + [
+            f"  {r['status']:<5} {short(r['entry'])}  {r['test']}" + (f"  {r['failures']} failing" if r["failures"] else "")
+            + f"  ({r['observed_at']}, {r['source']})" + ("" if r.get("current", True) else "  (before its latest revision)") for r in result["results"]]
+    if command == "import" and "unresolved" in result and "unchanged" in result and "changed" not in result:
+        return [f"{result['added']} results added, {result['unchanged']} already kept"] + [f"  not registered: {u}" for u in result["unresolved"]]
     if command == "diff":
         head = (f"{result['key']}: {result['severity'] or 'no change'}"
                 + (f"  ({result['from']['revision'] if result['from'] else 'not registered'} -> {result['to']['revision']})"))
@@ -335,9 +341,13 @@ def run(catalog: Catalog, args):
         return users.whoami(catalog)
     if args.command == "import":
         require(sum(map(bool, (args.dbt, args.bigquery, args.dataform, args.vertex_manifest, args.openlineage, args.docs, args.sql_definitions,
-                               args.postgres))) == 1,
+                               args.postgres, args.quality, args.dbt_tests))) == 1,
                 "import", "Import from one place: --dbt PATH, --bigquery TABLE..., --postgres URL, --dataform INVOCATION, --vertex-manifest PATH, "
-                          "--openlineage FILE, --docs PATH... or --sql-definitions FILE")
+                          "--openlineage FILE, --docs PATH..., --sql-definitions FILE, --quality FILE or --dbt-tests PATH")
+        if args.quality or args.dbt_tests:
+            from . import quality
+            return quality.record(catalog, quality.read_jsonl(args.quality) if args.quality else quality.dbt_results(args.dbt_tests),
+                                  args.source or ("dbt" if args.dbt_tests else "quality"))
         if args.postgres:
             from .postgres import import_database
             return import_database(catalog, args.postgres, schemas=args.schema, database=args.database_name)
@@ -449,6 +459,9 @@ def run(catalog: Catalog, args):
         return {"key": catalog.resolve(args.key, DESCRIBED), "documents": catalog.documents(args.key)}
     if args.command == "show":
         return catalog.get(args.key)
+    if args.command == "quality":
+        from .quality import for_entry
+        return for_entry(catalog, args.key, args.at)
     if args.command == "diff":
         return catalog.diff(args.key, args.since, args.until)
     if args.command == "lineage":
@@ -497,6 +510,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--sql-definitions", metavar="FILE", help="JSON Lines of tables and the SELECT that builds each: target, select, dependencies, "
                                                              "description, columns, type, file (or declaration: true)")
     s.add_argument("--system", help="with --sql-definitions: the system the tables live in (default: the dialect)")
+    s.add_argument("--quality", metavar="FILE", help="data-quality results as JSON Lines: entry, test, status, failures, observed_at, run, kind, message")
+    s.add_argument("--dbt-tests", metavar="PATH", help="dbt test results: a target folder with run_results.json and manifest.json")
+    s.add_argument("--source", help="with --quality: where the results come from, such as great_expectations (default: quality)")
     s.add_argument("--dialect", default="bigquery", help="with --sql-definitions: the SQL dialect, as sqlglot names it (default: bigquery)")
     s.add_argument("--project", help="with --bigquery: the project the API calls are made from (default: your credentials' project)")
 
@@ -638,6 +654,10 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("show", help="one entry in full")
     s.add_argument("key")
+
+    s = sub.add_parser("quality", help="the newest result of each data-quality test on a table (and its columns) or a column")
+    s.add_argument("key")
+    s.add_argument("--at", help="as of a time, or a span back from now such as 7d (default: now)")
 
     s = sub.add_parser("diff", help="what changed in a table (with its columns) or a column, each change labelled by how much it matters")
     s.add_argument("key")
