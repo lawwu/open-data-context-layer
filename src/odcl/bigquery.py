@@ -154,8 +154,9 @@ def sync_jobs(catalog: Catalog, project: str, *, client, since: datetime | None 
     require(sql != "full", "sql", "Keeping original SQL text is not offered yet: it needs its own access rules. Use templates or none")
     require(sql in ("templates", "none"), "sql", "sql is templates or none")
     require(isinstance(project, str) and project.strip(), "project", "Name the project the jobs ran in")
-    db, until = catalog.db, until or store.now()
-    require(until.tzinfo is not None, "until", "until needs a time zone")
+    db, now = catalog.db, store.now()
+    require(until is None or until.tzinfo is not None, "until", "until needs a time zone")
+    until = min(until or now, now)  # no job is created later than now, and a later end would be recorded as read through
     explicit = since is not None
     require(not explicit or since.tzinfo is not None, "since", "since needs a time zone")
     cursor = None if explicit else db.execute("SELECT completed_until FROM sync_cursors WHERE source = %s AND execution_project = %s AND location = %s",

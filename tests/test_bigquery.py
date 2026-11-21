@@ -260,3 +260,11 @@ def test_a_foreign_key_constraint_becomes_a_reference_and_one_to_a_table_not_rea
     assert [r["key"] for r in catalog.get("p.s.orders.customer_id")["references"]] == ["column:p.s.customers.id"]
     again = bq.import_tables(catalog, ["p.s.orders", "p.s.customers"], client=client)
     assert (again["added"], again["changed"]) == (0, 0)
+
+
+def test_an_end_in_the_future_reads_and_records_only_up_to_now(catalog):
+    later = store.now() + dt.timedelta(days=30)
+    result = bq.sync_jobs(catalog, "jobs-p", client=client_for(week()), until=later)
+    recorded = catalog.db.execute("SELECT completed_until FROM sync_cursors").fetchone()["completed_until"]
+    assert recorded <= store.now() and dt.datetime.fromisoformat(result["until"]) <= store.now()
+    bq.sync_jobs(catalog, "jobs-p", client=client_for(week()))  # the next regular sync is not refused as already read
