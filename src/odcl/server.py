@@ -7,6 +7,7 @@ MCP tools answer. It runs on the standard library's threaded HTTP server, with o
     GET  /v1/search?q=&kind=&layer=&limit=&retired=
     GET  /v1/entries/{key}                       one entry in full
     GET  /v1/entries/{key}/diff?since=&until=    what changed, each change labelled cosmetic, additive, semantic or breaking
+    GET  /v1/entries/{key}/graph?direction=&depth=&projects=&level=   lineage as nodes and every edge, for the explorer
     GET  /v1/entries/{key}/quality?at=           the newest result of each data-quality test, as of a time
     GET  /v1/glossary?domain=                    every glossary term
     GET  /v1/popular?since=30d&limit=            the tables most read by query jobs
@@ -125,6 +126,9 @@ ROUTES = [
                                                                      retired=_flag(q.get("retired")))),
     ("GET", r"/v1/entries/(?P<key>[^/]+)", "reader", lambda c, m, q, b: c.get(m["key"])),
     ("GET", r"/v1/entries/(?P<key>[^/]+)/lineage", "reader", lambda c, m, q, b: c.lineage(m["key"], q.get("direction", "both"))),
+    ("GET", r"/v1/entries/(?P<key>[^/]+)/graph", "reader",
+     lambda c, m, q, b: c.graph(m["key"], q.get("direction", "both"), int(q["depth"]) if (q.get("depth") or "").isdigit() else None,
+                                _flag(q.get("projects")), q.get("level") or "column")),
     ("GET", r"/v1/entries/(?P<key>[^/]+)/used-by", "reader", lambda c, m, q, b: c.used_by(m["key"])),
     ("GET", r"/v1/entries/(?P<key>[^/]+)/documents", "reader", lambda c, m, q, b: c.documents(m["key"])),
     ("GET", r"/v1/entries/(?P<key>[^/]+)/quality", "reader", lambda c, m, q, b: quality.for_entry(c, m["key"], q.get("at") or None)),

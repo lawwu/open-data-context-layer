@@ -111,9 +111,9 @@ def search_text(body: dict) -> str:
 def _edges(mine: str, other: str) -> str:
     """The lineage edges at `reach.key`, for a recursive walk: its derived_from links, found by index, and the edges
     copies of a definition add (the `copies` CTE, read once from copy_edges). `mine` is the column `reach.key` is in."""
-    return (f"(SELECT c.{mine} AS near, c.{other} AS far, c.target_revision, c.target_head FROM current_links c "
+    return (f"(SELECT c.{mine} AS near, c.{other} AS far, c.target_revision, c.target_head, false AS copy FROM current_links c "
             f"WHERE c.relation = 'derived_from' AND c.{mine} = reach.key "
-            f"UNION ALL SELECT i.{mine}, i.{other}, i.target_revision, i.target_head FROM copies i WHERE i.{mine} = reach.key)")
+            f"UNION ALL SELECT i.{mine}, i.{other}, i.target_revision, i.target_head, true FROM copies i WHERE i.{mine} = reach.key)")
 
 
 def reference_entries(catalog, foreign_keys, registering: set[str]) -> tuple[list[tuple[str, dict]], list[str]]:
@@ -678,18 +678,23 @@ class Catalog:
                 u["changed_since"] = u["changed_since"] or u["severity"] is not None
         return out
 
-    def _walk(self, key: str, direction: str) -> list[dict]:
-        """Every entry reachable along lineage from `key`, nearest first. One recursive query reads the edges."""
+    def _walk_edges(self, key: str, direction: str) -> list[dict]:
+        """Every lineage edge reachable from `key` going up (to what it is built from) or down, in one recursive query.
+        Each row is `near` (closer to `key`) and `far`, with the pinned and head revisions and whether a copy adds it."""
         mine, other = ("source_key", "target_key") if direction == "up" else ("target_key", "source_key")
-        edges: dict[str, list[dict]] = {}
-        for r in self.db.execute(f"""
+        return self.db.execute(f"""
                 WITH RECURSIVE copies AS MATERIALIZED (SELECT * FROM copy_edges), reach(key) AS (
                   SELECT %s::text COLLATE "C"
                   UNION
                   SELECT l.far FROM reach CROSS JOIN LATERAL {_edges(mine, other)} l)
-                SELECT l.near, l.far, l.target_revision, l.target_head
+                SELECT l.near, l.far, l.target_revision, l.target_head, l.copy
                 FROM reach CROSS JOIN LATERAL {_edges(mine, other)} l
-                ORDER BY l.far""", (key,)):
+                ORDER BY l.far""", (key,)).fetchall()
+
+    def _walk(self, key: str, direction: str) -> list[dict]:
+        """Every entry reachable along lineage from `key`, nearest first. One recursive query reads the edges."""
+        edges: dict[str, list[dict]] = {}
+        for r in self._walk_edges(key, direction):
             edges.setdefault(r["near"], []).append(r)
         seen, found, queue = {key}, [], deque([(key, 0)])
         while queue:
@@ -853,6 +858,11 @@ class Catalog:
         if direction in ("down", "both"):
             out["downstream"] = self._walk(key, "down")
         return out
+
+    def graph(self, name: str, direction: str = "both", depth: int | None = None, projects: bool = False, level: str = "column") -> dict:
+        """Lineage around an entry as a graph: every node and every edge, for the explorer. See `odcl.graph`."""
+        from .graph import graph
+        return graph(self, name, direction, depth, projects, level)
 
     def used_by(self, name: str) -> dict:
         """Which projects depend on a table or column: directly, through its table or columns, or through data built from it."""

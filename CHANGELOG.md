@@ -8,6 +8,10 @@ section says how a release is cut.
 
 ## Unreleased
 
+- **Lineage explorer** on the web page (`#/lineage/KEY`): every edge around a table or column,
+  by direction and steps, as columns or tables, with the projects that use them; hover to
+  follow a path, click for details. `GET /v1/entries/{key}/graph` and `Catalog.graph` return
+  the nodes and edges.
 - **Popularity** from the synced job history: `odcl popular`, `GET /v1/popular`, a `reads`
   count (last 30 days) on every table with `sort=reads`, a table's `usage` with the tables most
   often read with it, and search lifting matches on much-read tables a little.
