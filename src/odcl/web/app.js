@@ -234,6 +234,9 @@ async function overviewPage() {
     h("h2", {}, "Changed after a project used it"),
     table(["Project", "Uses", ""], overview.changed_since_used.map((c) => [entryLink(c.project), entryLink(c.key), changedBadge()]),
       "Every project uses data as it is defined now."),
+    h("h2", {}, "Redefined after a document described it"),
+    table(["Document", "Describes", ""], (overview.changed_since_described || []).map((c) => [entryLink(c.document), entryLink(c.key), changedBadge()]),
+      "Every document describes data as it is defined now."),
     h("h2", {}, "Recent model versions"),
     table(["Model", "Version", "Trained on", "Recorded"], models.slice(0, 8).map((m) => [entryLink(`project:${m.model}`, m.model),
       h("a", { href: `#/model/${enc(m.model)}/${enc(m.version)}` }, m.version),
@@ -247,7 +250,7 @@ async function searchPage(params) {
   document.getElementById("q").value = q;
   const results = await api(`/v1/search?q=${enc(q)}&limit=200${kind ? `&kind=${enc(kind)}` : ""}`);
   const select = h("select", { "aria-label": "Kind", onchange: (e) => { location.hash = `#/search?q=${enc(q)}${e.target.value ? `&kind=${e.target.value}` : ""}`; } },
-    ["", "table", "column", "project"].map((k) => h("option", { value: k, selected: k === kind }, k ? `${k}s` : "everything")));
+    ["", "table", "column", "project", "document"].map((k) => h("option", { value: k, selected: k === kind }, k ? `${k}s` : "everything")));
   render(
     h("h1", {}, q ? `Results for “${q}”` : `All ${kind ? `${kind}s` : "entries"}`),
     h("div", { class: "controls" }, h("span", { class: "muted" }, plural(results.length, "result")), select),
@@ -260,6 +263,7 @@ async function searchPage(params) {
 
 async function entryPage(key) {
   const entry = await api(`/v1/entries/${enc(key)}`);
+  if (entry.kind === "document") return documentPage(entry);
   const isModel = entry.kind === "project" && entry.model_versions.length > 0;
   const parts = [
     h("div", {}, kindBadge(entry.kind), isModel ? [" ", h("span", { class: "badge" }, "model")] : null),
@@ -300,6 +304,7 @@ async function entryPage(key) {
         u.purpose || "", u.changed_since ? changedBadge() : ""]), "No project depends on this."));
     if (entry.kind === "table") parts.push(await historySection(entry.key));
   }
+  parts.push(documentedIn(entry));
   parts.push(h("h2", {}, "History"), table(["Revision", "By", "When"], entry.history.map((r) => [h("code", {}, r.revision), r.registered_by, when(r.at)])));
   if (Object.keys(entry.source || {}).length) {
     parts.push(h("details", {}, h("summary", { class: "muted" }, "Where this came from, as the importers recorded it"),
@@ -325,6 +330,74 @@ async function historySection(key) {
   } catch {
     return h("div", {});
   }
+}
+
+// ---- documents ------------------------------------------------------------------------------------------------
+function documentedIn(entry) {
+  const docs = entry.documents || [];
+  return h("div", {}, h("h2", {}, `Documented in (${docs.length})`),
+    docs.length ? h("ul", { class: "results" }, docs.map((d) => h("li", {},
+      h("div", {}, kindBadge("document"), " ", entryLink(d.document, d.title || short(d.document)), d.doc_kind ? h("span", { class: "muted" }, ` · ${d.doc_kind}`) : null,
+        d.section ? h("span", { class: "muted" }, " · ", h("code", {}, `#${d.section}`)) : null,
+        d.through !== entry.key ? h("span", { class: "muted" }, " · about its table ", entryLink(d.through)) : null,
+        d.changed_since ? [" ", h("span", { class: "status warning", title: "Redefined after the page described it" }, "△ redefined since the page described it")] : null),
+      d.says ? h("p", {}, d.says) : null)))
+      : h("p", { class: "muted" }, "No document describes this yet."));
+}
+
+// Markdown shown as text: headings, code blocks and paragraphs become elements, but nothing in the file is parsed as HTML
+function markdownAsText(source) {
+  const out = [];
+  let paragraph = [], code = null;
+  const flush = () => { if (paragraph.length) out.push(h("p", {}, paragraph.join(" "))); paragraph = []; };
+  for (const line of source.split("\n")) {
+    if (/^\s{0,3}(```|~~~)/.test(line)) {
+      if (code === null) { flush(); code = []; } else { out.push(h("pre", { class: "card mono" }, code.join("\n"))); code = null; }
+      continue;
+    }
+    if (code !== null) { code.push(line); continue; }
+    const heading = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
+    if (heading) { flush(); out.push(h(`h${Math.min(heading[1].length + 2, 6)}`, {}, heading[2])); continue; }
+    if (!line.trim()) { flush(); continue; }
+    if (/^\s*\|/.test(line)) { flush(); out.push(h("pre", { class: "mono table-text" }, line)); continue; }
+    paragraph.push(line.trim());
+  }
+  flush();
+  if (code !== null) out.push(h("pre", { class: "card mono" }, code.join("\n")));
+  return out;
+}
+
+function documentPage(d) {
+  const safeUrl = /^https?:\/\//.test(d.url || "") ? d.url : null;
+  const bySection = new Map();
+  for (const link of d.describes) {
+    const section = link.section || "";
+    if (!bySection.has(section)) bySection.set(section, []);
+    bySection.get(section).push(link);
+  }
+  const unresolved = d.unresolved || [];
+  render(
+    h("div", {}, kindBadge("document"), d.doc_kind ? [" ", h("span", { class: "badge" }, d.doc_kind)] : null, d.retired ? [" ", h("span", { class: "status warning" }, "retired")] : null),
+    h("h1", {}, d.title),
+    d.description ? h("p", { class: "sub" }, d.description) : null,
+    h("div", { class: "card" }, facts([
+      ["Key", h("code", {}, d.key)], ["Owner", d.owner], ["Kind", d.doc_kind],
+      ["File", safeUrl ? h("a", { href: safeUrl, target: "_blank", rel: "noopener noreferrer" }, d.path, " ↗") : d.path],
+      ["Commit", d.commit ? h("code", {}, d.commit) : "not recorded"],
+      ["Patterns", (d.patterns || []).length ? d.patterns.map((p, n) => [n ? ", " : "", h("code", {}, p)]) : null],
+      ["Revision", [`${d.revision} by ${d.registered_by}, `, when(d.at)]],
+    ])),
+    d.retired ? h("div", { class: "missing" }, "△ This page is gone from its repository. What it described is kept in its history, not as current.") : null,
+    h("h2", {}, `Describes (${d.describes.length})`),
+    d.describes.length ? [...bySection.entries()].map(([section, links]) => h("div", {},
+      h("h3", {}, section ? h("code", {}, `#${section}`) : "The whole page"),
+      table(["Entry", "Kind", "Says", ""], links.map((l) => [entryLink(l.key, l.title), kindBadge(l.kind), l.says || "", l.changed_since ? changedBadge() : ""]))))
+      : h("p", { class: "muted" }, d.retired ? "Nothing now." : "Nothing in the catalog yet."),
+    unresolved.length ? [h("h2", {}, `Not found (${unresolved.length})`),
+      unresolved.map((u) => h("div", { class: "missing" }, "△ ", u.startsWith("section ") ? `names a ${u} that the page has no heading for` : `names ${u}, which the catalog does not have`))] : null,
+    d.headings.length ? [h("h2", {}, "Headings"), h("ul", {}, d.headings.map((x) => h("li", { style: null }, "  ".repeat(x.level - 1), x.text, " ", h("code", { class: "muted" }, `#${x.anchor}`))))] : null,
+    h("h2", {}, "Page"), h("div", { class: "card markdown" }, markdownAsText(d.text || "")),
+    h("h2", {}, "History"), table(["Revision", "By", "When"], d.history.map((r) => [h("code", {}, r.revision), r.registered_by, when(r.at)])));
 }
 
 function step(label, what, ...details) {

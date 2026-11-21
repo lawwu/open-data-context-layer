@@ -13,6 +13,7 @@ The project was called Fathom. The [implementation plan](docs/implementation-pla
 | table | A table, view or file in some system | `table:<database>.<schema>.<name>` |
 | column | One column of a registered table | `column:<table path>.<name>` |
 | project | Anything that uses data: an analysis, a dashboard, a model | `project:<name>` |
+| document | A Markdown page that describes tables, columns or projects | `document:<repo>/<path>` |
 
 Data is registered once and shared. It does not belong to a project. Two links connect entries:
 
@@ -84,6 +85,8 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 | `odcl migrate` | Create or update the catalog's tables |
 | `odcl import-sqlite PATH` | Bring an old Fathom SQLite file across, once |
 | `odcl import --openlineage FILE` | Read OpenLineage events: runs and the lineage they establish |
+| `odcl import --docs PATH... [--repo-url URL] [--commit SHA]` | Read Markdown pages that describe catalog entries |
+| `odcl docs KEY` | Which documents describe this entry? |
 | `odcl serve [--accept-lineage]` | Serve the catalog over HTTP, with a web page to browse it |
 | `odcl mcp [--allow-writes]` | Serve all of this to an assistant |
 
@@ -308,13 +311,55 @@ URL-encode keys and references in the path. Errors come back as `{"error": {"cod
 
 There is no sign-in: anyone who can reach the server can read the whole catalog. That is why it listens on 127.0.0.1 unless `--host` says otherwise. It writes nothing unless started with `--accept-lineage`. With `ODCL_LINEAGE_TOKEN` set, a sender must also present that token as `Authorization: Bearer TOKEN`. The page runs only its own script, under a content security policy, and displays catalog text as text.
 
+## Documents
+
+A team's knowledge-base pages, findings and runbooks can say which data they describe, so a table or column shows the pages about it. A page says so in its frontmatter, and its body stays as it is:
+
+```markdown
+---
+title: "Order status codes"
+owner: Data Team
+odcl:
+  kind: reference                # reference, finding, runbook, glossary: free text, short
+  describes:
+    - key: column:warehouse.sales.orders.status_code
+      section: status-codes      # optional: a heading anchor in this page
+      says: "Closed = status_code IN ('C', 'X')"    # optional, one line
+    - key: table:warehouse.ref.status_lookup
+    - pattern: "column:*-prod.sales.orders.amount*" # a glob over entry keys
+---
+# Order status codes
+…
+```
+
+```sh
+uv sync --extra docs
+uv run odcl import --docs ../knowledge-base/docs
+uv run odcl docs warehouse.sales.orders.status_code
+```
+
+- **Importing.** `import --docs` reads every `*.md` file with an `odcl:` block under the folders it is given and counts the others as skipped. A page becomes a `document` entry keyed `document:<repo>/<path>`, holding its title, owner, kind, text, headings with their anchors, commit, web address and content digest.
+- **Commit and web address.** They come from git when the page is in a checkout, else from `--commit` and `--repo-url`.
+- **Revisions.** Importing an unchanged page changes nothing; an edited one is a new revision.
+- **Search** covers the title, headings and text.
+- **`describes` links.** Each one pins the revision of the table, column or project it names. Re-importing an unchanged page keeps that pin, because nobody re-read the page. So when the column is redefined later, its page, the column and `odcl overview` all say it was redefined after the page described it, until the page is edited.
+- **A column** also shows the pages that describe its table.
+- **Patterns** are resolved at every import, one link per entry they match, and kept on the page, so a later import links copies added since.
+- **What is not found.** A key or pattern that matches nothing, or a section the page has no heading for, is not an error. It is reported by the import and on the page.
+- **Retirement.** A page imported before and now gone from the folder, or that no longer has an `odcl:` block, is retired: a new revision that describes nothing. Its links stay in its history, not as current. Importing one file never retires the others.
+- **One transaction.** Every file of one import is written together.
+
+The web page has a page for each document, with its links grouped by section and its text shown as text; nothing in a page runs. Every entry has a "Documented in" panel, and search finds documents. The MCP server has a `documents_for` tool, and `find_data` returns documents. `Catalog.put("document", …)` and `odcl.docs.import_docs` are the Python interface.
+
+Not built yet: a model version that relied on a document revision (`relied_on`), and the frontmatter in an HTML comment for pages whose frontmatter a linter owns.
+
 ## For agents
 
 ```sh
 uv run odcl mcp
 ```
 
-serves `find_data`, `get_entry`, `trace_lineage`, `used_by` and `project_uses` over the Model Context Protocol (the official [MCP SDK](https://github.com/modelcontextprotocol/python-sdk)). With `--allow-writes` it also offers `register_project` and `record_use`.
+serves `find_data`, `get_entry`, `trace_lineage`, `documents_for`, `used_by` and `project_uses` over the Model Context Protocol (the official [MCP SDK](https://github.com/modelcontextprotocol/python-sdk)). With `--allow-writes` it also offers `register_project` and `record_use`.
 
 ## From Python
 

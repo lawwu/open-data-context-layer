@@ -50,6 +50,22 @@ def lines(command: str, result) -> list[str]:
             if direction in result:
                 out += [direction + ":"] + ([f"  {'  ' * (n['depth'] - 1)}{n['key']}" + flag(n) for n in result[direction]] or ["  nothing"])
         return out
+    if command == "import" and "skipped" in result:
+        c = result["documents"]
+        out = [f"{c['added'] + c['changed'] + c['unchanged']} documents: {c['added']} added, {c['changed']} changed, {c['unchanged']} unchanged, "
+               f"{c['retired']} retired; {result['skipped']} files without an odcl block skipped"]
+        for key, items in result["unresolved"].items():
+            entries = [i for i in items if not i.startswith("section ")]
+            sections = [i.removeprefix("section ") for i in items if i.startswith("section ")]
+            if entries:
+                out.append(f"  {key}  names {len(entries)} {'entry' if len(entries) == 1 else 'entries'} the catalog does not have: {', '.join(entries)}")
+            if sections:
+                out.append(f"  {key}  names a section the page has no heading for: {', '.join(sections)}")
+        return out
+    if command == "docs":
+        return [f"{d['document']}" + (f"  #{d['section']}" if d["section"] else "") + (f"  {d['says']}" if d["says"] else "")
+                + (f"  (about {d['through']})" if d["through"] != result["key"] else "") + ("  (redefined since the page described it)" if d["changed_since"] else "")
+                for d in result["documents"]] or ["No document describes this."]
     if command == "import" and "events" in result:
         events = result["events"]
         recorded = sum(e["change"] == "recorded" for e in events)
@@ -155,8 +171,11 @@ def run(catalog: Catalog, args):
         from .legacy import import_sqlite
         return import_sqlite(catalog, args.path)
     if args.command == "import":
-        require(sum(map(bool, (args.dbt, args.bigquery, args.dataform, args.vertex_manifest, args.openlineage))) == 1, "import",
-                "Import from one place: --dbt PATH, --bigquery TABLE..., --dataform INVOCATION, --vertex-manifest PATH or --openlineage FILE")
+        require(sum(map(bool, (args.dbt, args.bigquery, args.dataform, args.vertex_manifest, args.openlineage, args.docs))) == 1, "import",
+                "Import from one place: --dbt PATH, --bigquery TABLE..., --dataform INVOCATION, --vertex-manifest PATH, --openlineage FILE or --docs PATH...")
+        if args.docs:
+            from .docs import import_docs
+            return import_docs(catalog, args.docs, repo_url=args.repo_url, commit=args.commit)
         if args.openlineage:
             from . import openlineage
             return {"events": [openlineage.ingest(catalog, e) for e in openlineage.read_events(args.openlineage)]}
@@ -214,6 +233,9 @@ def run(catalog: Catalog, args):
         return catalog.put(args.kind, fields)
     if args.command == "find":
         return catalog.find(" ".join(args.words), args.kind, args.layer, args.limit)
+    if args.command == "docs":
+        from .store import DESCRIBED
+        return {"key": catalog.resolve(args.key, DESCRIBED), "documents": catalog.documents(args.key)}
     if args.command == "show":
         return catalog.get(args.key)
     if args.command == "lineage":
@@ -247,6 +269,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--dataform", metavar="INVOCATION",
                    help="a Dataform workflow invocation, as projects/P/locations/L/repositories/R/workflowInvocations/I")
     s.add_argument("--vertex-manifest", metavar="PATH", help="a training manifest, as a local file or gs:// object, written by a Vertex AI training task")
+    s.add_argument("--docs", nargs="+", metavar="PATH", help="Markdown pages, or folders of them, whose frontmatter has an odcl block")
+    s.add_argument("--repo-url", metavar="URL", help="with --docs: the repository's web address, when git cannot say")
+    s.add_argument("--commit", metavar="SHA", help="with --docs: the commit the pages were read at, when git cannot say")
     s.add_argument("--openlineage", metavar="FILE", help="OpenLineage events: one JSON event, a JSON list of them, or JSON Lines")
     s.add_argument("--project", help="with --bigquery: the project the API calls are made from (default: your credentials' project)")
 
@@ -317,9 +342,12 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("find", help="search tables, columns and projects")
     s.add_argument("words", nargs="*")
-    s.add_argument("--kind", choices=["table", "column", "project"])
+    s.add_argument("--kind", choices=["table", "column", "project", "document"])
     s.add_argument("--layer")
     s.add_argument("--limit", type=int, default=50)
+
+    s = sub.add_parser("docs", help="the documents that describe a table, column or project")
+    s.add_argument("key")
 
     s = sub.add_parser("show", help="one entry in full")
     s.add_argument("key")

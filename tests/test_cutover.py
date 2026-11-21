@@ -31,7 +31,7 @@ def test_a_sqlite_catalog_comes_across_once_with_its_revisions_heads_and_pinned_
     assert hashlib.sha256(sqlite_file.read_bytes()).hexdigest() == before  # the old file is only read
 
     with Catalog(database, actor="cutover") as catalog:
-        assert catalog.overview()["counts"] == {"table": 5, "column": 19, "project": 1}
+        assert catalog.overview()["counts"] == {"table": 5, "column": 19, "project": 1, "document": 0}
         project = catalog.get("project:churn-model")
         assert [h["revision"] for h in project["history"]] == PROJECT_REVISIONS  # the old revision IDs, in the old order
         assert project["registered_by"] == "ana" and project["at"] == "2026-11-20T05:56:37+00:00"
@@ -60,14 +60,14 @@ def test_a_sqlite_catalog_that_does_not_hold_together_imports_nothing(database, 
     old.close()
     assert main(["--database-url", database, "import-sqlite", str(sqlite_file)]) == 1
     with Catalog(database) as catalog:
-        assert catalog.overview()["counts"] == {"table": 0, "column": 0, "project": 0}
+        assert catalog.overview()["counts"] == {"table": 0, "column": 0, "project": 0, "document": 0}
 
 
 def test_a_batch_registers_whole_or_not_at_all(database):
     with Catalog(database, actor="ana") as catalog:
         with pytest.raises(CatalogError):
             catalog.apply([("table", {"path": "a.b"}), ("column", {"table": "a.b", "name": "x"}), ("table", {"path": "Has Spaces"})])
-        assert catalog.overview()["counts"] == {"table": 0, "column": 0, "project": 0}
+        assert catalog.overview()["counts"] == {"table": 0, "column": 0, "project": 0, "document": 0}
         assert catalog.apply([("table", {"path": "a.b"}), ("column", {"table": "a.b", "name": "x"})]) == {"added": 2, "changed": 0, "unchanged": 0}
 
 

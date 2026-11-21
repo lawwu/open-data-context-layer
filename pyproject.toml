@@ -16,6 +16,7 @@ bigquery = [
   "sqlglot>=25",
 ]
 mcp = ["mcp>=2.0"]
+docs = ["pyyaml>=6"]
 
 [project.scripts]
 odcl = "odcl.cli:main"

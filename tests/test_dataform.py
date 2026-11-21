@@ -101,7 +101,7 @@ def test_bigquery_and_dataform_describe_the_same_columns_once(catalog):
     bq.import_tables(catalog, [RAW, TARGET], client=client)
     before = catalog.overview()["counts"]
     dataform.import_invocation(catalog, INVOCATION, client=FakeDataform())
-    assert catalog.overview()["counts"] == before == {"table": 2, "column": 6, "project": 0}  # no new keys: the same physical columns
+    assert catalog.overview()["counts"] == before == {"table": 2, "column": 6, "project": 0, "document": 0}  # no new keys: the same physical columns
     hours = catalog.get(f"{TARGET}.hours_at_cutoff")
     assert (hours["dtype"], hours["definition"]) == ("FLOAT", "worked_minutes_asof / 60")  # BigQuery's type, Dataform's definition
     assert sorted(hours["source"]) == ["bigquery", "dataform"]

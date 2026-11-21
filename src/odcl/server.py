@@ -8,6 +8,7 @@ MCP tools answer. It runs on the standard library's threaded HTTP server, with o
     GET  /v1/entries/{key}                       one entry in full
     GET  /v1/entries/{key}/lineage?direction=    up, down or both
     GET  /v1/entries/{key}/used-by
+    GET  /v1/entries/{key}/documents             the documents that describe it
     GET  /v1/tables?layer=&system=                every table, with its columns and users counted
     GET  /v1/projects                            every project, with its uses and latest model version
     GET  /v1/projects/{name}/uses?upstream=
@@ -66,6 +67,7 @@ ROUTES = [  # (method, pattern, handler(catalog, match, query, body))
     ("GET", r"/v1/entries/(?P<key>[^/]+)", lambda c, m, q, b: c.get(m["key"])),
     ("GET", r"/v1/entries/(?P<key>[^/]+)/lineage", lambda c, m, q, b: c.lineage(m["key"], q.get("direction", "both"))),
     ("GET", r"/v1/entries/(?P<key>[^/]+)/used-by", lambda c, m, q, b: c.used_by(m["key"])),
+    ("GET", r"/v1/entries/(?P<key>[^/]+)/documents", lambda c, m, q, b: c.documents(m["key"])),
     ("GET", r"/v1/projects/(?P<name>[^/]+)/uses", lambda c, m, q, b: c.uses(m["name"], _flag(q.get("upstream")))),
     ("GET", r"/v1/query-history", lambda c, m, q, b: c.table_history(q.get("table", ""), _span(q.get("since", "7d")), _flag(q.get("patterns")),
                                                                    _limit(q.get("limit"), 100))),
