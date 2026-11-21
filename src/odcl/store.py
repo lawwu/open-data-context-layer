@@ -162,6 +162,8 @@ class Catalog:
     def __init__(self, dsn: str | None = None, actor: str | None = None):
         self.actor = (actor or os.environ.get("ODCL_USER") or os.environ.get("FATHOM_USER") or getpass.getuser())[:200]
         self.db = connect(dsn, autocommit=True)
+        self._importing = 0     # > 0 inside apply(), which holds every entry lock
+        self._new_tables = None  # inside apply(), tables first registered, to link to their definitions once at the end
         # Catalog reads are many short index lookups. A recursive walk's cost is estimated high enough that PostgreSQL
         # would compile it (JIT), which takes far longer than running it, so compilation is off for this connection.
         self.db.execute("SET jit = off")
@@ -205,8 +207,15 @@ class Catalog:
 
         The lock is one of ENTRY_LOCKS stripes that keys hash to, not one per key: an import writes every entry in one
         transaction, and one lock per entry would run past PostgreSQL's lock table (max_locks_per_transaction) at a few
-        thousand entries. Two keys that share a stripe are written one after the other, which costs only a short wait."""
+        thousand entries. An import holds every stripe already (see `_lock_all`), so it takes none here."""
+        if self._importing:
+            return
         self.db.execute("SELECT pg_advisory_xact_lock(%s, (hashtextextended(%s, 0) & %s)::int)", (MIGRATIONS_LOCK, key, ENTRY_LOCKS - 1))
+
+    def _lock_all(self) -> None:
+        """Hold every stripe, in order, until the transaction ends. An import takes them all before it writes, so two
+        imports run one after the other instead of each holding stripes the other waits for (a deadlock)."""
+        self.db.execute("SELECT count(pg_advisory_xact_lock(%s, s)) FROM generate_series(0, %s) AS s", (MIGRATIONS_LOCK, ENTRY_LOCKS - 1))
 
     @staticmethod
     def _view(row) -> dict:
@@ -257,6 +266,8 @@ class Catalog:
                     require(isinstance(payload.get("source") or {}, dict), "source", "source is a small object saying where the entry came from")
                     p = {**kept, **{k: v for k, v in payload.items() if v is not None}, "source": {**said["source"], **(payload.get("source") or {})}}
                 p = self._own_tags(p, payload, prior["body"] if prior else None)
+            elif kind != "project":
+                p = self._keep_annotations(kind, key, p)
             if kind != "project":
                 for parent in names(p.get("derived_from"), "derived_from"):
                     parent = self.resolve(parent, (kind,))
@@ -285,8 +296,28 @@ class Catalog:
                     "tags": sorted(set(tags)), "source": source, "links": links}
             written = self._write(body)
             if kind == "table" and written["change"] == "added":
-                self._link_to_definitions(key)
+                if self._new_tables is not None:
+                    self._new_tables.append(key)
+                else:
+                    self._link_to_definitions([key])
             return written
+
+    def _keep_annotations(self, kind: str, key: str, p: dict) -> dict:
+        """Without `merge`, a payload says the whole entry, but an importer such as dbt does not know what was said
+        beside it: the copies of a definition, what created a table, a column's foreign keys and the privacy fields.
+        Those it leaves out (the field is absent, not None) keep what the entry says now; their own commands change them."""
+        fields = ("pii", *PRIVACY, *(("instances", "created_by") if kind == "table" else ()), *(("references",) if kind == "column" else ()))
+        if all(f in p for f in fields):
+            return p
+        self._lock(key)
+        prior = self._head(key)
+        if not prior:
+            return p
+        said = prior["body"]
+        kept = {f: said[f] for f in fields if f not in p and f in said}
+        if "references" in fields and "references" not in p:
+            kept["references"] = [link["to"] for link in said["links"] if link["relation"] == "references"] or None
+        return {**p, **{k: v for k, v in kept.items() if v is not None}}
 
     def _instance_links(self, key: str, patterns: list[str]) -> list[dict]:
         """`instance_of` links from a definition table to every other table whose path one of its patterns matches."""
@@ -294,11 +325,14 @@ class Catalog:
                  if r["key"] != key and any(fnmatchcase(r["key"][6:], p) for p in patterns)]
         return [{"relation": "instance_of", "to": r["key"], "revision": r["head_revision"]} for r in found]
 
-    def _link_to_definitions(self, key: str) -> None:
-        """A table registered for the first time may be a copy of a definition; write that definition again to link it."""
+    def _link_to_definitions(self, keys: list[str]) -> None:
+        """Tables registered for the first time may be copies of definitions; write each such definition again, once,
+        to link them."""
+        if not keys:
+            return
         for r in self.db.execute("""SELECT r.body FROM revisions r JOIN entries e ON e.key = r.entry_key AND e.head_revision = r.id
-                                    WHERE r.body ? 'instances'""").fetchall():
-            if r["body"]["key"] != key and any(fnmatchcase(key[6:], p) for p in r["body"]["instances"]):
+                                    WHERE r.body ? 'instances' ORDER BY r.entry_key""").fetchall():
+            if any(key != r["body"]["key"] and fnmatchcase(key[6:], p) for key in keys for p in r["body"]["instances"]):
                 self.put("table", {"path": r["body"]["path"]}, merge=True)
 
     @staticmethod
@@ -366,11 +400,27 @@ class Catalog:
         return self._write(body)
 
     def apply(self, entries, merge: bool = False) -> dict:
-        """Register many (kind, payload) entries in order, as an importer produces them. All of them, or none."""
+        """Register many (kind, payload) entries in order, as an importer produces them. All of them, or none.
+
+        Every entry lock is taken first, so imports never deadlock one another. Tables first registered here that are
+        copies of a definition are linked to it at the end, so a definition gets one new revision per import, not
+        one per copy."""
         counts = {"added": 0, "changed": 0, "unchanged": 0}
+        outer = self._new_tables is None
         with self.db.transaction():
-            for kind, payload in entries:
-                counts[self.put(kind, payload, merge)["change"]] += 1
+            self._lock_all()
+            self._importing += 1
+            if outer:
+                self._new_tables = []
+            try:
+                for kind, payload in entries:
+                    counts[self.put(kind, payload, merge)["change"]] += 1
+                if outer:
+                    self._link_to_definitions(self._new_tables)
+            finally:
+                self._importing -= 1
+                if outer:
+                    self._new_tables = None
         return counts
 
     def use(self, project: str, keys: list[str], purpose: str | None = None) -> dict:

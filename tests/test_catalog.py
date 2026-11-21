@@ -323,3 +323,54 @@ def test_a_column_references_the_column_its_values_are_drawn_from(database, caps
         assert c.get("shop.public.orders")["foreign_keys"] == []
     assert main(["--database-url", database, "references", "shop.public.orders.customer_id", "shop.public.customers.id"]) == 0
     assert "references column:shop.public.customers.id" in capsys.readouterr().out
+
+
+def test_imports_of_different_tables_at_the_same_time_do_not_deadlock(database):
+    import threading
+    failed = []
+
+    def run(prefix):
+        try:
+            with Catalog(database, actor=prefix) as c:
+                c.apply([("table", {"path": f"{prefix}.d.t{i}"}) for i in range(1500)])
+        except Exception as e:  # noqa: BLE001 - collected and asserted below
+            failed.append(e)
+
+    threads = [threading.Thread(target=run, args=(p,)) for p in ("aa", "bb", "cc")]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert not failed
+    with Catalog(database, actor="ana") as c:
+        assert len(c.tables()) == 4500
+
+
+def test_copies_registered_in_one_import_link_to_their_definition_in_one_revision(database):
+    with Catalog(database, actor="ana") as c:
+        c.put("table", {"path": "core.sales.daily_totals", "instances": ["t-*.sales.daily_totals"]})
+        c.apply([("table", {"path": f"t-{i}.sales.daily_totals"}) for i in range(50)])
+        assert len(c.get("core.sales.daily_totals")["copies"]) == 50
+        assert len(c.get("core.sales.daily_totals")["history"]) == 2
+        assert c.apply([("table", {"path": f"t-{i}.sales.daily_totals"}) for i in range(50)])["unchanged"] == 50
+        assert len(c.get("core.sales.daily_totals")["history"]) == 2
+
+
+def test_a_whole_entry_import_keeps_what_was_said_beside_it(database):
+    """dbt says the whole entry, but not its copies, creator, foreign keys or privacy fields: those stay."""
+    with Catalog(database, actor="ana") as c:
+        c.put("table", {"path": "core.sales.daily_totals", "description": "Totals"})
+        c.put("column", {"table": "core.sales.daily_totals", "name": "store_id"})
+        c.put("table", {"path": "core.ref.stores"})
+        c.put("column", {"table": "core.ref.stores", "name": "id"})
+        c.set_instances("core.sales.daily_totals", ["t-*.sales.daily_totals"])
+        c.set_created_by("core.sales.daily_totals", {"kind": "script", "path": "make.py"})
+        c.set_references("core.sales.daily_totals.store_id", ["core.ref.stores.id"])
+        c.set_privacy(["core.sales.daily_totals.store_id"], pii=True, data_category="business")
+        c.put("table", {"path": "core.sales.daily_totals", "description": "Daily totals"})  # as dbt would, without merge
+        c.put("column", {"table": "core.sales.daily_totals", "name": "store_id", "description": "Store"})
+        table, column = c.get("core.sales.daily_totals"), c.get("core.sales.daily_totals.store_id")
+        assert table["description"] == "Daily totals" and table["instances"] == ["t-*.sales.daily_totals"] and table["created_by"]["path"] == "make.py"
+        assert [r["key"] for r in column["references"]] == ["column:core.ref.stores.id"]
+        assert column["pii"] is True and column["data_category"] == "business"
+        c.put("column", {"table": "core.sales.daily_totals", "name": "store_id", "pii": None, "references": None})  # said outright: cleared
+        column = c.get("core.sales.daily_totals.store_id")
+        assert "pii" not in column and column["references"] == [] and column["data_category"] == "business"
