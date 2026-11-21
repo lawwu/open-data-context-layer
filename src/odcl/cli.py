@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from datetime import timedelta
@@ -247,10 +248,48 @@ def lines(command: str, result) -> list[str]:
             f"  references {link['to']}" for link in result["links"] if link["relation"] == "references"]
     if command in ("add", "use"):
         return [f"{result['key']}  {result['change']}  ({result['revision']})"]
+    if command == "users":
+        return _users(result)
     return [json.dumps(result, indent=2)]
 
 
+def _user(u: dict) -> str:
+    return (f"{u['name']}  {u['role']}" + (f"  {u['display_name']}" if u.get("display_name") else "") + (f"  <{u['email']}>" if u.get("email") else "")
+            + ("  single sign-on" if u.get("single_sign_on") else "") + ("  DISABLED" if u.get("disabled") else "")
+            + (f"  {_count(u['tokens'], 'token')}" if "tokens" in u else ""))
+
+
+def _users(result) -> list[str]:
+    if isinstance(result, list):
+        if result and "id" in result[0]:
+            return [f"{t['id']}  {t['label'] or ''}  made {t['created_at']}" + (f"  last used {t['last_used_at']}" if t["last_used_at"] else "") for t in result]
+        return [_user(u) for u in result] or ["No users yet. Make the first admin: odcl users add NAME --role admin"]
+    if "token" in result:
+        return [f"A token for {result['user']} ({result['id']}). It is shown this once; keep it secret:", "", f"  {result['token']}", "",
+                "Use it as ODCL_TOKEN=... for the CLI and odcl mcp, or as Authorization: Bearer ... over HTTP."]
+    if result.get("revoked"):
+        return [f"{result['id']} ({result['user']}) no longer works."]
+    if result.get("direct"):
+        return [f"{result['name']}: a direct database connection, without a token. Writes are recorded under this name."]
+    return [_user(result)]
+
+
 def run(catalog: Catalog, args):
+    if args.command == "users":
+        from . import users
+        if args.what == "list":
+            return users.listing(catalog)
+        if args.what == "add":
+            return users.add(catalog, args.name, args.role, args.display_name, args.email)
+        if args.what == "set":
+            return users.update(catalog, args.name, args.role, True if args.disable else False if args.enable else None)
+        if args.what == "token":
+            return users.make_token(catalog, args.name, args.label)
+        if args.what == "tokens":
+            return users.tokens(catalog, args.name)
+        if args.what == "revoke":
+            return users.revoke(catalog, args.id)
+        return users.whoami(catalog)
     if args.command == "import":
         require(sum(map(bool, (args.dbt, args.bigquery, args.dataform, args.vertex_manifest, args.openlineage, args.docs, args.sql_definitions,
                                args.postgres))) == 1,
@@ -388,7 +427,7 @@ def privacy_flags(p) -> None:
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="odcl", description="What data exists, how it connects, and which projects use it.")
     p.add_argument("--database-url", metavar="URL", help="the PostgreSQL database (default: $ODCL_DATABASE_URL)")
-    p.add_argument("--as", dest="actor", help="who is registering (default: $ODCL_USER, else your login name)")
+    p.add_argument("--as", dest="actor", help="who is registering, on a direct connection without $ODCL_TOKEN (default: $ODCL_USER, else your login name)")
     p.add_argument("--json", action="store_true", help="print the full result as JSON")
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("overview", help="how much is registered, and what changed after a project used it")
@@ -572,14 +611,39 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--upstream", action="store_true", help="also everything that data is built from")
     s.add_argument("--revision", metavar="REV", help="what this older revision of the project had pinned")
 
+    s = sub.add_parser("users", help="who may read and write the catalog, and their API tokens")
+    kinds = s.add_subparsers(dest="what", required=True)
+    kinds.add_parser("list", help="every user (admin)")
+    u = kinds.add_parser("add", help="make a user: a person, or a service user for importers (admin)")
+    u.add_argument("name")
+    u.add_argument("--role", required=True, choices=["reader", "editor", "importer", "admin"])
+    u.add_argument("--display-name")
+    u.add_argument("--email", help="a person who later signs in through single sign-on with this verified email becomes this user")
+    u = kinds.add_parser("set", help="change a user's role, or disable or enable them (admin)")
+    u.add_argument("name")
+    u.add_argument("--role", choices=["reader", "editor", "importer", "admin"])
+    on = u.add_mutually_exclusive_group()
+    on.add_argument("--disable", action="store_true", help="their tokens and sessions stop working")
+    on.add_argument("--enable", action="store_true")
+    u = kinds.add_parser("token", help="make an API token, shown once: your own, or (admin) a user's")
+    u.add_argument("name", nargs="?")
+    u.add_argument("--label", help="what it is for, e.g. ci or laptop")
+    u = kinds.add_parser("tokens", help="the current tokens of a user (yours, or admin: anyone's)")
+    u.add_argument("name", nargs="?")
+    u = kinds.add_parser("revoke", help="stop a token working")
+    u.add_argument("id", help="its id, tok_...")
+    kinds.add_parser("whoami", help="who this connection writes as")
+
     s = sub.add_parser("serve", help="serve the catalog over HTTP, with a web page to browse it")
-    s.add_argument("--host", default="127.0.0.1", help="the address to listen on (default 127.0.0.1: only this machine). There is no sign-in")
+    s.add_argument("--host", default="127.0.0.1", help="the address to listen on (default 127.0.0.1: only this machine)")
+    s.add_argument("--require-sign-in", action="store_true", help="reads need an API token too (single sign-on, when set up, always needs a sign-in)")
     s.add_argument("--port", type=int, default=8080)
     s.add_argument("--accept-lineage", action="store_true",
                    help="accept OpenLineage events at POST /api/v1/lineage; set ODCL_LINEAGE_TOKEN to require it as a bearer token")
 
     s = sub.add_parser("mcp", help="serve the catalog to an assistant over the Model Context Protocol")
     s.add_argument("--allow-writes", action="store_true", help="also offer the tools that register projects and record use")
+    s.add_argument("--server", metavar="URL", help="use an odcl serve at URL instead of the database, signed in with $ODCL_TOKEN")
     return p
 
 
@@ -592,10 +656,13 @@ def main(argv=None) -> int:
             return 0
         if args.command == "serve":
             from .server import make_server
-            server = make_server(args.database_url, host=args.host, port=args.port, actor=args.actor, accept_lineage=args.accept_lineage)
+            server = make_server(args.database_url, host=args.host, port=args.port, actor=args.actor, accept_lineage=args.accept_lineage,
+                                 require_sign_in=args.require_sign_in)
             host, port = server.server_address[:2]
-            print(f"odcl: serving the catalog at http://{host}:{port}/" + ("  (accepting OpenLineage events at /api/v1/lineage)" if args.accept_lineage else ""),
-                  file=sys.stderr, flush=True)
+            handler = server.RequestHandlerClass
+            print(f"odcl: serving the catalog at http://{host}:{port}/" + ("  (accepting OpenLineage events at /api/v1/lineage)" if args.accept_lineage else "")
+                  + (f"\nodcl: single sign-on: {handler.sso.issuer}" if handler.sso else "\nodcl: reads need an API token" if handler.require_sign_in
+                     else "\nodcl: anyone who reaches this server can read the catalog; writes need an API token"), file=sys.stderr, flush=True)
             try:
                 server.serve_forever()
             except KeyboardInterrupt:
@@ -603,7 +670,12 @@ def main(argv=None) -> int:
             finally:
                 server.server_close()
             return 0
-        with Catalog(args.database_url, args.actor) as catalog:
+        token = os.environ.get("ODCL_TOKEN") or None
+        if args.command == "mcp" and args.server:
+            from .mcp import Remote
+            from .mcp import main as serve
+            return serve(Remote(args.server, token), args.allow_writes)
+        with Catalog(args.database_url, args.actor, token=token) as catalog:
             if args.command == "mcp":
                 from .mcp import main as serve
                 return serve(catalog, args.allow_writes)

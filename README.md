@@ -96,12 +96,13 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 | `odcl import --openlineage FILE` | Read OpenLineage events: runs and the lineage they establish |
 | `odcl import --docs PATH... [--repo-url URL] [--commit SHA]` | Read Markdown pages that describe catalog entries |
 | `odcl docs KEY` | Which documents describe this entry? |
-| `odcl serve [--accept-lineage]` | Serve the catalog over HTTP, with a web page to browse it |
-| `odcl mcp [--allow-writes]` | Serve all of this to an assistant |
+| `odcl serve [--accept-lineage] [--require-sign-in]` | Serve the catalog over HTTP, with a web page to browse it |
+| `odcl mcp [--allow-writes] [--server URL]` | Serve all of this to an assistant |
+| `odcl users list\|add\|set\|token\|tokens\|revoke\|whoami` | Who may read and write, and their API tokens |
 
 Add `--json` before the command for the full result. A bare path such as `churn.bronze.accounts` works wherever a key does, when only one entry has it.
 
-The database is one PostgreSQL database: `--database-url`, else `$ODCL_DATABASE_URL`. Run `odcl migrate` once on a new database and again after upgrading. Changes are recorded under `--as`, else `$ODCL_USER`, else your login name. There is no sign-in.
+The database is one PostgreSQL database: `--database-url`, else `$ODCL_DATABASE_URL`. Run `odcl migrate` once on a new database and again after upgrading. With `$ODCL_TOKEN` set to an API token, the command signs in as that token's user, records changes under their name and checks their role (see [Users and sign-in](#users-and-sign-in)). Without one it is a direct connection, trusted because it holds the database's credentials, and changes are recorded under `--as`, else `$ODCL_USER`, else your login name.
 
 ## Importing from dbt
 
@@ -373,7 +374,48 @@ The web page has a page each for Tables (filtered by layer and system), Projects
 
 URL-encode keys and references in the path. Errors come back as `{"error": {"code", "message"}}`, with 404 for something not registered and 400 for a request the catalog refuses.
 
-There is no sign-in: anyone who can reach the server can read the whole catalog. That is why it listens on 127.0.0.1 unless `--host` says otherwise. It writes nothing unless started with `--accept-lineage`. With `ODCL_LINEAGE_TOKEN` set, a sender must also present that token as `Authorization: Bearer TOKEN`. The page runs only its own script, under a content security policy, and displays catalog text as text.
+The same server takes annotations from signed-in users (see [Users and sign-in](#users-and-sign-in)): `POST /v1/projects`, `POST /v1/projects/{name}/uses`, `POST /v1/privacy`, `POST /v1/entries/{key}/created-by`, `/references` and `/instances`, and `POST /v1/models/{name}/versions/{version}/relied-on`, each with a JSON body of the same fields as the Python operation. `GET /v1/me` says who is signed in; `/v1/me/tokens` and `/v1/users` manage tokens and users.
+
+Unless the server runs with `--require-sign-in` or single sign-on, anyone who can reach it can read the whole catalog. That is why it listens on 127.0.0.1 unless `--host` says otherwise. Writes always need a signed-in user whose role allows them. OpenLineage events are taken only with `--accept-lineage`, from an importer's API token or, with `ODCL_LINEAGE_TOKEN` set, that shared token; without either set, and without sign-in required, any sender is accepted, as before. The page runs only its own script, under a content security policy, and displays catalog text as text.
+
+## Users and sign-in
+
+odcl has users, each with one role: `reader` reads; `editor` also annotates (projects and their uses, privacy fields, `created_by`, `references`, copies, documents relied on); `importer` also imports (every `odcl import`, builds, model versions, query history, OpenLineage); `admin` also manages users. [Working with several people](docs/working-with-several-people.md) says why: importers run centrally under a service user, and people annotate as themselves.
+
+```sh
+odcl --as you users add you --role admin --email you@example.com   # the first admin, over a direct connection
+odcl users add etl --role importer --display-name "Scheduled imports"
+odcl users token etl --label scheduler      # shown once; give it to the scheduler as ODCL_TOKEN
+odcl users set ben --role editor            # or --disable, which stops their tokens and sessions
+```
+
+A caller proves who they are with an API token (`odcl_...`, kept only as a digest): `$ODCL_TOKEN` for the CLI and `odcl mcp`, `Authorization: Bearer odcl_...` over HTTP, or pasted once into the web page. A direct database connection without a token is trusted as before: its credentials are the gate. Anyone signed in makes and revokes their own tokens on the web page's **Account** page (or `POST /v1/me/tokens`); an admin also sees and changes every user's role there.
+
+### Single sign-on
+
+With single sign-on through your organization's identity provider, nobody reads the server without signing in: the page sends you to the provider and back, and the API needs that session or an API token. It works with any OpenID Connect provider (Microsoft Entra ID, Okta, Google Workspace, Auth0, Keycloak) and needs the `sso` extra (`uv sync --extra sso`, for PyJWT). It is the authorization code flow with PKCE, a state and a nonce; the provider is found by discovery and its ID token checked (signature against the provider's keys, issuer, audience, expiry, nonce). Nothing of the provider's is kept: the server runs its own session, an HttpOnly, `SameSite=Lax` cookie whose id the database keeps only as a digest.
+
+Register odcl with the provider as a web app using the authorization code flow, with the redirect URI `https://YOUR-SERVER/auth/callback`, then set:
+
+| Setting | |
+|---|---|
+| `ODCL_OIDC_ISSUER` | The provider's issuer URL (Entra: `https://login.microsoftonline.com/<tenant-id>/v2.0`) |
+| `ODCL_OIDC_CLIENT_ID`, `ODCL_OIDC_CLIENT_SECRET` | The app's ID and secret |
+| `ODCL_OIDC_DEFAULT_ROLE` | Optional: the role of someone signing in for the first time, `reader` (default), `editor` or `importer` |
+| `ODCL_OIDC_ROLE_CLAIM`, `ODCL_OIDC_ROLE_VALUES` | Optional: a claim the provider sends, such as `roles`, and which of its values give which role, e.g. `Odcl.Editor=editor,Odcl.Admin=admin`. The highest wins |
+| `ODCL_OIDC_ADMIN_EMAILS` | Optional: who becomes an admin on first sign-in. Never by an email the provider says is unverified (`email_verified: false`); where people choose their own email, use a role claim instead |
+| `ODCL_OIDC_REDIRECT_URI` | Optional: the callback, when the server cannot tell its own address (behind a proxy that ends TLS, set it to the `https://` address) |
+| `ODCL_OIDC_POST_LOGOUT_REDIRECT_URI` | Optional: where signing out ends up (default: the server's `/`) |
+| `ODCL_OIDC_SCOPES` | Optional: default `openid profile email` |
+| `ODCL_OIDC_SESSION_HOURS` | Optional: how long a browser stays signed in, default 12 |
+| `ODCL_OIDC_TOKEN_IDLE_DAYS` | Optional: a single-sign-on user's API tokens stop working after this many days without signing in, default 30 (`0`: never) |
+
+All three of the first settings, or none. `odcl serve` prints `single sign-on: <issuer>` when it is on.
+
+- **Users** are found by the provider's issuer and subject, which never change. The first sign-in makes the user, named from their username or email (`ann.lee@example.com` becomes `ann.lee`; `ann.lee-2` if taken), or takes over a user an admin made beforehand with the same verified email. Roles are decided then and never changed by a later sign-in, so a provider's claims changing cannot silently promote anyone; change them with `odcl users set` or on the Account page.
+- **API tokens** of single-sign-on users stop working after `ODCL_OIDC_TOKEN_IDLE_DAYS` without signing in, so people removed from the provider lose API access too. Signing in again brings them back. Service users made with `odcl users add` keep their tokens.
+- **A browser session changes nothing from another site**: a write made with the session cookie must come from the server's own page (its `Origin`).
+- **Signing out** (on the Account page) ends the session, and the provider's too where it offers that (`end_session_endpoint`).
 
 ## Documents
 
@@ -479,7 +521,13 @@ uv run odcl privacy export --pii-only > privacy.csv        # or --json; --table 
 uv run odcl mcp
 ```
 
-serves `find_data`, `get_entry`, `trace_lineage`, `documents_for`, `used_by` and `project_uses` over the Model Context Protocol (the official [MCP SDK](https://github.com/modelcontextprotocol/python-sdk)). With `--allow-writes` it also offers `register_project` and `record_use`.
+serves `find_data`, `get_entry`, `trace_lineage`, `documents_for`, `used_by` and `project_uses` over the Model Context Protocol (the official [MCP SDK](https://github.com/modelcontextprotocol/python-sdk)). With `--allow-writes` it also offers `register_project` and `record_use`, to a direct connection or, with `$ODCL_TOKEN`, to an editor or above.
+
+```sh
+ODCL_TOKEN=odcl_... uv run odcl mcp --server https://catalog.example.com --allow-writes
+```
+
+uses an `odcl serve` instead of the database, so an assistant needs only the person's API token, and what it writes is recorded as that person. The address is `https://` (or `http://` on this machine), so the token is never sent in the clear.
 
 ## From Python
 
@@ -492,7 +540,7 @@ with Catalog() as catalog:
     catalog.used_by("churn.bronze.accounts.plan")
 ```
 
-`Catalog` is the whole interface: `put`, `apply`, `use`, `find`, `get`, `lineage`, `used_by`, `uses`, `table_history`, `query_jobs`, `tables`, `projects`, `runs`, `models`, `overview`. `apply` registers a batch in one transaction: all of it, or none; with `withdraw` it also withdraws what that importer said before within what it read and no longer saw (`Catalog.withdraw`). It takes every entry lock first (512 stripes that keys hash to, in order), so an import of any size fits PostgreSQL's lock table and two imports run one after the other rather than deadlock. With `merge=True`, fields a payload leaves out keep what the entry already says, and the tags a payload sends belong to the one importer named in its `source`, so they replace only that importer's earlier tags. Without `merge` a payload says the whole entry, except what is said beside it by its own commands: copies (`instances`), `created_by`, a column's `references` and the privacy fields are kept when the payload leaves them out, and cleared when it sets them to null. So a dbt import, which does not merge, keeps them. Builds are read and written through `odcl.dataform.import_invocation`, `odcl.builds.record_handoff` and `odcl.builds.explain_dataset`; model versions through `odcl.vertex.import_build` and `Catalog.explain_model`; OpenLineage events through `odcl.openlineage.ingest`. `odcl.server.make_server` returns the HTTP server.
+`Catalog` is the whole interface: `put`, `apply`, `use`, `find`, `get`, `lineage`, `used_by`, `uses`, `table_history`, `query_jobs`, `tables`, `projects`, `runs`, `models`, `overview`. `apply` registers a batch in one transaction: all of it, or none; with `withdraw` it also withdraws what that importer said before within what it read and no longer saw (`Catalog.withdraw`). It takes every entry lock first (512 stripes that keys hash to, in order), so an import of any size fits PostgreSQL's lock table and two imports run one after the other rather than deadlock. With `merge=True`, fields a payload leaves out keep what the entry already says, and the tags a payload sends belong to the one importer named in its `source`, so they replace only that importer's earlier tags. Without `merge` a payload says the whole entry, except what is said beside it by its own commands: copies (`instances`), `created_by`, a column's `references` and the privacy fields are kept when the payload leaves them out, and cleared when it sets them to null. So a dbt import, which does not merge, keeps them. Builds are read and written through `odcl.dataform.import_invocation`, `odcl.builds.record_handoff` and `odcl.builds.explain_dataset`; model versions through `odcl.vertex.import_build` and `Catalog.explain_model`; OpenLineage events through `odcl.openlineage.ingest`. `odcl.server.make_server` returns the HTTP server. `Catalog(token=...)` signs in as an API token's user and checks their role on every write; `odcl.users` manages users and tokens.
 
 ## Developing
 
@@ -558,7 +606,8 @@ The tag starts `release.yml`, which refuses a tag that isn't on `main`, whose ve
 - Proposing manifests for pipelines laid out differently from a trainer with a Model output and a `metadata.json` beside it.
 - Sending the catalog's runs and lineage out as OpenLineage events.
 - Discovering Dataform invocations, and Dataform runs started from the CLI rather than the managed service.
-- Sign-in and permissions. Today anyone who can reach the database can read and write the catalog.
+- Permissions finer than a role, such as who may change which tables. Whoever holds the database's credentials can still do anything.
+- The CLI through `odcl serve` (as `odcl mcp --server` does), so people annotate from the command line without database credentials.
 - Retiring what an OpenLineage producer stopped emitting: events say what a run touched, not everything that exists.
 
 The distribution is `open-data-context-layer`, the Python package is `odcl`, and the command is `odcl`. The repository is [lawwu/open-data-context-layer](https://github.com/lawwu/open-data-context-layer).

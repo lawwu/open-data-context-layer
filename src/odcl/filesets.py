@@ -81,6 +81,7 @@ def record(catalog: Catalog, *, client, pipeline_run: str | None = None, task: s
 
     `created_by` says what wrote the files when no pipeline task did, such as a notebook (see `provenance`). It is
     kept as a person said it, and can be added to a file set recorded before."""
+    catalog.allow("importer")
     from . import exports
     from .provenance import check
     from .vertex import GCS, SUCCEEDED, record_task, task_detail

@@ -169,8 +169,13 @@ class Catalog:
     """The whole interface: `put` and `apply` register entries, `use` records what a project used, and
     `find`, `get`, `lineage`, `used_by` and `uses` answer questions. `migrate` prepares the database first."""
 
-    def __init__(self, dsn: str | None = None, actor: str | None = None):
+    def __init__(self, dsn: str | None = None, actor: str | None = None, *, token: str | None = None, user: dict | None = None):
+        """Without a token this is a direct, trusted connection: its writes are recorded under `actor`, else
+        `$ODCL_USER`, else the login name. With an API `token` (or a `user` the caller already authenticated, as the
+        HTTP server does for a browser session) writes are recorded under that user, and their role decides what
+        they may do (see `odcl.users`)."""
         self.actor = (actor or os.environ.get("ODCL_USER") or getpass.getuser())[:200]
+        self.user = user
         self.db = connect(dsn, autocommit=True)
         self._importing = 0     # > 0 inside apply(), which holds every entry lock
         self._new_tables = None  # inside apply(), tables first registered, to link to their definitions once at the end
@@ -186,6 +191,24 @@ class Catalog:
             self.db.close()
             raise CatalogError("schema", f"The database is at schema version {version} and this release needs {latest}. "
                                + ("Run `odcl migrate`" if version < latest else "Upgrade odcl"))
+        if token is not None:
+            from .users import authenticate
+            try:
+                self.user = authenticate(self.db, token)
+            except CatalogError:
+                self.db.close()
+                raise
+        if self.user:
+            self.actor = self.user["name"]
+
+    def allow(self, role: str) -> None:
+        """Refuse unless the signed-in user's role is at least `role` (reader < editor < importer < admin). A direct
+        connection, with no user, may do anything: its database credentials are the gate."""
+        if self.user is None:
+            return
+        from .users import ROLES, rank
+        require(self.user["role"] in ROLES and rank(self.user["role"]) >= rank(role), "forbidden",
+                f"{self.user['name']} is a{'n' if self.user['role'][0] in 'aeiou' else ''} {self.user['role']}; this needs {role} or above")
 
     def close(self) -> None:
         self.db.close()
@@ -419,6 +442,7 @@ class Catalog:
 
         `withdraw` names what the import read, so what it said before and no longer sees is withdrawn in the same
         transaction (see `withdraw`): {"importer": name, "scope": fn(said, body) -> bool, "tables": bool}."""
+        self.allow("importer")
         counts = {"added": 0, "changed": 0, "unchanged": 0}
         seen: set[str] = set()
         outer = self._new_tables is None
@@ -476,6 +500,7 @@ class Catalog:
         an entry says, so re-registering a table does not ripple down everything built from it; a `uses` link's is,
         because recording use again means the project has seen the current definition. Returning to an older
         wording is a new revision: only the head is compared. With `keep_retired`, a retired head stays retired."""
+        self.allow("editor")
         with self.db.transaction():
             self._lock(body["key"])
             head = self._head(body["key"])

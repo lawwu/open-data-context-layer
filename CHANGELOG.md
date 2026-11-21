@@ -8,6 +8,25 @@ section says how a release is cut.
 
 ## Unreleased
 
+- **Users, roles and sign-in.** Users with one role each (`reader`, `editor`, `importer`,
+  `admin`) and API tokens (`odcl users ...`; run `odcl migrate` for migration 0011). With
+  `$ODCL_TOKEN`, the CLI and `odcl mcp` sign in as that user, record changes under their
+  name and check their role; a direct connection without one is trusted as before.
+  `Catalog(token=...)` does the same from Python.
+- `odcl serve` takes annotations from signed-in editors (`POST /v1/projects`,
+  `/v1/projects/{name}/uses`, `/v1/privacy`, `/v1/entries/{key}/created-by`, `/references`,
+  `/instances`, `/v1/models/{name}/versions/{version}/relied-on`), manages users and tokens
+  (`/v1/me`, `/v1/me/tokens`, `/v1/users`), and gets an Account page. `--require-sign-in`
+  closes reads too. OpenLineage events also take an importer's token.
+- **Single sign-on** for `odcl serve` through any OpenID Connect provider
+  (`ODCL_OIDC_*`, the `sso` extra): authorization code with PKCE, first sign-in makes the
+  user with a role from a claim or the admin emails, and tokens of people who stop
+  signing in stop working.
+- `odcl mcp --server URL` serves the tools through an `odcl serve` with `$ODCL_TOKEN`, so an
+  assistant needs no database credentials. The write tools are offered only to an editor or
+  above.
+- Docs: [Working with several people](docs/working-with-several-people.md): importers run
+  centrally under a service user, and people annotate as themselves.
 - Imports retire what is gone from their source. A Postgres, SQL-definitions, Dataform, dbt or
   BigQuery import withdraws what it registered before, within what it read, and no longer saw;
   an entry nothing else still says is retired: kept with its history, left out of `find`,

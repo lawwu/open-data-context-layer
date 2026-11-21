@@ -225,6 +225,7 @@ def import_invocation(catalog: Catalog, name: str, *, client) -> dict:
     Definitions are applied only when this compilation is at least as new as the newest one already imported for
     the repository, so importing an old invocation late never turns definitions back. Its runs are still
     recorded, without a pinned definition."""
+    catalog.allow("importer")
     from psycopg.types.json import Jsonb
     found = NAME.match(name or "")
     require(found, "invocation", "Name an invocation as projects/P/locations/L/repositories/R/workflowInvocations/I")

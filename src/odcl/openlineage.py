@@ -181,6 +181,7 @@ def _entries(inputs: list[_Dataset], outputs: list[_Dataset]) -> list[tuple[str,
 def ingest(catalog: Catalog, event: dict) -> dict:
     """Record one OpenLineage event. Everything it says is checked before anything is written, and it is written
     in one transaction. The same event again changes nothing."""
+    catalog.allow("importer")
     require(isinstance(event, dict), "openlineage", "An OpenLineage event is a JSON object")
     run = event.get("run")
     at = _time(event.get("eventTime"))

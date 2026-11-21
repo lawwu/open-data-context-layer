@@ -222,6 +222,7 @@ def evaluate(catalog: Catalog, client, refs: list[str], source_uri: str, objects
 
 def store(catalog: Catalog, version: int, binding: dict) -> str:
     """Write a binding `evaluate` checked. Binding the same jobs again changes nothing; other jobs are refused."""
+    catalog.allow("importer")
     from psycopg.types.json import Jsonb
     db = catalog.db
     with db.transaction():

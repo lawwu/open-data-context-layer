@@ -1,12 +1,18 @@
 """`odcl mcp`: the catalog as a Model Context Protocol server over stdio, on the official MCP SDK.
 
 The tools are declared here and each maps to one `Catalog` method. Reads are always offered; the two writes only
-with --allow-writes.
+with --allow-writes, and, for a signed-in user ($ODCL_TOKEN), only when their role is editor or above.
+
+With --server URL the tools read and write through an `odcl serve` instead of the database (`Remote`), signed in
+with $ODCL_TOKEN, so a person's assistant needs no database credentials and its writes are recorded as that person.
 """
 from __future__ import annotations
 
 import json
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 
 from .store import Catalog, CatalogError
 
@@ -49,11 +55,80 @@ TOOLS = [
 ]
 
 
+class Remote:
+    """The few `Catalog` operations the tools call, answered by an `odcl serve` over its HTTP API."""
+
+    def __init__(self, url: str, token: str | None, timeout: float = 30):
+        parts = urllib.parse.urlsplit(url)
+        local = parts.hostname in ("localhost", "127.0.0.1", "::1")
+        if parts.scheme not in ("http", "https") or (parts.scheme == "http" and not local):
+            raise CatalogError("server", "The server is an https:// address (or http:// on this machine), so the token is not sent in the clear")
+        self.url, self.token, self.timeout = url.rstrip("/"), token, timeout
+        self.user = self._call("GET", "/v1/me")["user"]
+
+    def _call(self, method: str, path: str, query: dict | None = None, body: dict | None = None):
+        query = {k: str(v).lower() if isinstance(v, bool) else v for k, v in (query or {}).items() if v is not None}
+        url = self.url + path + (f"?{urllib.parse.urlencode(query)}" if query else "")
+        headers = {"Accept": "application/json", **({"Authorization": f"Bearer {self.token}"} if self.token else {}),
+                   **({"Content-Type": "application/json"} if body is not None else {})}
+        request = urllib.request.Request(url, method=method, headers=headers, data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:  # noqa: S310 - the scheme is checked in __init__
+                return json.loads(response.read())
+        except urllib.error.HTTPError as e:
+            try:
+                error = json.loads(e.read())["error"]
+            except (ValueError, KeyError, TypeError):
+                error = {"code": "server", "message": f"{e.code} from {self.url}"}
+            raise CatalogError(error.get("code", "server"), error.get("message", "")) from None
+        except (OSError, ValueError) as e:
+            raise CatalogError("server", f"Could not reach {self.url}: {e}") from None
+
+    @staticmethod
+    def _key(key: str) -> str:
+        return urllib.parse.quote(key, safe="")
+
+    def find(self, query: str = "", kind=None, layer=None, limit: int = 50):
+        return self._call("GET", "/v1/search", {"q": query, "kind": kind, "layer": layer, "limit": limit})
+
+    def get(self, key):
+        return self._call("GET", f"/v1/entries/{self._key(key)}")
+
+    def lineage(self, key, direction="both"):
+        return self._call("GET", f"/v1/entries/{self._key(key)}/lineage", {"direction": direction})
+
+    def used_by(self, key):
+        return self._call("GET", f"/v1/entries/{self._key(key)}/used-by")
+
+    def documents(self, key):
+        return self._call("GET", f"/v1/entries/{self._key(key)}/documents")
+
+    def uses(self, project, upstream=False):
+        return self._call("GET", f"/v1/projects/{self._key(project)}/uses", {"upstream": upstream})
+
+    def put(self, kind, payload):
+        if kind != "project":
+            raise CatalogError("kind", "Only projects are registered through the server's tools")
+        return self._call("POST", "/v1/projects", body=payload)
+
+    def use(self, project, keys, purpose=None):
+        return self._call("POST", f"/v1/projects/{self._key(project)}/uses", body={"keys": keys, **({"purpose": purpose} if purpose else {})})
+
+    def close(self):
+        pass
+
+
 class Tools:
     """The tools and what each one calls. No protocol here."""
 
-    def __init__(self, catalog: Catalog, allow_writes=False):
-        self.catalog, self.allow_writes = catalog, allow_writes
+    def __init__(self, catalog: Catalog | Remote, allow_writes=False):
+        from .users import rank
+        user = getattr(catalog, "user", None)
+        # A direct database connection is trusted; a signed-in user, here or through a server, writes only as an editor or above.
+        self.can_write = (user is None and not isinstance(catalog, Remote)) or (user is not None and rank(user["role"]) >= rank("editor"))
+        self.catalog, self.allow_writes = catalog, allow_writes and self.can_write
+        self.refusal = (" (writes are off; start the server with --allow-writes)" if not allow_writes else
+                        f" ({user['name']} is a {user['role']}, and writing needs editor)" if user else " (sign in with $ODCL_TOKEN to write through a server)")
 
     def tools(self) -> list[dict]:
         return [{k: v for k, v in t.items() if k != "write"} for t in TOOLS if self.allow_writes or not t["write"]]
@@ -61,7 +136,7 @@ class Tools:
     def call(self, name: str, args: dict):
         spec = next((t for t in TOOLS if t["name"] == name), None)
         if spec is None or (spec["write"] and not self.allow_writes):
-            raise CatalogError("tool", f"Unknown tool {name!r}" + (" (writes are off; start the server with --allow-writes)" if spec else ""))
+            raise CatalogError("tool", f"Unknown tool {name!r}" + (self.refusal if spec else ""))
         unknown = sorted(set(args) - set(spec["inputSchema"]["properties"]))
         missing = [r for r in spec["inputSchema"]["required"] if args.get(r) in (None, "", [])]
         if unknown or missing:
@@ -111,7 +186,7 @@ def build(tools: Tools):
     return Server("odcl", version="0.2.0", instructions=INSTRUCTIONS, on_list_tools=list_tools, on_call_tool=call_tool)
 
 
-def main(catalog: Catalog, allow_writes=False) -> int:
+def main(catalog: Catalog | Remote, allow_writes=False) -> int:
     try:
         server = build(Tools(catalog, allow_writes))
     except ImportError:
