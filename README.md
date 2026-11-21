@@ -119,10 +119,10 @@ Python code that imports `fathom_data` keeps working: `Fathom` is now `odcl.Cata
 
 ## Importing from BigQuery
 
-The BigQuery commands need the `bigquery` extra and Python 3.14 or later, because they read through [Sounding](https://github.com/lawwu/sounding). Sign in once with `gcloud auth application-default login`. Every call is free: `tables.get` for schemas and `jobs.list` for jobs. No query is run.
+The BigQuery commands need the `bigquery` extra. On Python 3.14 and later they read through [Sounding](https://github.com/lawwu/sounding); on earlier versions, which Sounding does not support, through odcl's own reader (`odcl.bigquery_source`), which makes the same calls and keeps the same records. Sign in once with `gcloud auth application-default login`. Every call is free: `tables.get` for schemas and `jobs.list` for jobs. No query is run.
 
 ```sh
-uv sync --all-extras --python 3.14
+uv sync --all-extras
 uv run odcl import --bigquery my-project.features.shift_inputs my-project.raw.shift_totals
 uv run odcl sync bigquery-jobs --project my-job-project
 uv run odcl history table my-project.features.shift_inputs --since 7d --patterns
