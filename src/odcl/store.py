@@ -333,18 +333,63 @@ class Catalog:
         return [r["key"] for r in rows]
 
     def _summary(self, key: str, users=False) -> dict:
-        row = self._head(key)
-        body = row["body"]
-        table = self._head(body["table"])["body"] if body["kind"] == "column" else body
-        out = {"key": key, "kind": body["kind"], "title": body["title"], "description": body["description"], "owner": body.get("owner") or table.get("owner"),
-               "revision": row["id"]}
-        if body["kind"] == "document":
-            return out | {"doc_kind": body.get("doc_kind"), "retired": body.get("retired", False)}
-        if body["kind"] != "project":
-            out.update(layer=table.get("layer"), system=table.get("system"), dtype=body.get("dtype"))
-            if users:
-                out["used_by"] = len(self._users(key))
+        return self._summaries([key], users)[0]
+
+    def _heads(self, keys) -> dict[str, dict]:
+        """The head revisions of many entries, by key, in one query."""
+        return {r["entry_key"]: r for r in self.db.execute(
+            "SELECT r.* FROM entries e JOIN revisions r ON r.id = e.head_revision WHERE e.key = ANY(%s)", (list(set(keys)),))}
+
+    def _summaries(self, keys: list[str], users=False) -> list[dict]:
+        """`_summary` of many entries, in the order given, in a few queries rather than a few per entry."""
+        heads = self._heads(keys)
+        tables = self._heads({heads[k]["body"]["table"] for k in keys if heads[k]["body"]["kind"] == "column"})
+        counts = self._user_counts([k for k in keys if heads[k]["body"]["kind"] in ("table", "column")]) if users else {}
+        out = []
+        for key in keys:
+            row = heads[key]
+            body = row["body"]
+            table = tables[body["table"]]["body"] if body["kind"] == "column" else body
+            summary = {"key": key, "kind": body["kind"], "title": body["title"], "description": body["description"],
+                       "owner": body.get("owner") or table.get("owner"), "revision": row["id"]}
+            if body["kind"] == "document":
+                summary |= {"doc_kind": body.get("doc_kind"), "retired": body.get("retired", False)}
+            elif body["kind"] != "project":
+                summary.update(layer=table.get("layer"), system=table.get("system"), dtype=body.get("dtype"))
+                if users:
+                    summary["used_by"] = counts[key]
+            out.append(summary)
         return out
+
+    def _user_counts(self, keys: list[str]) -> dict[str, int]:
+        """How many projects depend on each table or column, counted the way `_users` finds them, for many entries
+        at once: one recursive query walks lineage down from all of them, and one more reads the uses."""
+        if not keys:
+            return {}
+        reach: dict[str, set[str]] = {key: {key} for key in keys}
+        for r in self.db.execute("""
+                WITH RECURSIVE reach(origin, key) AS (
+                  SELECT k COLLATE "C", k COLLATE "C" FROM unnest(%s::text[]) AS k
+                  UNION
+                  SELECT reach.origin, l.source_key FROM reach JOIN current_links l ON l.target_key = reach.key AND l.relation = 'derived_from')
+                SELECT origin, key FROM reach""", (list(keys),)):
+            reach[r["origin"]].add(r["key"])
+        nodes = set().union(*reach.values())
+        table_of = {r["key"]: r["tbl"] for r in self.db.execute(
+            "SELECT e.key, r.body ->> 'table' AS tbl FROM entries e JOIN revisions r ON r.id = e.head_revision "
+            "WHERE e.kind = 'column' AND e.key = ANY(%s)", (list(nodes),))}
+        columns_of: dict[str, list[str]] = {}
+        for r in self.db.execute("SELECT e.key, r.body ->> 'table' AS tbl FROM entries e JOIN revisions r ON r.id = e.head_revision "
+                                 "WHERE e.kind = 'column' AND r.body ->> 'kind' = 'column' AND r.body ->> 'table' = ANY(%s)",
+                                 (list(nodes - table_of.keys()),)):
+            columns_of.setdefault(r["tbl"], []).append(r["key"])
+        through = {key: {t for node in found for t in ([node, table_of[node]] if node in table_of else [node, *columns_of.get(node, [])])}
+                   for key, found in reach.items()}
+        projects: dict[str, set[str]] = {}
+        for r in self.db.execute("SELECT DISTINCT source_key, target_key FROM current_links WHERE relation = 'uses' AND target_key = ANY(%s)",
+                                 (list(set().union(*through.values())),)):
+            projects.setdefault(r["target_key"], set()).add(r["source_key"])
+        return {key: len(set().union(*(projects.get(t, ()) for t in found))) for key, found in through.items()}
 
     def _linked(self, key: str, relation: str, direction: str, revision: str | None = None) -> list[dict]:
         """Entries one link away: what `key` points at (up), or what points at it (down). Up can be asked of an
@@ -356,8 +401,8 @@ class Catalog:
         else:
             rows = self.db.execute("SELECT source_key AS other, target_revision, purpose, target_head FROM current_links "
                                    "WHERE target_key = %s AND relation = %s ORDER BY source_key", (key, relation)).fetchall()
-        return [{**self._summary(r["other"]), "linked_revision": r["target_revision"], "changed_since": r["target_revision"] != r["target_head"],
-                 **({"purpose": r["purpose"]} if relation == "uses" else {})} for r in rows]
+        return [{**summary, "linked_revision": r["target_revision"], "changed_since": r["target_revision"] != r["target_head"],
+                 **({"purpose": r["purpose"]} if relation == "uses" else {})} for r, summary in zip(rows, self._summaries([r["other"] for r in rows]), strict=True)]
 
     def _walk(self, key: str, direction: str) -> list[dict]:
         """Every entry reachable along lineage from `key`, nearest first. One recursive query reads the edges."""
@@ -419,15 +464,10 @@ class Catalog:
                                    "ORDER BY ts_rank(e.search, q) DESC, e.key LIMIT 2000", (" & ".join(w + ":*" for w in words), kind, kind)).fetchall()
         else:
             rows = self.db.execute("SELECT key FROM entries WHERE (%s::text IS NULL OR kind = %s) ORDER BY key LIMIT 2000", (kind, kind)).fetchall()
-        out = []
-        for r in rows:
-            summary = self._summary(r["key"], users=True)
-            if layer and summary.get("layer") != layer:
-                continue
-            out.append(summary)
-            if len(out) >= limit:
-                break
-        return out
+        keys = [r["key"] for r in rows]
+        if layer:
+            keys = [s["key"] for s in self._summaries(keys) if s.get("layer") == layer]
+        return self._summaries(keys[:limit], users=True)
 
     def get(self, name: str) -> dict:
         """One entry in full: what it says, what it is built from, what is built from it, who uses it, and its history."""
@@ -446,7 +486,7 @@ class Catalog:
             return out
         out.update(derived_from=self._linked(key, "derived_from", "up"), feeds=self._linked(key, "derived_from", "down"), used_by=self._users(key))
         if out["kind"] == "table":
-            out["columns"] = [self._summary(column) for column in self._columns(key)]
+            out["columns"] = self._summaries(self._columns(key))
         else:
             out["layer"] = self._summary(key)["layer"]
         return out
@@ -455,8 +495,8 @@ class Catalog:
         rows = self.db.execute("""SELECT l.target_key, l.target_revision, l.section, l.says, t.head_revision FROM revision_links l
                                   JOIN entries t ON t.key = l.target_key WHERE l.source_revision = %s AND l.relation = 'describes'
                                   ORDER BY l.section NULLS FIRST, l.target_key""", (revision,)).fetchall()
-        return [{**self._summary(r["target_key"]), "linked_revision": r["target_revision"], "changed_since": r["target_revision"] != r["head_revision"],
-                 "section": r["section"], "says": r["says"]} for r in rows]
+        return [{**summary, "linked_revision": r["target_revision"], "changed_since": r["target_revision"] != r["head_revision"],
+                 "section": r["section"], "says": r["says"]} for r, summary in zip(rows, self._summaries([r["target_key"] for r in rows]), strict=True)]
 
     def documents(self, name: str) -> list[dict]:
         """The documents that describe an entry now, with the part of the page and what it says. A column also gets
@@ -605,13 +645,14 @@ class Catalog:
         """Every table, by key: its layer and system, how many columns it has, how many projects depend on it, and
         when it last changed."""
         rows = self.db.execute("""
-            SELECT e.key, r.recorded_at,
-                   (SELECT count(*) FROM entries c JOIN revisions cr ON cr.id = c.head_revision
-                    WHERE c.kind = 'column' AND cr.body ->> 'table' = e.key) AS columns
+            SELECT e.key, r.recorded_at, coalesce(c.n, 0) AS columns
             FROM entries e JOIN revisions r ON r.id = e.head_revision
+            LEFT JOIN (SELECT cr.body ->> 'table' AS tbl, count(*) AS n FROM entries c JOIN revisions cr ON cr.id = c.head_revision
+                       WHERE c.kind = 'column' AND cr.body ->> 'kind' = 'column' GROUP BY 1) c ON c.tbl = e.key
             WHERE e.kind = 'table' AND (%(layer)s::text IS NULL OR r.body ->> 'layer' = %(layer)s)
               AND (%(system)s::text IS NULL OR r.body ->> 'system' = %(system)s) ORDER BY e.key""", {"layer": layer, "system": system}).fetchall()
-        return [{**self._summary(r["key"], users=True), "columns": r["columns"], "changed": stamp(r["recorded_at"])} for r in rows]
+        return [{**summary, "columns": r["columns"], "changed": stamp(r["recorded_at"])}
+                for r, summary in zip(rows, self._summaries([r["key"] for r in rows], users=True), strict=True)]
 
     def projects(self) -> list[dict]:
         """Every project: how much data it uses, how much of that changed after it was used, and its latest model version."""

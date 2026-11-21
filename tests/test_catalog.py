@@ -172,3 +172,16 @@ def test_the_table_list_counts_columns_and_users_and_filters_by_layer_and_system
     assert gold["changed"] == fathom.get(GOLD)["at"]
     assert [t["key"] for t in fathom.tables(layer="bronze")] == ["table:churn.bronze.accounts", "table:churn.bronze.tickets"]
     assert fathom.tables(system="bigquery") == []
+
+
+def test_listed_user_counts_match_what_used_by_finds_for_each_entry(fathom):
+    """The lists count users for every row at once; each count must agree with asking `used_by` of that one entry."""
+    for name in ("churn-model", "billing-audit", "support-dashboard"):
+        fathom.put("project", {"name": name, "description": name})
+    fathom.use("churn-model", [f"column:{GOLD}.plan_tier", f"column:{GOLD}.tenure_months"])
+    fathom.use("billing-audit", [f"column:{BRONZE}.plan"])
+    fathom.use("support-dashboard", [f"table:{SILVER}"])
+    listed = fathom.tables() + fathom.find("", "column", limit=2000)
+    assert any(e["used_by"] > 1 for e in listed)
+    for entry in listed:
+        assert entry["used_by"] == len(fathom.used_by(entry["key"])["projects"]), entry["key"]
