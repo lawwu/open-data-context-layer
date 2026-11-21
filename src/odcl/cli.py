@@ -12,9 +12,16 @@ from .store import Catalog, CatalogError, migrate, require
 
 
 def _not_linked(result: dict) -> list[str]:
-    """What an import of SQL definitions read but could not link or trace, one line each."""
+    """What an import read but could not link or trace, and what it no longer saw, one line each."""
     return ([f"  not defined or registered, so registered by name only: {t}" for t in result.get("unresolved") or []]
-            + [f"  SQL not traced (sqlglot could not read its columns): {t}" for t in result.get("untraced") or []])
+            + [f"  SQL not traced (sqlglot could not read its columns): {t}" for t in result.get("untraced") or []]
+            + _gone(result))
+
+
+def _gone(result: dict) -> list[str]:
+    """What an import said before and no longer sees: retired, or its part withdrawn where another source still says it."""
+    return ([f"  retired (no longer there): {k}" for k in result.get("retired") or []]
+            + [f"  withdrawn (another source still says it): {k}" for k in result.get("withdrawn") or []])
 
 def span(value: str) -> timedelta:
     """7d or 12h as a length of time."""
@@ -66,6 +73,7 @@ def lines(command: str, result) -> list[str]:
     """A person's view of a result. `--json` prints the result itself."""
     if command == "find":
         return [f"{r['key']}" + (f"  [{r['layer']}]" if r.get("layer") else "") + (f"  used by {r['used_by']}" if r.get("used_by") else "")
+                + ("  (retired)" if r.get("retired") else "")
                 + (f"\n    {r['description']}" if r["description"] else "") for r in result] or ["Nothing found."]
     if command == "used-by":
         return [f"{result['key']} is used by {len(result['projects'])} project(s)"] + [
@@ -150,16 +158,16 @@ def lines(command: str, result) -> list[str]:
         return ([f"{counts['added']} added, {counts['changed']} changed, {counts['unchanged']} unchanged from {result['compilation_result']}"]
                 + (["Definitions not applied: a newer compilation of this repository was imported before"] if result["definitions"] != "applied" else [])
                 + [f"  {a['target']}  {a['state']}" + (f"  job {a['job_id']}" if a["job_id"] else "") for a in result["actions"]]
-                + _not_linked(result))
+                + _not_linked(result) + _gone(counts))
     if command == "import" and "views_traced" in result:
         return ([f"{result['relations']} relations from {result['database']}: {result['added']} entries added, {result['changed']} changed, "
                  f"{result['unchanged']} unchanged; {result['views_traced']} views traced, {result['foreign_keys']} foreign keys"]
-                + [f"  skipped: {s}" for s in result["skipped"]])
+                + [f"  skipped: {s}" for s in result["skipped"]] + _gone(result))
     if command == "import" and "definitions" in result:
         return [f"{result['definitions']} definitions: {result['added']} entries added, {result['changed']} changed, {result['unchanged']} unchanged; "
                 f"{result['columns_traced']} columns traced, {result['columns_partial']} in part"] + _not_linked(result)
     if command == "import":
-        return [f"{result['added']} added, {result['changed']} changed, {result['unchanged']} unchanged"]
+        return [f"{result['added']} added, {result['changed']} changed, {result['unchanged']} unchanged"] + _gone(result)
     if command == "handoff":
         return [f"{result['reference']}  {result['change']}"]
     if command == "explain" and result.get("kind") == "gcs_files":
@@ -277,8 +285,8 @@ def run(catalog: Catalog, args):
                 return bigquery.import_tables(catalog, args.bigquery, client=client)
             finally:
                 client.close()
-        from .dbt import dbt_entries
-        return catalog.apply(dbt_entries(args.dbt, args.select))
+        from .dbt import import_project
+        return import_project(catalog, args.dbt, args.select)
     if args.command == "sync":
         from . import bigquery
         since = moment(args.since, "since") if args.since else None
@@ -353,7 +361,7 @@ def run(catalog: Catalog, args):
                                                                  "retention", "scrubbing") and v not in (None, [])}
         return catalog.put(args.kind, fields)
     if args.command == "find":
-        return catalog.find(" ".join(args.words), args.kind, args.layer, args.limit)
+        return catalog.find(" ".join(args.words), args.kind, args.layer, args.limit, retired=args.retired)
     if args.command == "docs":
         from .store import DESCRIBED
         return {"key": catalog.resolve(args.key, DESCRIBED), "documents": catalog.documents(args.key)}
@@ -539,6 +547,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--kind", choices=["table", "column", "project", "document"])
     s.add_argument("--layer")
     s.add_argument("--limit", type=int, default=50)
+    s.add_argument("--retired", action="store_true", help="include tables and columns no longer at their source")
 
     s = sub.add_parser("docs", help="the documents that describe a table, column or project")
     s.add_argument("key")
