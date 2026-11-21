@@ -1,4 +1,4 @@
-"""The `odcl` command (`fathom` is a temporary alias). Every subcommand calls one catalog operation and prints what it answers."""
+"""The `odcl` command. Every subcommand calls one catalog operation and prints what it answers."""
 from __future__ import annotations
 
 import argparse
@@ -217,8 +217,6 @@ def lines(command: str, result) -> list[str]:
         return [out.getvalue().rstrip("\n")]
     if command == "migrate":
         return [f"applied {name}" for name in result["applied"]] or ["The database is up to date."]
-    if command == "import-sqlite":
-        return [f"{result['entries']} entries, {result['revisions']} revisions and {result['links']} pinned links imported from {result['source']}"]
     if command == "discover":
         return [f"{r['created'] or '?'}  {r['state'] or '?':<26}  {r['pipeline_run']}" + (f"  {r['display_name']}" if r["display_name"] else "")
                 + (f"\n    recorded: {', '.join(r['model_versions'])}" if r["model_versions"] else "") for r in result["runs"]] or ["No pipeline run in that window."]
@@ -245,9 +243,6 @@ def lines(command: str, result) -> list[str]:
 
 
 def run(catalog: Catalog, args):
-    if args.command == "import-sqlite":
-        from .legacy import import_sqlite
-        return import_sqlite(catalog, args.path)
     if args.command == "import":
         require(sum(map(bool, (args.dbt, args.bigquery, args.dataform, args.vertex_manifest, args.openlineage, args.docs, args.sql_definitions,
                                args.postgres))) == 1,
@@ -391,9 +386,6 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("overview", help="how much is registered, and what changed after a project used it")
 
     sub.add_parser("migrate", help="create or update the catalog's tables in the database")
-
-    s = sub.add_parser("import-sqlite", help="bring a Fathom SQLite catalog into an empty database, once")
-    s.add_argument("path", help="the old SQLite file, e.g. ~/.catalog/catalog.db; it is only read")
 
     s = sub.add_parser("import", help="read tables and columns from a dbt project or from BigQuery")
     s.add_argument("--dbt", metavar="PATH", help="a dbt target folder or its manifest.json")

@@ -95,9 +95,9 @@ Ingest query jobs from the regional `INFORMATION_SCHEMA.JOBS_BY_PROJECT` view fo
 
 ### First pull request
 
-Start with the golden fixture and Postgres port in change 1. Add the test asserting the eventual trace alongside the implementation that first satisfies it in change 3. Preserve the public operations exercised by [the catalog tests](../tests/test_catalog.py) and [the MCP test](../tests/test_mcp.py). Use a migration transaction and a schema version table. During cutover, reconstruct historical links from each SQLite revision's stored body; the old `links` table describes only current heads. Keep legacy database paths as inputs to the one-time import command. The runtime connects exclusively to Postgres.
+Start with the golden fixture and Postgres port in change 1. Add the test asserting the eventual trace alongside the implementation that first satisfies it in change 3. Preserve the public operations exercised by [the catalog tests](../tests/test_catalog.py) and [the MCP test](../tests/test_mcp.py). Use a migration transaction and a schema version table. The runtime connects exclusively to Postgres.
 
-Use **Open Data Context Layer** for the project name, **`odcl`** for the CLI and **`open-data-context-layer`** for the proposed distribution. Introduce `ODCL_DATABASE_URL` and a temporary `fathom` CLI alias. Keep a compatibility import for `fathom_data` when introducing the new Python package. Treat moving the Git checkout, renaming the hosted repository and publishing the package as separate release actions.
+Use **Open Data Context Layer** for the project name, **`odcl`** for the CLI and **`open-data-context-layer`** for the proposed distribution. Introduce `ODCL_DATABASE_URL`. Treat moving the Git checkout, renaming the hosted repository and publishing the package as separate release actions.
 
 ### Interfaces after the first trace
 
