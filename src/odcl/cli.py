@@ -104,6 +104,12 @@ def lines(command: str, result) -> list[str]:
             out += [f"  subscription {m['subscription']} ({m['channel']}): {len(m['alerts'])} alert(s)"] + (
                 ["    " + line for line in m["text"].splitlines()] if result["dry_run"] else [])
         return out + [f"  subscription {m['subscription']} failed: {m['error']}" for m in result["failed"]]
+    if command == "privacy" and "proposals" in result:
+        return ([f"{p['confidence']:<6} {short(p['key'])}  {p['data_category']}: {p['reason']}" for p in result["proposals"]] or ["Nothing to propose."]) + (
+            [f"Written to {result['written_to']}: set accept to true on the right ones, then odcl privacy apply {result['written_to']}"]
+            if result.get("written_to") else [])
+    if command == "privacy" and "accepted" in result:
+        return [f"{len(result['accepted'])} recorded, {result['skipped']} left as they were"] + [f"  {short(k)}" for k in result["accepted"]]
     if command == "glossary":
         return [f"{t['title']}" + (f"  [{short(t['domain'])}]" if t["domain"] else "") + f"  meant by {t['meant_by']}" + (f"  ({t['status']})" if t["status"] else "")
                 + f"\n    {t['definition']}" + (f"\n    also: {', '.join(t['synonyms'])}" if t["synonyms"] else "") for t in result] or ["No glossary term yet."]
@@ -450,6 +456,13 @@ def run(catalog: Catalog, args):
         return catalog.set_instances(args.definition, args.patterns)
     if args.command == "privacy" and args.what == "set":
         return {"entries": catalog.set_privacy(args.keys, pii=args.pii, data_category=args.data_category, retention=args.retention, scrubbing=args.scrubbing)}
+    if args.command == "privacy" and args.what == "propose":
+        from . import pii
+        found = pii.propose(catalog, args.table, args.all, args.min_confidence)
+        return {"proposals": found, **({"written_to": pii.write_review(found, args.write)} if args.write else {})}
+    if args.command == "privacy" and args.what == "apply":
+        from . import pii
+        return pii.apply_review(catalog, args.file)
     if args.command == "privacy":
         return {"columns": catalog.privacy(args.pii_only, args.table)}
     if args.command == "add":
@@ -633,6 +646,13 @@ def parser() -> argparse.ArgumentParser:
     v = kinds.add_parser("set", help="say these for tables or columns, keeping what else they say")
     v.add_argument("keys", nargs="+", metavar="KEY")
     privacy_flags(v)
+    v = kinds.add_parser("propose", help="columns that look like personal data, with a data category and why, for review; writes nothing")
+    v.add_argument("--table", help="only this table's columns")
+    v.add_argument("--all", action="store_true", help="also columns that already say whether they are personal data")
+    v.add_argument("--min-confidence", choices=["low", "medium", "high"], default="low")
+    v.add_argument("--write", metavar="FILE", help="write the proposals as JSON Lines to review: set accept to true on the ones that are right")
+    v = kinds.add_parser("apply", help="record the accepted proposals in a reviewed file (all or none)")
+    v.add_argument("file")
     v = kinds.add_parser("export", help="every column with its privacy fields, as CSV (or --json)")
     v.add_argument("--pii-only", action="store_true", help="only columns marked as personal data")
     v.add_argument("--table", help="only this table's columns")
