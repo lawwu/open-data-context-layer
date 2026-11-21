@@ -34,7 +34,9 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-KINDS = ("table", "column", "project")
+KINDS = ("table", "column", "project", "document")
+DESCRIBED = ("table", "column", "project")  # what a document can describe
+DOCUMENT = re.compile(r"^[a-z0-9_][a-z0-9_.\-/@~+]{0,499}$")
 PATH = re.compile(r"^[a-z0-9_][a-z0-9_.\-$]{0,299}$")
 COLUMN = re.compile(r"^[a-z0-9_][a-z0-9_.\-$]{0,149}$")  # dots separate the levels of a nested field
 NAME = re.compile(r"^[a-z0-9_][a-z0-9_.\-]{0,99}$")
@@ -92,7 +94,8 @@ def stamp(at: datetime) -> str:
 
 def search_text(body: dict) -> str:
     """The words an entry is found by, split the same way a query is."""
-    words = " ".join(str(body.get(f) or "") for f in ("title", "description", "definition", "owner", "layer", "system", "dtype"))
+    words = " ".join(str(body.get(f) or "") for f in ("title", "description", "definition", "owner", "layer", "system", "dtype", "doc_kind", "text"))
+    words += " " + " ".join(h["text"] for h in body.get("headings") or [])
     return " ".join(TOKEN.findall((words + " " + " ".join(body["tags"])).lower()))
 
 
@@ -184,6 +187,8 @@ class Catalog:
             require(kind in KINDS, "kind", f"An entry is one of: {', '.join(KINDS)}")
             require(isinstance(payload, dict), "payload", "An entry is described by an object of fields")
             p, links = payload, []
+            if kind == "document":
+                return self._document(p)
             if kind == "table":
                 path = str(p.get("path") or "").lower().removeprefix("table:")
                 require(PATH.match(path), "path", "A table path looks like database.schema.name (letters, digits, _ - $ and dots)")
@@ -226,6 +231,34 @@ class Catalog:
                     **{field: text(p.get(field), field, limit, optional=True) for field, limit in TEXT[kind].items()},
                     "tags": sorted(set(tags)), "source": source, "links": links}
             return self._write(body)
+
+    def _document(self, p: dict) -> dict:
+        """A document entry: a Markdown page and the entries it describes. `describes` is a list of {key, section,
+        says}; every key must be registered (an importer reports the others as `unresolved`). A link pins the
+        target's current revision, and like `derived_from` keeps that pin while the page itself is unchanged, so the
+        catalog can say a target was redefined after the page described it."""
+        repository, path = text(p.get("repository"), "repository", 300), text(p.get("path"), "path", 500)
+        key = f"document:{repository}/{path}".lower()
+        require(DOCUMENT.match(key.removeprefix("document:")), "path", "A document is named by its repository and path: letters, digits, _ - . / and @")
+        links: dict[str, dict] = {}
+        for d in p.get("describes") or []:
+            require(isinstance(d, dict) and d.get("key"), "describes", "describes is a list of {key, section, says}")
+            target = self.resolve(str(d["key"]), DESCRIBED)
+            link = links.setdefault(target, {"relation": "describes", "to": target, "revision": self._head(target)["id"], "section": None, "says": None})
+            link["section"] = link["section"] or text(d.get("section"), "section", 200, optional=True)
+            said = text(d.get("says"), "says", 500, optional=True)
+            link["says"] = "; ".join(x for x in (link["says"], said) if x) or None
+        retired = bool(p.get("retired"))
+        body = {"key": key, "kind": "document", "title": text(p.get("title") or path.rsplit("/", 1)[-1], "title", 300),
+                "repository": repository, "path": path, "description": text(p.get("description"), "description", 4000, optional=True) or "",
+                "owner": text(p.get("owner"), "owner", 200, optional=True), "doc_kind": text(p.get("doc_kind"), "doc_kind", 50, optional=True),
+                "text": text(p.get("text"), "text", 200_000, optional=True) or "",
+                **{f: text(p.get(f), f, 500, optional=True) for f in ("url", "commit", "digest")},
+                "headings": [{"text": str(h["text"])[:300], "anchor": str(h["anchor"])[:300], "level": int(h["level"])} for h in p.get("headings") or []],
+                "patterns": names(p.get("patterns"), "patterns"), "unresolved": [str(u)[:600] for u in p.get("unresolved") or []][:200],
+                "retired": retired, "tags": [], "source": p.get("source") or {},
+                "links": [] if retired else [links[k] for k in sorted(links)]}  # a retired page describes nothing now; its history still does
+        return self._write(body)
 
     def apply(self, entries, merge: bool = False) -> dict:
         """Register many (kind, payload) entries in order, as an importer produces them. All of them, or none."""
@@ -288,8 +321,10 @@ class Catalog:
         self.db.execute("INSERT INTO revisions (id, entry_key, body, digest, actor, recorded_at) VALUES (%s, %s, %s, %s, %s, %s)",
                         (revision, body["key"], Jsonb(body), digest, actor, at))
         with self.db.cursor() as cursor:
-            cursor.executemany("INSERT INTO revision_links (source_revision, relation, target_key, target_revision, purpose) VALUES (%s, %s, %s, %s, %s)",
-                               [(revision, link["relation"], link["to"], link["revision"], link.get("note")) for link in body["links"]])
+            cursor.executemany("INSERT INTO revision_links (source_revision, relation, target_key, target_revision, purpose, section, says) "
+                               "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                               [(revision, link["relation"], link["to"], link["revision"], link.get("note"), link.get("section"), link.get("says"))
+                                for link in body["links"]])
 
     # ---- reads -----------------------------------------------------------------------------------------------
     def _columns(self, table: str) -> list[str]:
@@ -303,6 +338,8 @@ class Catalog:
         table = self._head(body["table"])["body"] if body["kind"] == "column" else body
         out = {"key": key, "kind": body["kind"], "title": body["title"], "description": body["description"], "owner": body.get("owner") or table.get("owner"),
                "revision": row["id"]}
+        if body["kind"] == "document":
+            return out | {"doc_kind": body.get("doc_kind"), "retired": body.get("retired", False)}
         if body["kind"] != "project":
             out.update(layer=table.get("layer"), system=table.get("system"), dtype=body.get("dtype"))
             if users:
@@ -399,6 +436,10 @@ class Catalog:
         del out["links"]
         out["history"] = [{"revision": r["id"], "registered_by": r["actor"], "at": stamp(r["recorded_at"])} for r in self.db.execute(
             "SELECT id, actor, recorded_at FROM revisions WHERE entry_key = %s ORDER BY recorded_at DESC, seq DESC", (key,))]
+        if out["kind"] == "document":
+            out["describes"] = self._described(out["revision"])
+            return out
+        out["documents"] = self.documents(key)
         if out["kind"] == "project":
             out["uses"] = self._linked(key, "uses", "up")
             out["model_versions"] = self.models(key)
@@ -409,6 +450,28 @@ class Catalog:
         else:
             out["layer"] = self._summary(key)["layer"]
         return out
+
+    def _described(self, revision: str) -> list[dict]:
+        rows = self.db.execute("""SELECT l.target_key, l.target_revision, l.section, l.says, t.head_revision FROM revision_links l
+                                  JOIN entries t ON t.key = l.target_key WHERE l.source_revision = %s AND l.relation = 'describes'
+                                  ORDER BY l.section NULLS FIRST, l.target_key""", (revision,)).fetchall()
+        return [{**self._summary(r["target_key"]), "linked_revision": r["target_revision"], "changed_since": r["target_revision"] != r["head_revision"],
+                 "section": r["section"], "says": r["says"]} for r in rows]
+
+    def documents(self, name: str) -> list[dict]:
+        """The documents that describe an entry now, with the part of the page and what it says. A column also gets
+        the documents that describe its table. `changed_since`: the entry was redefined after the page described it."""
+        key = self.resolve(name, DESCRIBED)
+        body = self._head(key)["body"]
+        through = [key] + ([body["table"]] if body["kind"] == "column" else [])
+        rows = self.db.execute("""SELECT l.*, d.body ->> 'title' AS title, d.body ->> 'doc_kind' AS doc_kind FROM current_links l
+                                  JOIN entries e ON e.key = l.source_key JOIN revisions d ON d.id = e.head_revision
+                                  WHERE l.relation = 'describes' AND l.target_key = ANY(%s) ORDER BY l.source_key""", (through,)).fetchall()
+        found: dict[str, dict] = {}
+        for r in sorted(rows, key=lambda r: through.index(r["target_key"])):  # a page that describes the column itself is listed for that, once
+            found.setdefault(r["source_key"], {"document": r["source_key"], "title": r["title"], "doc_kind": r["doc_kind"], "section": r["section"],
+                                               "says": r["says"], "through": r["target_key"], "changed_since": r["target_revision"] != r["target_head"]})
+        return sorted(found.values(), key=lambda d: (through.index(d["through"]), d["document"]))
 
     def lineage(self, name: str, direction: str = "both") -> dict:
         """Upstream: what a table or column is built from. Downstream: what a change to it reaches."""
@@ -569,5 +632,7 @@ class Catalog:
         counts.update({r["kind"]: r["n"] for r in self.db.execute("SELECT kind, COUNT(*) AS n FROM entries GROUP BY kind")})
         stale = [{"project": r["source_key"], "key": r["target_key"]} for r in self.db.execute(
             "SELECT source_key, target_key FROM current_links WHERE relation = 'uses' AND target_revision <> target_head ORDER BY source_key, target_key")]
+        described = [{"document": r["source_key"], "key": r["target_key"]} for r in self.db.execute(
+            "SELECT source_key, target_key FROM current_links WHERE relation = 'describes' AND target_revision <> target_head ORDER BY source_key, target_key")]
         info = self.db.info
-        return {"counts": counts, "changed_since_used": stale, "database": f"{info.host}:{info.port}/{info.dbname}"}
+        return {"counts": counts, "changed_since_used": stale, "changed_since_described": described, "database": f"{info.host}:{info.port}/{info.dbname}"}

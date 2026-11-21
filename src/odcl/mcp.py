@@ -26,13 +26,16 @@ TOOLS = [
     tool("find_data", "Search tables, columns and projects by the words in their name, description, definition, owner or tags. "
          "Each result says its layer, its owner and how many projects use it. Start here to find the right data.",
          {"query": {"type": "string", "description": "Words every result must contain. Empty lists everything."},
-          "kind": {"type": "string", "enum": ["table", "column", "project"]},
+          "kind": {"type": "string", "enum": ["table", "column", "project", "document"]},
           "layer": {"type": "string", "description": "Only data of this layer, e.g. bronze, silver or gold."},
           "limit": {"type": "integer", "minimum": 1, "maximum": 200}}),
     tool("get_entry", "One table, column or project in full: its description and definition, what it is built from, what is built from "
          "it, which projects use it, the code that defines it, and its history.", {**KEY}, ["key"]),
     tool("trace_lineage", "Upstream: what a table or column is built from, back to source data. Downstream: everything a change to it reaches.",
          {**KEY, "direction": {"type": "string", "enum": ["up", "down", "both"]}}, ["key"]),
+    tool("documents_for", "The documents (knowledge-base pages, findings, runbooks) that describe a table, column or project, with the section "
+         "of each page and what it says. A column also gets the pages that describe its table. Says when the entry was redefined after a page "
+         "described it.", {**KEY}, ["key"]),
     tool("used_by", "Which projects depend on a table or column: directly, through its table or columns, or through data built from it. "
          "Use this before changing or dropping data.", {**KEY}, ["key"]),
     tool("project_uses", "What data a project used, and whether any of it changed after the project used it.",
@@ -72,6 +75,8 @@ class Tools:
             return f.lineage(args["key"], args.get("direction") or "both")
         if name == "used_by":
             return f.used_by(args["key"])
+        if name == "documents_for":
+            return {"documents": f.documents(args["key"])}
         if name == "project_uses":
             return f.uses(args["project"], bool(args.get("upstream")))
         if name == "register_project":
