@@ -185,3 +185,18 @@ def test_listed_user_counts_match_what_used_by_finds_for_each_entry(fathom):
     assert any(e["used_by"] > 1 for e in listed)
     for entry in listed:
         assert entry["used_by"] == len(fathom.used_by(entry["key"])["projects"]), entry["key"]
+
+
+def test_a_large_import_holds_a_bounded_number_of_locks(database):
+    from odcl.store import ENTRY_LOCKS
+    held = []
+
+    def entries():
+        yield ("table", {"path": "big.d.t"})
+        for i in range(3000):
+            yield ("column", {"table": "big.d.t", "name": f"c{i}"})
+        held.append(catalog.db.execute("SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()").fetchone()["n"])
+
+    with Catalog(database, actor="ana") as catalog:
+        assert catalog.apply(entries())["added"] == 3001
+        assert 0 < held[0] <= ENTRY_LOCKS  # one lock per entry would be 3,001, past PostgreSQL's default lock table

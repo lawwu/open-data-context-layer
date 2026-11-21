@@ -46,6 +46,7 @@ TEXT = {"table": {"system": 100, "layer": 50, "owner": 200, "type": 50},
 HOW = ("direct", "column", "table", "downstream")  # how a project comes to depend on an entry, strongest first
 
 MIGRATIONS_LOCK = 0x6F64636C  # "odcl": one migration run at a time per database
+ENTRY_LOCKS = 512  # entries are locked by stripe, so an import of any size holds at most this many locks
 TOKEN = re.compile(r"[a-z0-9]+")
 
 
@@ -169,8 +170,12 @@ class Catalog:
         return self.db.execute("SELECT r.* FROM entries e JOIN revisions r ON r.id=e.head_revision WHERE e.key=%s", (key,)).fetchone()
 
     def _lock(self, key: str) -> None:
-        """Hold an entry, registered yet or not, until the transaction ends, so its head is compared and moved by one writer at a time."""
-        self.db.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (key,))
+        """Hold an entry, registered yet or not, until the transaction ends, so its head is compared and moved by one writer at a time.
+
+        The lock is one of ENTRY_LOCKS stripes that keys hash to, not one per key: an import writes every entry in one
+        transaction, and one lock per entry would run past PostgreSQL's lock table (max_locks_per_transaction) at a few
+        thousand entries. Two keys that share a stripe are written one after the other, which costs only a short wait."""
+        self.db.execute("SELECT pg_advisory_xact_lock(%s, (hashtextextended(%s, 0) & %s)::int)", (MIGRATIONS_LOCK, key, ENTRY_LOCKS - 1))
 
     @staticmethod
     def _view(row) -> dict:
