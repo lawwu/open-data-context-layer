@@ -38,5 +38,6 @@
     }
   ],
   "relied_on": [],
-  "missing": []
+  "missing": [],
+  "quality_at_training": []
 }

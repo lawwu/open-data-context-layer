@@ -7,6 +7,8 @@ MCP tools answer. It runs on the standard library's threaded HTTP server, with o
     GET  /v1/search?q=&kind=&layer=&limit=&retired=
     GET  /v1/entries/{key}                       one entry in full
     GET  /v1/entries/{key}/diff?since=&until=    what changed, each change labelled cosmetic, additive, semantic or breaking
+    GET  /v1/entries/{key}/quality?at=           the newest result of each data-quality test, as of a time
+    POST /v1/quality                             importer: {source, results: [{entry, test, status, failures, observed_at, run, kind, message}]}
     GET  /v1/entries/{key}/lineage?direction=    up, down or both
     GET  /v1/entries/{key}/used-by
     GET  /v1/entries/{key}/documents             the documents that describe it
@@ -57,7 +59,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from . import alerts
+from . import alerts, quality
 from . import sso as single_sign_on
 from . import users
 from .store import Catalog, CatalogError, require
@@ -120,6 +122,7 @@ ROUTES = [
     ("GET", r"/v1/entries/(?P<key>[^/]+)/lineage", "reader", lambda c, m, q, b: c.lineage(m["key"], q.get("direction", "both"))),
     ("GET", r"/v1/entries/(?P<key>[^/]+)/used-by", "reader", lambda c, m, q, b: c.used_by(m["key"])),
     ("GET", r"/v1/entries/(?P<key>[^/]+)/documents", "reader", lambda c, m, q, b: c.documents(m["key"])),
+    ("GET", r"/v1/entries/(?P<key>[^/]+)/quality", "reader", lambda c, m, q, b: quality.for_entry(c, m["key"], q.get("at") or None)),
     ("GET", r"/v1/entries/(?P<key>[^/]+)/diff", "reader", lambda c, m, q, b: c.diff(m["key"], q.get("since") or None, q.get("until") or None)),
     ("GET", r"/v1/projects/(?P<name>[^/]+)/uses", "reader", lambda c, m, q, b: c.uses(m["name"], _flag(q.get("upstream")))),
     ("GET", r"/v1/query-history", "reader", lambda c, m, q, b: c.table_history(q.get("table", ""), _span(q.get("since", "7d")), _flag(q.get("patterns")),
@@ -140,6 +143,7 @@ ROUTES = [
     ("POST", r"/v1/users", "admin", lambda c, m, q, b: users.add(c, **_fields(b, ("name", "role", "display_name", "email"), ("name", "role")))),
     ("POST", r"/v1/users/(?P<name>[^/]+)", "admin", lambda c, m, q, b: users.update(c, m["name"], **_fields(b, ("role", "disabled")))),
     ("POST", r"/v1/users/(?P<name>[^/]+)/tokens", "admin", lambda c, m, q, b: users.make_token(c, m["name"], _fields(b, ("label",)).get("label"))),
+    ("POST", r"/v1/quality", "importer", lambda c, m, q, b: quality.record(c, _fields(b, ("source", "results"), ("source", "results"))["results"], b["source"])),
     # alerts
     ("GET", r"/v1/alerts/subscriptions", "reader", lambda c, m, q, b: alerts.subscriptions(c)),
     ("POST", r"/v1/alerts/subscriptions", "editor", lambda c, m, q, b: _subscribe(c, b)),

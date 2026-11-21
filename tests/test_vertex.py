@@ -526,3 +526,15 @@ def test_files_a_notebook_wrote_say_so_as_stated(catalog):
     later = filesets.record(catalog, client=files_client(), uris=[LOADER_OUT], created_by=notebook | {"note": "run on 2026-10-05"})
     assert later["change"] == "changed" and builds.explain_dataset(catalog, result["reference"])["created_by"]["note"] == "run on 2026-10-05"
     assert filesets.record(catalog, client=files_client(), uris=[LOADER_OUT])["change"] == "unchanged"  # saying nothing keeps it
+
+
+def test_a_model_version_says_which_of_its_columns_were_failing_a_test_when_it_was_trained(catalog):
+    from odcl import quality
+    build(catalog)
+    vertex.import_build(catalog, load("training_manifest.json"), client=FakeVertex())
+    quality.record(catalog, [
+        {"entry": RAW_MINUTES, "test": "minutes_not_negative", "status": "fail", "failures": 3, "observed_at": "2000-01-01T00:00:00Z", "run": "old"},
+        {"entry": RAW_MINUTES, "test": "minutes_not_negative", "status": "pass", "observed_at": "2100-01-01T00:00:00Z", "run": "later"},
+    ], "dbt")
+    failing = catalog.explain_model("staffing-forecast", "v17")["quality_at_training"]
+    assert [(f["entry"], f["test"], f["status"], f["failures"]) for f in failing] == [(f"column:{RAW_MINUTES}", "minutes_not_negative", "fail", 3)]

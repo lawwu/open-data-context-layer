@@ -67,6 +67,11 @@ def code_ref(path) -> dict | None:
             "url": f"{repository}/blob/{commit.stdout.strip()}/{relative}" if repository else None}
 
 
+def relation_path(node: dict) -> str:
+    """The table path the catalog keys a dbt model, seed, snapshot or source by: database.schema.name, cleaned."""
+    return ".".join(clean(p) for p in (node.get("database"), node.get("schema"), node.get("identifier") or node.get("alias") or node["name"]) if p)
+
+
 def dbt_entries(path, select=None) -> list[tuple[str, dict]]:
     """(kind, payload) entries, dependencies first, for a dbt target folder or its manifest.json.
 
@@ -99,7 +104,7 @@ def dbt_entries(path, select=None) -> list[tuple[str, dict]]:
     else:
         wanted = set(nodes)
 
-    relation = lambda n: ".".join(clean(p) for p in (n.get("database"), n.get("schema"), n.get("identifier") or n.get("alias") or n["name"]) if p)
+    relation = relation_path
     raw_relation = lambda n: ".".join(p for p in (n.get("database"), n.get("schema"), n.get("identifier") or n.get("alias") or n["name"]) if p).lower()
     by_relation = {raw_relation(n): uid for uid, n in nodes.items()}
     selected: dict[str, list[str]] = {}

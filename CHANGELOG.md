@@ -8,6 +8,11 @@ section says how a release is cut.
 
 ## Unreleased
 
+- **Data-quality results** (`odcl import --quality FILE.jsonl` or `--dbt-tests TARGET`,
+  `odcl quality KEY [--at]`, `/v1/entries/{key}/quality`, `POST /v1/quality`): test outcomes
+  kept once each and pinned to the revision current when the test ran. Entries show their
+  newest results, `overview` lists `failing_and_used`, and a model version's trace lists the
+  tests failing on its inputs when it was trained. Run `odcl migrate` for migration 0013.
 - **Alerts** (`odcl alerts subscribe|list|remove|send`, `/v1/alerts/…`): a project's people are
   told by webhook, Slack or email when data the project uses changes after it used it, or is
   gone from its source, at or above a severity. Each change is sent once per subscription;
