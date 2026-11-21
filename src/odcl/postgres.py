@@ -170,6 +170,8 @@ def import_database(catalog: Catalog, dsn: str, *, schemas: list[str] | None = N
     """Register a PostgreSQL database's tables, views, columns, view lineage and foreign keys. All of it, or none."""
     found = read(dsn, schemas)
     made, skipped, traced = entries(catalog, found, database)
-    counts = catalog.apply(made, merge=True)
+    name = (database or found["database"]).lower()
+    counts = catalog.apply(made, merge=True, withdraw={"importer": "postgres", "scope": lambda said, _: said.get("database") == name
+                                                        and (not schemas or said.get("schema") in schemas)})
     return {**counts, "database": (database or found["database"]).lower(), "relations": len(found["relations"]), "views_traced": traced,
             "foreign_keys": len(found["foreign_keys"]), "skipped": skipped}

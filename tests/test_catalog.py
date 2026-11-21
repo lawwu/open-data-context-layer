@@ -374,3 +374,24 @@ def test_a_whole_entry_import_keeps_what_was_said_beside_it(database):
         c.put("column", {"table": "core.sales.daily_totals", "name": "store_id", "pii": None, "references": None})  # said outright: cleared
         column = c.get("core.sales.daily_totals.store_id")
         assert "pii" not in column and column["references"] == [] and column["data_category"] == "business"
+
+
+def test_a_dbt_project_retires_the_models_it_no_longer_defines_unless_only_part_is_read(database, tmp_path):
+    from odcl.dbt import import_project
+    manifest = json.loads((DBT / "manifest.json").read_text())
+    with Catalog(database, actor="ana") as c:
+        assert import_project(c, DBT)["retired"] == []
+        gold = next(k for k, n in manifest["nodes"].items() if n.get("resource_type") == "model" and n["name"] == "account_features")
+        del manifest["nodes"][gold]
+        manifest["child_map"] = {k: [x for x in v if x != gold] for k, v in manifest.get("child_map", {}).items()}
+        manifest["parent_map"] = {k: v for k, v in manifest.get("parent_map", {}).items() if k != gold}
+        smaller = tmp_path / "target"
+        smaller.mkdir()
+        (smaller / "manifest.json").write_text(json.dumps(manifest))
+        for extra in ("catalog.json",):
+            if (DBT / extra).exists():
+                (smaller / extra).write_text((DBT / extra).read_text())
+        assert import_project(c, smaller, select=["stg_accounts"])["retired"] == []  # part of the project: nothing retired
+        retired = import_project(c, smaller)["retired"]
+        assert f"table:{GOLD}" in retired and all(k.startswith((f"table:{GOLD}", f"column:{GOLD}.")) for k in retired)
+        assert c.get(GOLD)["retired"] is True and GOLD not in {t["key"][6:] for t in c.tables()}

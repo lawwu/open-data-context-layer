@@ -196,3 +196,12 @@ def dbt_entries(path, select=None) -> list[tuple[str, dict]]:
         for name in columns(uid):
             column(uid, name)
     return out
+
+
+def import_project(catalog, path, select=None) -> dict:
+    """Register a dbt project's models, sources and columns, and retire what the project defined before and no
+    longer does. With `select`, only part of the project is read, so nothing is retired."""
+    entries = dbt_entries(path, select)
+    projects = {p["source"].get("project") for _, p in entries if isinstance(p.get("source"), dict) and p["source"].get("tool") == "dbt"}
+    withdraw = None if select else {"importer": "dbt", "scope": lambda said, _: said.get("project") in projects}
+    return {"retired": [], "withdrawn": [], **catalog.apply(entries, withdraw=withdraw)}

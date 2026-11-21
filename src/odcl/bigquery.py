@@ -81,7 +81,8 @@ def import_tables(catalog: Catalog, tables: list[str], *, client) -> dict:
             if fk.get("references") for a, b in fk["columns"]]
     registering = {f"{p['table'].replace('table:', 'column:', 1)}.{p['name']}".lower() for kind, p in entries if kind == "column"}
     references, unresolved = reference_entries(catalog, keys, registering)
-    counts = catalog.apply(entries + references, merge=True)
+    read = {f"table:{t['table']['fqn']}".lower() for t in found}  # a column these tables no longer have is withdrawn; other tables are not read
+    counts = catalog.apply(entries + references, merge=True, withdraw={"importer": "bigquery", "scope": lambda _, body: body["key"] in read, "tables": False})
     return {**counts, **({"unresolved_references": unresolved} if unresolved else {})}
 
 

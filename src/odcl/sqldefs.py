@@ -85,8 +85,9 @@ def import_definitions(catalog: Catalog, path: str, *, repository: str | None = 
     """Register every table a definitions file names, and each column with what it is computed from. All, or none."""
     from .dataform import definition_entries
     actions = read(path)
-    found = definition_entries(catalog, repository or Path(path).name, actions, importer=IMPORTER, system=system or dialect, dialect=dialect)
-    counts = catalog.apply(found.entries, merge=True)
+    repository = repository or Path(path).name
+    found = definition_entries(catalog, repository, actions, importer=IMPORTER, system=system or dialect, dialect=dialect)
+    counts = catalog.apply(found.entries, merge=True, withdraw={"importer": IMPORTER, "scope": lambda said, _: said.get("repository") == repository})
     traced = [status for columns in found.traced.values() for status in columns.values()]
     return {**counts, "definitions": len(actions), "columns_traced": traced.count("resolved"), "columns_partial": traced.count("partial"),
             "unresolved": found.unresolved, "untraced": found.unreadable}

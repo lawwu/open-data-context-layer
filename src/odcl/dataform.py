@@ -102,7 +102,8 @@ class Definitions:
         next import would qualify against that partial list and lose what the first one traced."""
         known = {r["name"] for r in self.catalog.db.execute(
             """SELECT r.body ->> 'name' AS name, r.body -> 'source' AS source FROM entries e JOIN revisions r ON r.id = e.head_revision
-               WHERE e.kind = 'column' AND r.body ->> 'kind' = 'column' AND r.body ->> 'table' = %s""", (f"table:{table}",))
+               WHERE e.kind = 'column' AND r.body ->> 'kind' = 'column' AND r.body ->> 'table' = %s
+                 AND NOT (r.body ? 'retired')""", (f"table:{table}",))
                  if not named_only(r)}
         return {c for c in known | self.columns.get(table, set()) if "." not in c}
 
@@ -246,7 +247,8 @@ def import_invocation(catalog: Catalog, name: str, *, client) -> dict:
                             (repository, name)).fetchone()["at"]
         current = newest is None or compiled_at is None or compiled_at >= newest
         definitions = definition_entries(catalog, repository, compiled) if current else None
-        counts = catalog.apply(definitions.entries, merge=True) if current else {"added": 0, "changed": 0, "unchanged": 0}
+        counts = catalog.apply(definitions.entries, merge=True, withdraw={"importer": "dataform", "scope": lambda said, _: said.get("repository") == repository}) \
+            if current else {"added": 0, "changed": 0, "unchanged": 0, "retired": [], "withdrawn": []}
         timing = invocation.get("invocationTiming") or {}
         parent = _execution(db, {
             "native_key": name, "kind": "invocation", "parent_id": None, "definition_revision": None, "state": invocation.get("state") or "UNKNOWN",
