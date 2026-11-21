@@ -4,7 +4,7 @@ A data context layer: what data exists, how it connects, and which projects use 
 
 The catalog holds descriptions. It does not store or serve the data itself. Everything it keeps lives in one PostgreSQL database.
 
-The project was called Fathom. The [implementation plan](docs/implementation-plan.md) describes where it is going. Its first goal, a model trace from a Vertex AI Pipelines training run back through Dataform and BigQuery to the raw columns, is built and has been run against a real project ([`examples/live_trace/`](examples/live_trace/)).
+The [implementation plan](docs/implementation-plan.md) describes where it is going. Its first goal, a model trace from a Vertex AI Pipelines training run back through Dataform and BigQuery to the raw columns, is built and has been run against a real project ([`examples/live_trace/`](examples/live_trace/)).
 
 ## What it keeps
 
@@ -83,7 +83,6 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 | `odcl explain model NAME --version V` | Which run, artifact, dataset version and raw columns a model version came from |
 | `odcl overview` | Counts, and data that changed after a project used it |
 | `odcl migrate` | Create or update the catalog's tables |
-| `odcl import-sqlite PATH` | Bring an old Fathom SQLite file across, once |
 | `odcl import --openlineage FILE` | Read OpenLineage events: runs and the lineage they establish |
 | `odcl import --docs PATH... [--repo-url URL] [--commit SHA]` | Read Markdown pages that describe catalog entries |
 | `odcl docs KEY` | Which documents describe this entry? |
@@ -93,19 +92,6 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 Add `--json` before the command for the full result. A bare path such as `churn.bronze.accounts` works wherever a key does, when only one entry has it.
 
 The database is one PostgreSQL database: `--database-url`, else `$ODCL_DATABASE_URL`. Run `odcl migrate` once on a new database and again after upgrading. Changes are recorded under `--as`, else `$ODCL_USER`, else your login name. There is no sign-in.
-
-The `fathom` command still works as an alias for `odcl`, for now.
-
-## Coming from Fathom on SQLite
-
-```sh
-uv run odcl migrate
-uv run odcl import-sqlite ~/.fathom/fathom.db
-```
-
-This copies every entry, every revision with its ID, author and time, and every link into an empty database, in one transaction. The SQLite file is only read. The old file recorded links for each entry's latest revision only; the import rebuilds the links of older revisions from what those revisions stored, so `odcl uses PROJECT --revision REV` can answer what a project had pinned earlier. If the file does not hold together, for example a link pins a revision that is missing, nothing is imported and the message names the link.
-
-Python code that imports `fathom_data` keeps working: `Fathom` is now `odcl.Catalog`, and it takes a database URL where it took a file path.
 
 ## Importing from dbt
 
@@ -440,4 +426,4 @@ The tag starts `release.yml`, which refuses a tag that isn't on `main`, whose ve
 - Discovering Dataform invocations, and Dataform runs started from the CLI rather than the managed service.
 - Sign-in and permissions. Today anyone who can reach the database can read and write the catalog.
 
-The distribution is `open-data-context-layer`, the Python package is `odcl`, and the command is `odcl`. The repository is [lawwu/open-data-context-layer](https://github.com/lawwu/open-data-context-layer); it was `lawwu/fathom`, and GitHub redirects the old address.
+The distribution is `open-data-context-layer`, the Python package is `odcl`, and the command is `odcl`. The repository is [lawwu/open-data-context-layer](https://github.com/lawwu/open-data-context-layer).

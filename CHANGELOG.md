@@ -8,6 +8,10 @@ section says how a release is cut.
 
 ## Unreleased
 
+- **Breaking: the Fathom name is gone.** The `fathom` command (use `odcl`), the `fathom_data`
+  package (use `odcl`; `Fathom` was `odcl.Catalog`) and `$FATHOM_USER` (use `$ODCL_USER`)
+  no longer exist. `odcl import-sqlite`, which brought an old Fathom SQLite catalog across,
+  is removed too: migrate such a file with an earlier version first.
 - Releases: a `vX.Y.Z` tag on `main` builds the sdist and wheel, attests them and publishes
   them as a GitHub release with this changelog's notes; a `latest` tag follows the newest
   release.

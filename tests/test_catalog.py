@@ -12,37 +12,37 @@ GOLD, SILVER, BRONZE = "churn.main_gold.account_features", "churn.main_silver.st
 
 
 @pytest.fixture
-def fathom(database):
+def catalog(database):
     with Catalog(database, actor="ana") as f:
         f.apply(dbt_entries(DBT))
         yield f
 
 
-def test_a_dbt_project_becomes_shared_tables_and_columns_with_lineage(fathom):
-    counts = fathom.overview()["counts"]
+def test_a_dbt_project_becomes_shared_tables_and_columns_with_lineage(catalog):
+    counts = catalog.overview()["counts"]
     assert counts == {"table": 5, "column": 19, "project": 0, "document": 0}
-    gold = fathom.get(GOLD)
+    gold = catalog.get(GOLD)
     assert gold["layer"] == "gold" and gold["system"] == "duckdb" and gold["registered_by"] == "ana"
     assert [t["key"] for t in gold["derived_from"]] == ["table:churn.main_silver.stg_accounts", "table:churn.main_silver.stg_tickets"]
     assert gold["source"]["file"] == "models/gold/account_features.sql"
-    tenure = fathom.get(f"column:{GOLD}.tenure_months")
+    tenure = catalog.get(f"column:{GOLD}.tenure_months")
     assert [c["key"] for c in tenure["derived_from"]] == [f"column:{SILVER}.opened_on"] and "DATE_DIFF" in tenure["definition"]
-    up = [n["key"] for n in fathom.lineage(f"{GOLD}.tenure_months", "up")["upstream"]]
+    up = [n["key"] for n in catalog.lineage(f"{GOLD}.tenure_months", "up")["upstream"]]
     assert up == [f"column:{SILVER}.opened_on", f"column:{BRONZE}.created_at"]  # gold -> silver -> bronze
-    down = fathom.lineage(f"{BRONZE}.plan", "down")["downstream"]
+    down = catalog.lineage(f"{BRONZE}.plan", "down")["downstream"]
     assert [n["key"] for n in down] == [f"column:{SILVER}.plan_code", f"column:{GOLD}.plan_tier"] and [n["depth"] for n in down] == [1, 2]
-    counted = fathom.get(f"column:{GOLD}.support_tickets_90d")  # a row count has no input column: traced to its filters, and says so
+    counted = catalog.get(f"column:{GOLD}.support_tickets_90d")  # a row count has no input column: traced to its filters, and says so
     assert counted["tags"] == ["lineage:partial"] and counted["derived_from"]
 
 
-def test_importing_again_changes_nothing_and_a_changed_table_does_not_ripple(fathom):
-    assert fathom.apply(dbt_entries(DBT)) == {"added": 0, "changed": 0, "unchanged": 24}
-    before = fathom.get(SILVER)["revision"]
-    changed = fathom.put("table", {"path": BRONZE, "description": "Accounts, as the billing system exports them", "layer": "bronze"})
+def test_importing_again_changes_nothing_and_a_changed_table_does_not_ripple(catalog):
+    assert catalog.apply(dbt_entries(DBT)) == {"added": 0, "changed": 0, "unchanged": 24}
+    before = catalog.get(SILVER)["revision"]
+    changed = catalog.put("table", {"path": BRONZE, "description": "Accounts, as the billing system exports them", "layer": "bronze"})
     assert changed["change"] == "changed" and changed["registered_by"] == "ana"
-    assert fathom.get(SILVER)["revision"] == before  # what is built from it keeps its revision ...
-    assert fathom.get(SILVER)["derived_from"][0]["changed_since"]  # ... and says its input changed
-    assert len(fathom.get(BRONZE)["history"]) == 2
+    assert catalog.get(SILVER)["revision"] == before  # what is built from it keeps its revision ...
+    assert catalog.get(SILVER)["derived_from"][0]["changed_since"]  # ... and says its input changed
+    assert len(catalog.get(BRONZE)["history"]) == 2
 
 
 def test_selecting_a_model_reads_only_what_it_is_built_from():
@@ -52,87 +52,87 @@ def test_selecting_a_model_reads_only_what_it_is_built_from():
         dbt_entries(DBT, ["nope"])
 
 
-def test_which_projects_use_this_column_and_what_did_this_project_use(fathom):
-    fathom.put("project", {"name": "churn-model", "description": "Predict 90-day churn", "owner": "ben"})
-    fathom.put("project", {"name": "billing-audit", "description": "Reconcile plans against invoices"})
-    fathom.put("project", {"name": "support-dashboard", "description": "Ticket volumes"})
-    fathom.use("churn-model", [f"{GOLD}.plan_tier", f"{GOLD}.tenure_months"], "training features")
-    fathom.use("billing-audit", [f"column:{BRONZE}.plan"], "source of truth for plan")
-    fathom.use("support-dashboard", [f"table:{SILVER}"])
+def test_which_projects_use_this_column_and_what_did_this_project_use(catalog):
+    catalog.put("project", {"name": "churn-model", "description": "Predict 90-day churn", "owner": "ben"})
+    catalog.put("project", {"name": "billing-audit", "description": "Reconcile plans against invoices"})
+    catalog.put("project", {"name": "support-dashboard", "description": "Ticket volumes"})
+    catalog.use("churn-model", [f"{GOLD}.plan_tier", f"{GOLD}.tenure_months"], "training features")
+    catalog.use("billing-audit", [f"column:{BRONZE}.plan"], "source of truth for plan")
+    catalog.use("support-dashboard", [f"table:{SILVER}"])
 
-    used = {p["project"]: p for p in fathom.used_by(f"{BRONZE}.plan")["projects"]}
+    used = {p["project"]: p for p in catalog.used_by(f"{BRONZE}.plan")["projects"]}
     assert used["project:billing-audit"]["how"] == "direct" and used["project:billing-audit"]["purpose"] == "source of truth for plan"
     assert used["project:churn-model"]["how"] == "downstream" and used["project:churn-model"]["through"] == f"column:{GOLD}.plan_tier"
     assert used["project:support-dashboard"]["how"] == "downstream"  # it uses the silver table that holds plan_code
     assert list(used) == ["project:billing-audit", "project:churn-model", "project:support-dashboard"]  # strongest first
-    assert [p["how"] for p in fathom.used_by(f"table:{GOLD}")["projects"]] == ["column"]
-    assert [p["how"] for p in fathom.used_by(f"{SILVER}.opened_on")["projects"]] == ["table", "downstream"]
+    assert [p["how"] for p in catalog.used_by(f"table:{GOLD}")["projects"]] == ["column"]
+    assert [p["how"] for p in catalog.used_by(f"{SILVER}.opened_on")["projects"]] == ["table", "downstream"]
 
-    mine = fathom.uses("churn-model", upstream=True)
+    mine = catalog.uses("churn-model", upstream=True)
     assert [u["key"] for u in mine["uses"]] == [f"column:{GOLD}.plan_tier", f"column:{GOLD}.tenure_months"]
     assert f"column:{BRONZE}.plan" in [n["key"] for n in mine["built_from"]] and mine["owner"] == "ben"
-    assert fathom.find("plan tier")[0]["used_by"] == 1
+    assert catalog.find("plan tier")[0]["used_by"] == 1
 
     # the plan column is redefined after the project used it: the project is told, until it records use again
-    fathom.put("column", {"table": GOLD, "name": "plan_tier", "description": "Plan tier, with trials counted as free", "derived_from": [f"column:{SILVER}.plan_code"]})
-    assert fathom.overview()["changed_since_used"] == [{"project": "project:churn-model", "key": f"column:{GOLD}.plan_tier"}]
-    assert [u["changed_since"] for u in fathom.uses("churn-model")["uses"]] == [True, False]
-    fathom.use("churn-model", [f"{GOLD}.plan_tier"])
-    assert fathom.overview()["changed_since_used"] == []
-    assert fathom.uses("churn-model")["uses"][0]["purpose"] == "training features"  # recording use again keeps what it was for
-    described = fathom.put("project", {"name": "churn-model", "description": "Predict churn in 90 days", "owner": "ben"})
-    assert described["change"] == "changed" and len(fathom.uses("churn-model")["uses"]) == 2  # describing a project keeps what it used
+    catalog.put("column", {"table": GOLD, "name": "plan_tier", "description": "Plan tier, with trials counted as free", "derived_from": [f"column:{SILVER}.plan_code"]})
+    assert catalog.overview()["changed_since_used"] == [{"project": "project:churn-model", "key": f"column:{GOLD}.plan_tier"}]
+    assert [u["changed_since"] for u in catalog.uses("churn-model")["uses"]] == [True, False]
+    catalog.use("churn-model", [f"{GOLD}.plan_tier"])
+    assert catalog.overview()["changed_since_used"] == []
+    assert catalog.uses("churn-model")["uses"][0]["purpose"] == "training features"  # recording use again keeps what it was for
+    described = catalog.put("project", {"name": "churn-model", "description": "Predict churn in 90 days", "owner": "ben"})
+    assert described["change"] == "changed" and len(catalog.uses("churn-model")["uses"]) == 2  # describing a project keeps what it used
 
 
-def test_finding_data_by_words_kind_and_layer(fathom):
-    assert [r["key"] for r in fathom.find("tenure")] == [f"column:{GOLD}.tenure_months"]
-    assert fathom.find("ten")[0]["key"] == f"column:{GOLD}.tenure_months"  # a word's beginning is enough
-    assert {r["kind"] for r in fathom.find("accounts", kind="table")} == {"table"}
-    assert {r["layer"] for r in fathom.find(layer="bronze")} == {"bronze"} and len(fathom.find(layer="bronze")) == 9
-    assert fathom.find("nothing-like-this") == [] and fathom.find('quote " and ) paren') == []
-    assert len(fathom.find(limit=3)) == 3
+def test_finding_data_by_words_kind_and_layer(catalog):
+    assert [r["key"] for r in catalog.find("tenure")] == [f"column:{GOLD}.tenure_months"]
+    assert catalog.find("ten")[0]["key"] == f"column:{GOLD}.tenure_months"  # a word's beginning is enough
+    assert {r["kind"] for r in catalog.find("accounts", kind="table")} == {"table"}
+    assert {r["layer"] for r in catalog.find(layer="bronze")} == {"bronze"} and len(catalog.find(layer="bronze")) == 9
+    assert catalog.find("nothing-like-this") == [] and catalog.find('quote " and ) paren') == []
+    assert len(catalog.find(limit=3)) == 3
 
 
-def test_an_importer_adds_what_it_knows_without_erasing_what_another_said(fathom):
+def test_an_importer_adds_what_it_knows_without_erasing_what_another_said(catalog):
     """BigQuery knows a column's type; Dataform knows how it is computed. Each import keeps the other's fields."""
     bigquery = [("table", {"path": "p.d.t", "description": "Shift inputs", "system": "bigquery", "source": {"bigquery": {"location": "US"}}}),
                 ("column", {"table": "p.d.t", "name": "x", "dtype": "FLOAT", "source": {"bigquery": {"mode": "NULLABLE"}}})]
-    assert fathom.apply(bigquery, merge=True) == {"added": 2, "changed": 0, "unchanged": 0}
-    fathom.apply([("table", {"path": "p.d.raw"}), ("column", {"table": "p.d.raw", "name": "m"})], merge=True)
+    assert catalog.apply(bigquery, merge=True) == {"added": 2, "changed": 0, "unchanged": 0}
+    catalog.apply([("table", {"path": "p.d.raw"}), ("column", {"table": "p.d.raw", "name": "m"})], merge=True)
     dataform = [("column", {"table": "p.d.t", "name": "x", "definition": "m / 60", "derived_from": ["column:p.d.raw.m"], "tags": ["lineage:partial"],
                             "source": {"dataform": {"file": "definitions/t.sqlx"}}})]
-    assert fathom.apply(dataform, merge=True) == {"added": 0, "changed": 1, "unchanged": 0}
+    assert catalog.apply(dataform, merge=True) == {"added": 0, "changed": 1, "unchanged": 0}
 
-    column = fathom.get("column:p.d.t.x")
+    column = catalog.get("column:p.d.t.x")
     assert (column["dtype"], column["definition"], column["tags"]) == ("FLOAT", "m / 60", ["lineage:partial"])
     assert column["source"] == {"bigquery": {"mode": "NULLABLE"}, "dataform": {"file": "definitions/t.sqlx"}}
     assert [c["key"] for c in column["derived_from"]] == ["column:p.d.raw.m"]
-    assert fathom.get("table:p.d.t")["description"] == "Shift inputs"
-    assert fathom.apply(bigquery, merge=True) == {"added": 0, "changed": 0, "unchanged": 2}  # each import again changes nothing
-    assert fathom.apply(dataform, merge=True) == {"added": 0, "changed": 0, "unchanged": 1}
-    fathom.apply([("column", {"table": "p.d.t", "name": "x", "tags": [], "source": {"dataform": {"file": "definitions/t.sqlx"}}})], merge=True)
-    assert fathom.get("column:p.d.t.x")["tags"] == []  # what an importer says outright still replaces its own earlier word
+    assert catalog.get("table:p.d.t")["description"] == "Shift inputs"
+    assert catalog.apply(bigquery, merge=True) == {"added": 0, "changed": 0, "unchanged": 2}  # each import again changes nothing
+    assert catalog.apply(dataform, merge=True) == {"added": 0, "changed": 0, "unchanged": 1}
+    catalog.apply([("column", {"table": "p.d.t", "name": "x", "tags": [], "source": {"dataform": {"file": "definitions/t.sqlx"}}})], merge=True)
+    assert catalog.get("column:p.d.t.x")["tags"] == []  # what an importer says outright still replaces its own earlier word
 
-    assert fathom.put("column", {"table": "p.d.t", "name": "x"})["dtype"] is None  # a plain registration says everything
+    assert catalog.put("column", {"table": "p.d.t", "name": "x"})["dtype"] is None  # a plain registration says everything
 
 
-def test_what_is_refused(fathom):
+def test_what_is_refused(catalog):
     for kind, payload, code in (("table", {"path": "Has Spaces"}, "path"), ("column", {"table": "nowhere.t", "name": "x"}, "not_found"),
                                 ("project", {"name": "p"}, "description"), ("view", {}, "kind"),
                                 ("table", {"path": "a.b", "derived_from": ["table:a.b"]}, "not_found")):
         with pytest.raises(CatalogError) as error:
-            fathom.put(kind, payload)
+            catalog.put(kind, payload)
         assert error.value.code == code
-    fathom.put("table", {"path": "a.b"})
-    fathom.put("table", {"path": "a.b.c"})
-    fathom.put("column", {"table": "a.b.c", "name": "x"})
-    assert fathom.get("table:a.b")["columns"] == []  # a.b.c's column is not a.b's
-    fathom.put("project", {"name": "a.b", "description": "shares a name with a table"})
+    catalog.put("table", {"path": "a.b"})
+    catalog.put("table", {"path": "a.b.c"})
+    catalog.put("column", {"table": "a.b.c", "name": "x"})
+    assert catalog.get("table:a.b")["columns"] == []  # a.b.c's column is not a.b's
+    catalog.put("project", {"name": "a.b", "description": "shares a name with a table"})
     with pytest.raises(CatalogError) as error:
-        fathom.get("a.b")
+        catalog.get("a.b")
     assert error.value.code == "ambiguous"
     with pytest.raises(CatalogError) as error:
-        fathom.use("a.b", ["project:a.b"])  # a project uses data, not projects
+        catalog.use("a.b", ["project:a.b"])  # a project uses data, not projects
     assert error.value.code == "not_found"
 
 
@@ -161,14 +161,14 @@ def test_a_git_remote_becomes_a_web_address_without_credentials():
     assert web_url("/local/path") is None
 
 
-def test_the_table_list_counts_columns_and_users_and_filters_by_layer_and_system(fathom):
-    fathom.put("project", {"name": "churn-model", "description": "Predict churn"})
-    fathom.use("churn-model", [f"{GOLD}.plan_tier"])
-    tables = {t["key"]: t for t in fathom.tables()}
+def test_the_table_list_counts_columns_and_users_and_filters_by_layer_and_system(catalog):
+    catalog.put("project", {"name": "churn-model", "description": "Predict churn"})
+    catalog.use("churn-model", [f"{GOLD}.plan_tier"])
+    tables = {t["key"]: t for t in catalog.tables()}
     assert len(tables) == 5
     gold = tables[f"table:{GOLD}"]
-    assert gold["layer"] == "gold" and gold["system"] == "duckdb" and gold["columns"] == len(fathom.get(GOLD)["columns"]) and gold["used_by"] == 1
+    assert gold["layer"] == "gold" and gold["system"] == "duckdb" and gold["columns"] == len(catalog.get(GOLD)["columns"]) and gold["used_by"] == 1
     assert tables[f"table:{BRONZE}"]["used_by"] == 1  # through what is built from it
-    assert gold["changed"] == fathom.get(GOLD)["at"]
-    assert [t["key"] for t in fathom.tables(layer="bronze")] == ["table:churn.bronze.accounts", "table:churn.bronze.tickets"]
-    assert fathom.tables(system="bigquery") == []
+    assert gold["changed"] == catalog.get(GOLD)["at"]
+    assert [t["key"] for t in catalog.tables(layer="bronze")] == ["table:churn.bronze.accounts", "table:churn.bronze.tickets"]
+    assert catalog.tables(system="bigquery") == []

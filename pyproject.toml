@@ -20,7 +20,6 @@ docs = ["pyyaml>=6"]
 
 [project.scripts]
 odcl = "odcl.cli:main"
-fathom = "odcl.cli:main"  # temporary alias
 
 [dependency-groups]
 dev = [
@@ -39,7 +38,7 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/odcl", "src/fathom_data"]
+packages = ["src/odcl"]
 
 [tool.ruff]
 line-length = 180
