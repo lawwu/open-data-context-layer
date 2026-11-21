@@ -144,6 +144,7 @@ def import_build(catalog: Catalog, manifest: dict, *, client) -> dict:
 
     Importing the same manifest again changes nothing. A different manifest for a version already recorded is
     refused. A missing dependency is named, and nothing is written until it is there."""
+    catalog.allow("importer")
     require(isinstance(manifest, dict) and all(k in manifest for k in REQUIRED), "manifest", f"A manifest needs {', '.join(REQUIRED)}")
     require(manifest["schema_version"] == 1, "manifest", f"This release reads manifest schema version 1, not {manifest['schema_version']}")
     found = JOB.match(manifest["pipeline_run"] or "")
@@ -266,6 +267,7 @@ def _record_relied_on(catalog: Catalog, build: int, pins: list[dict]) -> None:
 def rely(catalog: Catalog, name: str, version: str, documents: list[str], why: str | None = None) -> dict:
     """Record that a model version already imported relied on these documents, each pinned at the revision current
     when its training task ended."""
+    catalog.allow("editor")
     require(documents, "relied_on", "Name at least one document")
     row = catalog.db.execute("""SELECT b.id, t.ended_at FROM model_builds b JOIN executions t ON t.id = b.producing_execution
                                 WHERE b.project_key = %s AND b.version = %s""", (f"project:{name.strip().lower()}", str(version))).fetchone()

@@ -145,6 +145,7 @@ def sync_jobs(catalog: Catalog, project: str, *, client, since: datetime | None 
     before it, so the next regular sync still starts where the last one ended.
 
     `sql` is "templates" (keep each query's shape, without literals) or "none" (do not ask BigQuery for SQL)."""
+    catalog.allow("importer")
     require(sql != "full", "sql", "Keeping original SQL text is not offered yet: it needs its own access rules. Use templates or none")
     require(sql in ("templates", "none"), "sql", "sql is templates or none")
     require(isinstance(project, str) and project.strip(), "project", "Name the project the jobs ran in")
