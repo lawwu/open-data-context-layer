@@ -222,6 +222,7 @@ class Catalog:
                             "derived_from": [link["to"] for link in said["links"] if link["relation"] == "derived_from"]}
                     require(isinstance(payload.get("source") or {}, dict), "source", "source is a small object saying where the entry came from")
                     p = {**kept, **{k: v for k, v in payload.items() if v is not None}, "source": {**said["source"], **(payload.get("source") or {})}}
+                p = self._own_tags(p, payload, prior["body"] if prior else None)
             if kind != "project":
                 for parent in names(p.get("derived_from"), "derived_from"):
                     parent = self.resolve(parent, (kind,))
@@ -236,6 +237,25 @@ class Catalog:
                     **{field: text(p.get(field), field, limit, optional=True) for field, limit in TEXT[kind].items()},
                     "tags": sorted(set(tags)), "source": source, "links": links}
             return self._write(body)
+
+    @staticmethod
+    def _own_tags(p: dict, payload: dict, said: dict | None) -> dict:
+        """Under `merge`, the tags an importer sends are its own: kept under its name in `source`, so a later import
+        by it replaces only those and keeps what people and other importers tagged. An importer is the one name in
+        the payload's `source`. An entry an importer wrote before tags were kept this way records no owner, so that
+        importer's next import takes its tags over; after each importer has imported once more, their tags add up."""
+        source, tags = payload.get("source"), payload.get("tags")
+        if tags is None or not isinstance(source, dict) or len(source) != 1 or not isinstance(next(iter(source.values())), dict):
+            return p
+        name = next(iter(source))
+        require(isinstance(tags, list) and all(isinstance(t, str) for t in tags), "tags", "Use at most 30 short tags")
+        before = (said or {}).get("source", {}).get(name)
+        if not said:
+            theirs, others = set(), set()
+        else:  # an importer that wrote this entry before its tags were kept apart owned them all, as far as anyone can tell
+            theirs = set(said["tags"]) if isinstance(before, dict) and "tags" not in before else set((before or {}).get("tags") or [])
+            others = set(said["tags"]) - theirs
+        return {**p, "tags": sorted(others | set(tags)), "source": {**p["source"], name: {**p["source"][name], "tags": sorted(set(tags))}}}
 
     def _document(self, p: dict) -> dict:
         """A document entry: a Markdown page and the entries it describes. `describes` is a list of {key, section,

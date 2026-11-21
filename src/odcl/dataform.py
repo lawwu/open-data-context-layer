@@ -131,7 +131,7 @@ class Definitions:
         traced: dict[str, str] = {}
         if not outputs:  # SQL nothing can read: whatever the catalog knew of these columns is no longer this definition
             for name in sorted(self.known_columns(target)):
-                self.column(target, name, {"definition": "", "derived_from": [], "tags": ["lineage:partial"]})
+                self.column(target, name, {"definition": "", "derived_from": [], "tags": ["lineage:partial"], "source": {"dataform": {"file": action.get("filePath")}}})
         for name in outputs:
             expression, parents, complete = None, [], False
             try:

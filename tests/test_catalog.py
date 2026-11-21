@@ -105,7 +105,7 @@ def test_an_importer_adds_what_it_knows_without_erasing_what_another_said(fathom
 
     column = fathom.get("column:p.d.t.x")
     assert (column["dtype"], column["definition"], column["tags"]) == ("FLOAT", "m / 60", ["lineage:partial"])
-    assert column["source"] == {"bigquery": {"mode": "NULLABLE"}, "dataform": {"file": "definitions/t.sqlx"}}
+    assert column["source"] == {"bigquery": {"mode": "NULLABLE"}, "dataform": {"file": "definitions/t.sqlx", "tags": ["lineage:partial"]}}
     assert [c["key"] for c in column["derived_from"]] == ["column:p.d.raw.m"]
     assert fathom.get("table:p.d.t")["description"] == "Shift inputs"
     assert fathom.apply(bigquery, merge=True) == {"added": 0, "changed": 0, "unchanged": 2}  # each import again changes nothing
@@ -200,3 +200,21 @@ def test_a_large_import_holds_a_bounded_number_of_locks(database):
     with Catalog(database, actor="ana") as catalog:
         assert catalog.apply(entries())["added"] == 3001
         assert 0 < held[0] <= ENTRY_LOCKS  # one lock per entry would be 3,001, past PostgreSQL's default lock table
+
+
+def test_under_merge_each_importer_replaces_only_its_own_tags(database):
+    with Catalog(database, actor="ana") as c:
+        c.put("table", {"path": "p.d.t", "tags": ["reviewed"]})  # a person's tag
+        c.put("table", {"path": "p.d.t", "tags": ["lineage:partial"], "source": {"dataform": {"file": "t.sqlx"}}}, merge=True)
+        c.put("table", {"path": "p.d.t", "tags": ["tenant"], "source": {"datahub": {"urn": "x"}}}, merge=True)
+        assert c.get("p.d.t")["tags"] == ["lineage:partial", "reviewed", "tenant"]
+        c.put("table", {"path": "p.d.t", "tags": [], "source": {"dataform": {"file": "t.sqlx"}}}, merge=True)  # lineage resolved now
+        said = c.get("p.d.t")
+        assert said["tags"] == ["reviewed", "tenant"] and said["source"]["dataform"]["tags"] == [] and said["source"]["datahub"]["tags"] == ["tenant"]
+        c.put("table", {"path": "p.d.t", "source": {"datahub": {"urn": "x"}}}, merge=True)  # sending no tags keeps them
+        assert c.get("p.d.t")["tags"] == ["reviewed", "tenant"]
+
+        # an entry an importer wrote before tags had owners: its next import takes them over, then tags add up again
+        c.put("table", {"path": "p.d.old", "tags": ["a", "b"], "source": {"dataform": {"file": "old.sqlx"}}})
+        c.put("table", {"path": "p.d.old", "tags": ["a"], "source": {"dataform": {"file": "old.sqlx"}}}, merge=True)
+        assert c.get("p.d.old")["tags"] == ["a"]
