@@ -28,6 +28,8 @@ dev = [
     "pytest>=8",
     "ruff>=0.6",
 ]
+# The docs site (mkdocs.yml): `uv run --only-group site mkdocs serve`.
+site = ["mkdocs-material>=9.6"]
 
 [build-system]
 requires = ["hatchling"]

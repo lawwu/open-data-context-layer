@@ -1,0 +1,51 @@
+# The docs site on GitHub Pages (.github/workflows/pages.yml). It is drawn from README.md,
+# CHANGELOG.md and docs/*.md rather than kept as a second copy: scripts/mkdocs_hooks.py adds
+# the README as the home page and the changelog, and points links at the site or at GitHub.
+# Locally: `uv run --only-group site mkdocs serve`.
+site_name: Open Data Context Layer
+site_description: What data exists, how it connects, and which projects use it.
+site_url: https://lawwu.github.io/open-data-context-layer/
+repo_url: https://github.com/lawwu/open-data-context-layer
+repo_name: lawwu/open-data-context-layer
+edit_uri: ""
+docs_dir: docs
+site_dir: site
+strict: true
+hooks:
+  - scripts/mkdocs_hooks.py
+nav:
+  - Home: index.md
+  - Implementation plan: implementation-plan.md
+  - Changelog: changelog.md
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.top
+    - toc.follow
+    - search.highlight
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+validation:
+  links:
+    not_found: warn
+    anchors: warn
+    unrecognized_links: warn

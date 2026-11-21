@@ -1,6 +1,7 @@
 # Weekly dependency updates. Minor and patch updates arrive as one grouped pull request per ecosystem, and CI merges
 # it once the tests pass (see the dependabot job in workflows/ci.yml). Major updates come one per pull request and wait
 # for a person. A release has to be a week old before it is proposed, so a bad or hijacked one has time to be pulled.
+# The actions' updates also update .github/workflows/actions.lock, which records the commit each version is.
 version: 2
 updates:
   - package-ecosystem: uv

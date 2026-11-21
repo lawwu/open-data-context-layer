@@ -11,3 +11,7 @@ section says how a release is cut.
 - Releases: a `vX.Y.Z` tag on `main` builds the sdist and wheel, attests them and publishes
   them as a GitHub release with this changelog's notes; a `latest` tag follows the newest
   release.
+- Docs: a site on GitHub Pages, https://lawwu.github.io/open-data-context-layer/, built with
+  MkDocs from the README, this changelog and `docs/`, and published on every push to `main`.
+- Workflows: every action is locked to a commit in `.github/workflows/actions.lock`, checked
+  on every pull request with zizmor.
