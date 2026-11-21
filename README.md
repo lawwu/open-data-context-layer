@@ -338,7 +338,16 @@ uv run odcl import --docs ../knowledge-base/docs
 uv run odcl docs warehouse.sales.orders.status_code
 ```
 
-- **Importing.** `import --docs` reads every `*.md` file with an `odcl:` block under the folders it is given and counts the others as skipped. A page becomes a `document` entry keyed `document:<repo>/<path>`, holding its title, owner, kind, text, headings with their anchors, commit, web address and content digest.
+- **When another tool owns the frontmatter**, such as a linter that allows only its own keys, put the block in an HTML comment anywhere in the page instead. It holds what the `odcl:` key would, and is left out of the page's text:
+
+  ```markdown
+  <!-- odcl
+  kind: finding
+  describes:
+    - key: column:warehouse.sales.orders.amount
+  -->
+  ```
+- **Importing.** `import --docs` reads every `*.md` file with an `odcl:` block (or `<!-- odcl -->` comment) under the folders it is given and counts the others as skipped. A page becomes a `document` entry keyed `document:<repo>/<path>`, holding its title, owner, kind, text, headings with their anchors, commit, web address and content digest.
 - **Commit and web address.** They come from git when the page is in a checkout, else from `--commit` and `--repo-url`.
 - **Revisions.** Importing an unchanged page changes nothing; an edited one is a new revision.
 - **Search** covers the title, headings and text.
@@ -351,7 +360,7 @@ uv run odcl docs warehouse.sales.orders.status_code
 
 The web page has a page for each document, with its links grouped by section and its text shown as text; nothing in a page runs. Every entry has a "Documented in" panel, and search finds documents. The MCP server has a `documents_for` tool, and `find_data` returns documents. `Catalog.put("document", …)` and `odcl.docs.import_docs` are the Python interface.
 
-Not built yet: a model version that relied on a document revision (`relied_on`), and the frontmatter in an HTML comment for pages whose frontmatter a linter owns.
+Not built yet: a model version that relied on a document revision (`relied_on`).
 
 ## For agents
 
