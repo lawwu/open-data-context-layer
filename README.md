@@ -34,7 +34,7 @@ A model version's pins reach its project's `uses` links. Importing the newest ve
 
 ## Try it
 
-You need a PostgreSQL database the catalog may create its tables in.
+You need Python 3.14 or later and a PostgreSQL database the catalog may create its tables in.
 
 ```sh
 uv sync --all-extras
@@ -129,7 +129,7 @@ Python code that imports `fathom_data` keeps working: `Fathom` is now `odcl.Cata
 
 ## Importing from BigQuery
 
-The BigQuery commands need the `bigquery` extra. On Python 3.14 and later they read through [Sounding](https://github.com/lawwu/sounding); on earlier versions, which Sounding does not support, through odcl's own reader (`odcl.bigquery_source`), which makes the same calls and keeps the same records. Sign in once with `gcloud auth application-default login`. Every call is free: `tables.get` for schemas and `jobs.list` for jobs. No query is run.
+The BigQuery commands need the `bigquery` extra, and read through [Sounding](https://github.com/lawwu/sounding). Sign in once with `gcloud auth application-default login`. Every call is free: `tables.get` for schemas and `jobs.list` for jobs. No query is run.
 
 ```sh
 uv sync --all-extras

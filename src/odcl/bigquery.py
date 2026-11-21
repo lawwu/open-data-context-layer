@@ -1,8 +1,7 @@
 """BigQuery into the catalog: table schemas as entries, and query-job history as evidence of use.
 
-Every BigQuery call goes through Sounding (`sounding.source`) when it is installed, else through
-`odcl.bigquery_source`, which reads the same way without Sounding's Python 3.14 requirement. Both use only free calls:
-`tables.get` for schemas and `jobs.list` for jobs. This module decides what the catalog keeps: one row per job however often a
+Every BigQuery call goes through Sounding (`sounding.source`), which uses only free calls: `tables.get` for
+schemas and `jobs.list` for jobs. This module decides what the catalog keeps: one row per job however often a
 window is read, what each job reported reading and writing, and a query's shape with its literals removed.
 
 A job reading a table is evidence that the table was queried. It says nothing about which fields a model used.
@@ -21,13 +20,8 @@ from .store import Catalog, CatalogError, reference_entries, require
 try:
     from sounding import source
     from sounding.errors import SoundingError, public_error
-except ImportError:  # Sounding needs Python 3.14; the same reads without it
-    from . import bigquery_source as source
-    from .bigquery_source import SoundingError, public_error
-try:
-    import google.cloud.bigquery  # noqa: F401
 except ImportError as e:  # pragma: no cover - depends on the installation
-    raise CatalogError("bigquery", "The BigQuery importer needs google-cloud-bigquery: install open-data-context-layer[bigquery]") from e
+    raise CatalogError("bigquery", "The BigQuery importer needs Sounding: install open-data-context-layer[bigquery]") from e
 
 SOURCE = "bigquery.jobs"
 EVERYWHERE = "*"  # jobs.list answers for every location of a project at once

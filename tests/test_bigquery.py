@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-pytest.importorskip("google.cloud.bigquery", reason="the BigQuery importer needs the bigquery extra")
+pytest.importorskip("sounding", reason="the BigQuery importer needs the bigquery extra")
 from google.cloud import bigquery as gbq
 
 from odcl import Catalog, CatalogError

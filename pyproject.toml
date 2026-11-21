@@ -3,18 +3,17 @@ name = "open-data-context-layer"
 version = "0.2.0"
 description = "A data context layer: what data exists, how it connects, and which projects use it."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.14"
 dependencies = ["psycopg[binary]>=3.2"]
 
 [project.optional-dependencies]
 dbt = ["sqlglot>=25"]
 dataform = ["google-auth>=2.20", "requests>=2.31", "sqlglot>=25"]
 vertex = ["google-auth>=2.20", "requests>=2.31"]
-# BigQuery reads come from Sounding on Python 3.14 and later, and from odcl's own reader before that. Sounding is
-# released on GitHub, not PyPI. 0.9.0 cannot read scripts.
+# BigQuery reads come from Sounding, which is released on GitHub, not PyPI. 0.9.0 cannot read scripts.
 bigquery = [
   "google-cloud-bigquery>=3.25",
-  "sounding @ git+https://github.com/lawwu/sounding@v0.9.1 ; python_version >= '3.14'",
+  "sounding @ git+https://github.com/lawwu/sounding@v0.9.1",
   "sqlglot>=25",
 ]
 mcp = ["mcp>=2.0"]
