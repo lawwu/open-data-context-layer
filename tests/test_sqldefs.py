@@ -66,12 +66,12 @@ def test_the_command_line_imports_a_definitions_file(database, tmp_path, capsys)
     assert "2 definitions" in capsys.readouterr().out
 
 
-def test_tables_that_are_neither_defined_nor_registered_and_sql_not_traced_are_named(catalog, tmp_path, capsys):
+def test_tables_that_are_neither_defined_nor_registered_and_sql_not_traced_are_named(catalog, database, tmp_path, capsys):
     lines = [{"target": "hub.summary.a", "select": "SELECT org_id FROM hub.raw.shifts", "dependencies": ["hub.raw.missing"]},
              {"target": "hub.summary.b", "select": "SELEC garbage FROM"}]
     result = import_definitions(catalog, write(tmp_path, lines))
     assert result["unresolved"] == ["hub.raw.missing"] and result["untraced"] == ["hub.summary.b"]
-    assert main(["--database-url", catalog.db.info.dsn, "import", "--sql-definitions", write(tmp_path, lines)]) == 0
+    assert main(["--database-url", database, "import", "--sql-definitions", write(tmp_path, lines)]) == 0
     out = capsys.readouterr().out
     assert "registered by name only: hub.raw.missing" in out and "not traced" in out and "hub.summary.b" in out
 
