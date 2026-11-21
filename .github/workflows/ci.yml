@@ -31,6 +31,12 @@ jobs:
       - run: uv sync --locked --all-extras --python 3.14
       - run: uv run ruff check
       - run: uv run pytest -q
+      # release.yml refuses a tag whose version these disagree with; catch it here first.
+      - name: pyproject.toml and src/odcl/__init__.py agree on the version
+        run: |
+          project=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)
+          module=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/odcl/__init__.py)
+          [ -n "$project" ] && [ "$project" = "$module" ] || { echo "::error::pyproject.toml says $project, src/odcl/__init__.py says $module."; exit 1; }
 
   # Merge Dependabot's minor and patch updates once the tests above pass. Major updates are left for a person.
   dependabot:

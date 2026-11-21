@@ -1,0 +1,117 @@
+# A GitHub release for every release tag (vX.Y.Z): the sdist and wheel built from the tag,
+# with build provenance, and the tag's section of CHANGELOG.md as the notes. odcl isn't on
+# PyPI (the `bigquery` extra depends on Sounding by git URL, which PyPI refuses), so the
+# release and its `latest` tag (latest.yml) are how people install a version:
+#   uv tool install "open-data-context-layer[...] @ git+https://github.com/lawwu/open-data-context-layer@vX.Y.Z"
+#
+# The tag must be on main and match the version in pyproject.toml and src/odcl/__init__.py.
+# A release already made by hand keeps its title and notes; the files are added to it.
+# By hand (Actions → release → Run workflow) it builds an existing tag again.
+name: release
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build, such as v0.3.0
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+  cancel-in-progress: false
+jobs:
+  # Builds and checks the distributions with nothing but read access.
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+      version: ${{ steps.vars.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # main and every tag, to check where the tag is
+          persist-credentials: false
+      - id: vars
+        name: The tag is a release on main, and the package says so
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = workflow_dispatch ]; then tag=$INPUT_TAG; else tag=$GITHUB_REF_NAME; fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "::error::$tag isn't a release tag (vX.Y.Z)"; exit 1; fi
+          git rev-parse -q --verify "refs/tags/$tag^{commit}" > /dev/null || { echo "::error::There's no tag $tag."; exit 1; }
+          git merge-base --is-ancestor "$tag^{commit}" origin/main || { echo "::error::$tag isn't on main."; exit 1; }
+          git checkout -q "$tag"
+          version=${tag#v}
+          project=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)
+          module=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/odcl/__init__.py)
+          [ "$project" = "$version" ] || { echo "::error::$tag's pyproject.toml says $project."; exit 1; }
+          [ "$module" = "$version" ] || { echo "::error::$tag's src/odcl/__init__.py says $module."; exit 1; }
+          grep -q "^## $version " CHANGELOG.md || { echo "::error::CHANGELOG.md has no section for $version."; exit 1; }
+          { echo "tag=$tag"; echo "version=$version"; } >> "$GITHUB_OUTPUT"
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: false # a release builds from nothing cached
+      - run: uv build
+      - name: The wheel installs and runs
+        env:
+          VERSION: ${{ steps.vars.outputs.version }}
+        run: |
+          uv venv --python 3.14 /tmp/check
+          uv pip install --python /tmp/check dist/*.whl
+          /tmp/check/bin/python -c "import odcl, sys; assert odcl.__version__ == sys.argv[1], odcl.__version__" "$VERSION"
+          /tmp/check/bin/odcl --help > /dev/null
+      - name: The notes, from CHANGELOG.md
+        env:
+          VERSION: ${{ steps.vars.outputs.version }}
+        run: awk -v v="$VERSION" '$0 ~ "^## " v " " {on=1; next} on && /^## / {exit} on' CHANGELOG.md > dist/NOTES.md
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  # Attests the files and puts them on the release: the only job that can write.
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the release
+      id-token: write # proves the attestation is this repository's
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.whl dist/*.tar.gz --clobber
+          else
+            gh release create "$TAG" dist/*.whl dist/*.tar.gz --verify-tag --title "$VERSION" --notes-file dist/NOTES.md
+          fi
+          {
+            echo "### Released $TAG"
+            echo
+            echo '```sh'
+            echo "uv tool install \"open-data-context-layer @ git+https://github.com/$GH_REPO@$TAG\""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

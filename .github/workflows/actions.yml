@@ -1,0 +1,29 @@
+# The workflows themselves, on every pull request and push to main.
+#
+# zizmor: a security linter for workflows (template injection, broad permissions,
+# credentials left on disk, dangerous triggers, actions not pinned to a commit…), including
+# the audits that ask GitHub (actions with known vulnerabilities, impostor commits). Findings
+# fail the job and show on the pull request. Locally: `uvx zizmor .github/`.
+#
+# Every action is pinned to a full commit SHA with its version in a comment
+# (`uses: actions/checkout@<sha> # v7.0.1`); Dependabot updates both (.github/dependabot.yml).
+name: actions
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          version: 1.32.0
+          advanced-security: false # findings fail the job, as annotations on the pull request
+          annotations: true

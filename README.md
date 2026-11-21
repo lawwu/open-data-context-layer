@@ -385,6 +385,42 @@ ODCL_TEST_DATABASE_URL=postgresql://localhost/odcl_test uv run pytest -q
 
 Without `ODCL_TEST_DATABASE_URL` the database tests are skipped locally and fail in CI. Schema changes go in a new numbered file in `src/odcl/migrations/`.
 
+**The workflows** (`.github/workflows/`): `ci.yml` runs ruff and the tests on PostgreSQL 16 and merges Dependabot's minor and patch updates once they pass; `actions.yml` lints the workflows with [zizmor](https://docs.zizmor.sh); `release.yml` and `latest.yml` cut releases (below). Every action is pinned to a full commit SHA with its version in a comment, and Dependabot updates both. After changing a workflow, check it as CI does:
+
+```sh
+uvx zizmor .github/
+```
+
+## Versioning and releases
+
+Releases are git tags, `vX.Y.Z`, following semantic versioning; [`CHANGELOG.md`](CHANGELOG.md) says what each one changed. odcl is not on PyPI (the `bigquery` extra depends on Sounding by git URL, which PyPI refuses), so install a release from GitHub, a specific one with `@vX.Y.Z` or the newest with `@latest`:
+
+```sh
+uv tool install "open-data-context-layer[mcp] @ git+https://github.com/lawwu/open-data-context-layer@latest"
+```
+
+Without the `@…` you get the latest `main`, which takes Dependabot's updates as soon as they merge, before any release. Each release on GitHub also carries the sdist and wheel, with [build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations) (`gh attestation verify FILE -R lawwu/open-data-context-layer`).
+
+To cut a release:
+
+1. On a branch, move the changelog's "Unreleased" notes under a new `## X.Y.Z (YYYY-MM-DD)` heading and leave "Unreleased" empty.
+2. Bump the version, which updates `pyproject.toml` and `uv.lock`, and set the same version in `src/odcl/__init__.py` (CI fails while the two disagree):
+
+   ```sh
+   uv version --bump minor   # or patch / major
+   ```
+
+3. Open a pull request titled `Release X.Y.Z: …` and merge it once CI passes.
+4. Tag the merge commit on `main` and push the tag:
+
+   ```sh
+   git switch main && git pull
+   git tag -a vX.Y.Z -m "X.Y.Z"
+   git push origin vX.Y.Z
+   ```
+
+The tag starts `release.yml`, which refuses a tag that isn't on `main`, whose version doesn't match `pyproject.toml` and `src/odcl/__init__.py`, or that has no changelog section. It builds the sdist and wheel, checks the wheel installs and runs, attests both, and creates the GitHub release with the changelog section as its notes (a release already made by hand keeps its title and notes and gets the files). `latest.yml` moves the `latest` tag to the highest `vX.Y.Z`, so a patch to an older line doesn't move it back. Both can also be run by hand from the Actions tab.
+
 ## Not built yet
 
 - The machine-learning shape on top: training and serving features, labels, training datasets and model cards.
