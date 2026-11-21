@@ -212,6 +212,9 @@ def lines(command: str, result) -> list[str]:
     if command == "instances":
         copies = [f"  copy: {link['to']}" for link in result["links"] if link["relation"] == "instance_of"]
         return [f"{result['key']}  {result['change']}  ({result['revision']})"] + (copies or ["  no table matches yet"])
+    if command == "references":
+        return [f"{result['key']}  {result['change']}  ({result['revision']})"] + [
+            f"  references {link['to']}" for link in result["links"] if link["relation"] == "references"]
     if command in ("add", "use"):
         return [f"{result['key']}  {result['change']}  ({result['revision']})"]
     return [json.dumps(result, indent=2)]
@@ -307,6 +310,8 @@ def run(catalog: Catalog, args):
         return {**found, "written_to": args.out}
     if args.command == "rely":
         return catalog.rely(args.model, args.version, args.documents, args.why)
+    if args.command == "references":
+        return catalog.set_references(args.column, args.targets)
     if args.command == "instances":
         return catalog.set_instances(args.definition, args.patterns)
     if args.command == "privacy" and args.what == "set":
@@ -315,7 +320,7 @@ def run(catalog: Catalog, args):
         return {"columns": catalog.privacy(args.pii_only, args.table)}
     if args.command == "add":
         fields = {k: v for k, v in vars(args).items() if k in ("path", "table", "name", "description", "system", "layer", "owner", "type", "dtype",
-                                                                 "definition", "repository", "status", "derived_from", "tags", "pii", "data_category",
+                                                                 "definition", "repository", "status", "derived_from", "references", "tags", "pii", "data_category",
                                                                  "retention", "scrubbing") and v not in (None, [])}
         return catalog.put(args.kind, fields)
     if args.command == "find":
@@ -410,6 +415,7 @@ def parser() -> argparse.ArgumentParser:
     c.add_argument("name")
     c.add_argument("--dtype")
     c.add_argument("--definition", help="how it is computed")
+    c.add_argument("--references", nargs="+", default=[], metavar="COLUMN", help="the column(s) its values are drawn from: a foreign key")
     j = kinds.add_parser("project")
     j.add_argument("name")
     j.add_argument("--repository")
@@ -445,6 +451,10 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--version", required=True)
     s.add_argument("documents", nargs="+", metavar="DOCUMENT")
     s.add_argument("--why", help="what the model took from them")
+
+    s = sub.add_parser("references", help="say which columns a column's values are drawn from: a foreign key")
+    s.add_argument("column")
+    s.add_argument("targets", nargs="*", metavar="COLUMN", help="the referenced column(s); none clears them")
 
     s = sub.add_parser("instances", help="say which tables are copies of a definition table, by patterns over their paths")
     s.add_argument("definition", help="the definition table, e.g. core.sales.daily_totals")

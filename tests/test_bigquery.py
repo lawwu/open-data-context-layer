@@ -243,3 +243,20 @@ def test_the_command_line_reads_the_jobs_of_a_pipeline_task_or_a_window(database
     assert (asked["min_creation_time"].isoformat(), asked["max_creation_time"].isoformat()) == ("2026-10-05T09:00:00+00:00", "2026-10-05T09:36:00+00:00")
     assert main([*db, "--pipeline-run", run["name"], "--since", "2026-10-05"]) == 1 and "not both" in capsys.readouterr().err
     assert main([*db, "--since", "yesterday"]) == 1 and "is not a time" in capsys.readouterr().err
+
+
+def test_a_foreign_key_constraint_becomes_a_reference_and_one_to_a_table_not_read_is_named(catalog):
+    def table(fqn, fields, keys=()):
+        found = gbq.Table(fqn, schema=[gbq.SchemaField(f, "STRING") for f in fields])
+        found._properties["tableConstraints"] = {"foreignKeys": [
+            {"name": f"fk_{n}", "referencedTable": ref(target), "columnReferences": [{"referencingColumn": a, "referencedColumn": b}]}
+            for n, (a, target, b) in enumerate(keys)]}
+        return found
+    tables = {"p.s.orders": table("p.s.orders", ["id", "Customer_ID", "store_id"], [("Customer_ID", "p.s.customers", "ID"), ("store_id", "p.s.stores", "id")]),
+              "p.s.customers": table("p.s.customers", ["ID"])}
+    client = Mock(get_table=Mock(side_effect=lambda r: tables[f"{r.project}.{r.dataset_id}.{r.table_id}"]))
+    result = bq.import_tables(catalog, ["p.s.orders", "p.s.customers"], client=client)  # the referenced table is read after the one that references it
+    assert result["unresolved_references"] == ["column:p.s.orders.store_id -> column:p.s.stores.id"]
+    assert [r["key"] for r in catalog.get("p.s.orders.customer_id")["references"]] == ["column:p.s.customers.id"]
+    again = bq.import_tables(catalog, ["p.s.orders", "p.s.customers"], client=client)
+    assert (again["added"], again["changed"]) == (0, 0)

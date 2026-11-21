@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import store
 from .lineage import MAX_SQL, template  # noqa: F401 - the SQL shape is shared with the OpenLineage importer
-from .store import Catalog, CatalogError, require
+from .store import Catalog, CatalogError, reference_entries, require
 
 try:
     from sounding import source
@@ -81,7 +81,14 @@ def import_tables(catalog: Catalog, tables: list[str], *, client) -> dict:
     require(tables, "tables", "Name at least one table as project.dataset.table")
     with reading():
         found = [source.table(fqn, client=client) for fqn in tables]
-    return catalog.apply([entry for table in found for entry in table_entries(table)], merge=True)
+    entries = [entry for table in found for entry in table_entries(table)]
+    # foreign keys (BigQuery's unenforced table constraints) become references, once every column read is registered
+    keys = [(t["table"]["fqn"], a, f"column:{fk['references']}.{b}".lower()) for t in found for fk in t["table"].get("foreign_keys") or []
+            if fk.get("references") for a, b in fk["columns"]]
+    registering = {f"{p['table'].replace('table:', 'column:', 1)}.{p['name']}".lower() for kind, p in entries if kind == "column"}
+    references, unresolved = reference_entries(catalog, keys, registering)
+    counts = catalog.apply(entries + references, merge=True)
+    return {**counts, **({"unresolved_references": unresolved} if unresolved else {})}
 
 
 def snapshot(fqn: str, *, client) -> dict:

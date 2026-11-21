@@ -297,3 +297,29 @@ def test_copies_of_a_definition_are_linked_by_pattern_and_lineage_and_users_go_t
         assert c.get(definition)["copies"] == [] and c.used_by(f"{definition}.net_total")["projects"] == []
     assert main(["--database-url", database, "instances", definition, "t-*.sales.daily_totals"]) == 0
     assert "copy: table:t-3.sales.daily_totals" in capsys.readouterr().out
+
+
+def test_a_column_references_the_column_its_values_are_drawn_from(database, capsys):
+    with Catalog(database, actor="ana") as c:
+        for table, columns in (("shop.public.customers", ["id", "email"]), ("shop.public.orders", ["id", "customer_id"])):
+            c.put("table", {"path": table})
+            for column in columns:
+                c.put("column", {"table": table, "name": column})
+        c.put("column", {"table": "shop.public.orders", "name": "customer_id", "references": ["shop.public.customers.id"]})
+        fk = c.get("shop.public.orders.customer_id")
+        assert [r["key"] for r in fk["references"]] == ["column:shop.public.customers.id"] and fk["derived_from"] == []  # not lineage
+        assert [r["key"] for r in c.get("shop.public.customers.id")["referenced_by"]] == ["column:shop.public.orders.customer_id"]
+        orders, customers = c.get("shop.public.orders"), c.get("shop.public.customers")
+        assert orders["foreign_keys"] == [{"column": "column:shop.public.orders.customer_id", "references": "column:shop.public.customers.id",
+                                           "table": "table:shop.public.customers", "changed_since": False}]
+        assert customers["referenced_by"] == [{"column": "column:shop.public.orders.customer_id", "table": "table:shop.public.orders",
+                                               "references": "column:shop.public.customers.id"}]
+        assert c.lineage("shop.public.customers.id", "down")["downstream"] == []
+        c.put("column", {"table": "shop.public.orders", "name": "customer_id", "description": "Who ordered"}, merge=True)
+        assert [r["key"] for r in c.get("shop.public.orders.customer_id")["references"]] == ["column:shop.public.customers.id"]  # kept
+        with pytest.raises(CatalogError, match="Nothing registered"):
+            c.set_references("shop.public.orders.id", ["shop.public.nowhere.id"])
+        c.set_references("shop.public.orders.customer_id", [])
+        assert c.get("shop.public.orders")["foreign_keys"] == []
+    assert main(["--database-url", database, "references", "shop.public.orders.customer_id", "shop.public.customers.id"]) == 0
+    assert "references column:shop.public.customers.id" in capsys.readouterr().out

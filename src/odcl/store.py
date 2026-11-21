@@ -113,6 +113,20 @@ def _edges(mine: str, other: str) -> str:
             f"UNION ALL SELECT i.{mine}, i.{other}, i.target_revision, i.target_head FROM copies i WHERE i.{mine} = reach.key)")
 
 
+def reference_entries(catalog, foreign_keys, registering: set[str]) -> tuple[list[tuple[str, dict]], list[str]]:
+    """Entries that give columns their foreign keys, for an importer to apply after the tables and columns it read.
+    `foreign_keys` is (table path, column name, referenced column key) for each column of each key. A referenced column
+    that is neither registered nor among the keys being registered is left out and named in the second list."""
+    wanted: dict[tuple[str, str], list[str]] = {}
+    unresolved = []
+    for table, column, target in foreign_keys:
+        if target in registering or catalog._head(target):
+            wanted.setdefault((table, column), []).append(target)
+        else:
+            unresolved.append(f"column:{table}.{column} -> {target}")
+    return [("column", {"table": f"table:{t}", "name": c, "references": sorted(set(targets))}) for (t, c), targets in sorted(wanted.items())], unresolved
+
+
 class CatalogError(Exception):
     """A request the catalog refuses, with a short code a caller can branch on."""
 
@@ -237,7 +251,8 @@ class Catalog:
                     kept = {"description": said["description"] or None, **{f: said.get(f) for f in TEXT[kind]}, "tags": said["tags"],
                             **({f: said.get(f) for f in ("pii", *PRIVACY)} if kind != "project" else {}),
                             **({"instances": said.get("instances")} if kind == "table" else {}),
-                            "derived_from": [link["to"] for link in said["links"] if link["relation"] == "derived_from"]}
+                            "derived_from": [link["to"] for link in said["links"] if link["relation"] == "derived_from"],
+                            **({"references": [link["to"] for link in said["links"] if link["relation"] == "references"]} if kind == "column" else {})}
                     require(isinstance(payload.get("source") or {}, dict), "source", "source is a small object saying where the entry came from")
                     p = {**kept, **{k: v for k, v in payload.items() if v is not None}, "source": {**said["source"], **(payload.get("source") or {})}}
                 p = self._own_tags(p, payload, prior["body"] if prior else None)
@@ -246,6 +261,11 @@ class Catalog:
                     parent = self.resolve(parent, (kind,))
                     require(parent != key, "derived_from", f"{key} cannot be derived from itself")
                     links.append({"relation": "derived_from", "to": parent, "revision": self._head(parent)["id"]})
+            if kind == "column":  # a foreign key: the columns this one's values are drawn from; not lineage
+                for target in names(p.get("references"), "references", 20):
+                    target = self.resolve(target, ("column",))
+                    require(target != key, "references", f"{key} cannot reference itself")
+                    links.append({"relation": "references", "to": target, "revision": self._head(target)["id"]})
             instances = None
             if kind == "table" and p.get("instances") is not None:
                 instances = names(p["instances"], "instances", 50)
@@ -571,9 +591,31 @@ class Catalog:
             out["columns"] = self._summaries(self._columns(key))
             out["copies"] = self._linked(key, "instance_of", "up")         # what this definition is copied to
             out["copy_of"] = self._linked(key, "instance_of", "down")      # the definitions this table is a copy of
+            out["foreign_keys"], out["referenced_by"] = self._foreign_keys(key)
+        elif out["kind"] == "column":
+            out["references"] = self._linked(key, "references", "up")
+            out["referenced_by"] = self._linked(key, "references", "down")
         else:
             out["layer"] = self._summary(key)["layer"]
         return out
+
+    def _foreign_keys(self, table: str) -> tuple[list[dict], list[dict]]:
+        """A table's foreign keys, column by column, and the columns of other tables that reference its columns."""
+        columns = self._columns(table)
+        out = self.db.execute("SELECT source_key, target_key, target_revision <> target_head AS changed FROM current_links "
+                              "WHERE relation = 'references' AND source_key = ANY(%s) ORDER BY source_key, target_key", (columns,)).fetchall()
+        into = self.db.execute("SELECT source_key, target_key FROM current_links WHERE relation = 'references' AND target_key = ANY(%s) "
+                               "ORDER BY source_key, target_key", (columns,)).fetchall()
+        tables = {r["entry_key"]: r["body"]["table"] for r in self._heads({r["target_key"] for r in out} | {r["source_key"] for r in into}).values()}
+        return ([{"column": r["source_key"], "references": r["target_key"], "table": tables[r["target_key"]], "changed_since": r["changed"]} for r in out],
+                [{"column": r["source_key"], "table": tables[r["source_key"]], "references": r["target_key"]} for r in into
+                 if tables[r["source_key"]] != table])
+
+    def set_references(self, column: str, targets: list[str]) -> dict:
+        """Say which columns a column's values are drawn from (a foreign key), keeping everything else it says. No
+        targets clears them."""
+        body = self._head(self.resolve(column, ("column",)))["body"]
+        return self.put("column", {"table": body["table"], "name": body["name"], "references": targets}, merge=True)
 
     def _described(self, revision: str) -> list[dict]:
         rows = self.db.execute("""SELECT l.target_key, l.target_revision, l.section, l.says, t.head_revision FROM revision_links l

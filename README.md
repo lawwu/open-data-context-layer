@@ -80,6 +80,7 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 | `odcl explain dataset SNAPSHOT[@TIME]` | Which build, job, file and inputs a dataset version came from |
 | `odcl record dataset-files --pipeline-run JOB --task TASK --output NAME [--from-table TABLE] [--export-job P:L.JOB \| --find-export-job]` | Record the files a pipeline task exported as a dataset version, bound to the BigQuery job that wrote them |
 | `odcl import --sql-definitions FILE.jsonl` | Read tables and the SELECT that builds each, from any source |
+| `odcl references COLUMN TARGET...` | Say which column a column's values are drawn from (a foreign key) |
 | `odcl instances DEFINITION PATTERN...` | Say which tables are copies of a definition, so lineage and users go through them |
 | `odcl privacy set KEY... [--pii] [--data-category] [--retention] [--scrubbing]` | Say which data is personal, how it is scrubbed and kept |
 | `odcl privacy export [--pii-only] [--table T]` | Every column with its privacy fields, as CSV |
@@ -400,6 +401,17 @@ uv run odcl docs warehouse.sales.orders.status_code
 The web page has a page for each document, with its links grouped by section and its text shown as text; nothing in a page runs. Every entry has a "Documented in" panel, and search finds documents. The MCP server has a `documents_for` tool, and `find_data` returns documents. `Catalog.put("document", …)` and `odcl.docs.import_docs` are the Python interface.
 
 **A model version can rely on a document**, such as a finding about how a field behaves. The training manifest lists it under `relied_on` (a document key, or `{"document", "digest" or "revision", "why"}`), or `odcl rely MODEL --version V DOCUMENT… --why TEXT` records it afterwards. Each is pinned at one revision: the one the manifest names or whose content digest it gives, else the one current when the training task ended. When the page is corrected later, `odcl explain model`, the model and document pages and `odcl overview` say which model versions used the old text.
+
+## Foreign keys
+
+A column can say which column its values are drawn from: a `references` link, pinned like every other link. It is not lineage, so it changes neither what a column is built from nor who uses it. A column lists what it references and what references it, and a table lists its foreign keys and the columns of other tables that reference it.
+
+```sh
+uv run odcl references shop.public.orders.customer_id shop.public.customers.id     # no target clears them
+uv run odcl add column shop.public.orders customer_id --references shop.public.customers.id
+```
+
+Importers fill them in: BigQuery's table constraints and Postgres foreign keys. A key to a table that is neither registered nor in the same import is left out and named in the import's result as `unresolved_references`.
 
 ## Copies of one definition
 

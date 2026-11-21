@@ -81,10 +81,13 @@ def table(fqn: str, *, client) -> dict:
     r = client.get_table(ref).to_api_repr()
     name = _ref(r["tableReference"])
     copy = r.get("snapshotDefinition") or r.get("cloneDefinition")
+    keys = (r.get("tableConstraints") or {}).get("foreignKeys") or []
     found = {"fqn": name, "type": r.get("type"), "description": r.get("description"), "location": r.get("location"),
              "partitioning": _partitioning(r), "clustering": ",".join(r["clustering"]["fields"]) if r.get("clustering") else None,
              "base_table": _ref((copy or {}).get("baseTableReference")),
              "base_kind": ("SNAPSHOT" if r.get("snapshotDefinition") else "CLONE") if copy else None,
+             "foreign_keys": [{"name": fk.get("name"), "references": _ref(fk.get("referencedTable")),
+                               "columns": [[c["referencingColumn"], c["referencedColumn"]] for c in fk.get("columnReferences", [])]} for fk in keys] or None,
              "resource": {k: v for k, v in r.items() if k not in ("view", "etag", "selfLink", "id", "kind")}}
     columns = [{"fqn": name, "path": path, "type": f.get("type"), "mode": f.get("mode", "NULLABLE"), "description": f.get("description")}
                for path, f in _flatten((r.get("schema") or {}).get("fields", []))]
