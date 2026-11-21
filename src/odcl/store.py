@@ -808,4 +808,5 @@ class Catalog:
             """SELECT b.project_key, b.version, d.document_key FROM build_documents d JOIN model_builds b ON b.id = d.build_id
                JOIN entries e ON e.key = d.document_key WHERE e.head_revision <> d.document_revision ORDER BY b.project_key, b.version, d.document_key""")]
         info = self.db.info
-        return {"counts": counts, "changed_since_used": stale, "changed_since_described": described, "changed_since_relied_on": relied, "database": f"{info.host}:{info.port}/{info.dbname}"}
+        return {"counts": counts, "changed_since_used": stale, "changed_since_described": described, "changed_since_relied_on": relied,
+                "database": f"{info.host}:{info.port}/{info.dbname}"}
