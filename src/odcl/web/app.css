@@ -69,6 +69,7 @@ a.card.tile:hover { text-decoration: none; border-color: var(--axis); }
 .kind.table { --swatch: var(--table); }
 .kind.column { --swatch: var(--column); }
 .kind.project { --swatch: var(--project); }
+.kind.document { --swatch: var(--muted); }
 
 .status { white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; }
 .status.warning { background: color-mix(in srgb, var(--warning) 22%, transparent); color: var(--ink); }
@@ -128,3 +129,6 @@ pre { white-space: pre-wrap; overflow-wrap: break-word; margin: 0; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 a.console { font-size: 12px; white-space: nowrap; }
 .console-row { margin-top: 10px; }
+.markdown h3, .markdown h4, .markdown h5, .markdown h6 { margin: 16px 0 6px; font-size: 15px; }
+.markdown p { margin: 6px 0; }
+.markdown pre.table-text { margin: 0; border: 0; padding: 0 4px; }
