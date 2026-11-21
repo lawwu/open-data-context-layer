@@ -8,6 +8,10 @@ section says how a release is cut.
 
 ## Unreleased
 
+- **Alerts** (`odcl alerts subscribe|list|remove|send`, `/v1/alerts/…`): a project's people are
+  told by webhook, Slack or email when data the project uses changes after it used it, or is
+  gone from its source, at or above a severity. Each change is sent once per subscription;
+  failed deliveries are retried. Run `odcl migrate` for migration 0012.
 - `odcl diff` (`GET /v1/entries/{key}/diff`, the `what_changed` MCP tool, `Catalog.diff`): what
   changed in a table, with its columns, or a column between two revisions or times, each change
   labelled `cosmetic`, `additive`, `semantic` or `breaking`. What a project uses carries the

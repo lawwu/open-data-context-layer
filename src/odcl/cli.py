@@ -91,6 +91,19 @@ def lines(command: str, result) -> list[str]:
         return [f"{r['key']}" + (f"  [{r['layer']}]" if r.get("layer") else "") + (f"  used by {r['used_by']}" if r.get("used_by") else "")
                 + ("  (retired)" if r.get("retired") else "")
                 + (f"\n    {r['description']}" if r["description"] else "") for r in result] or ["Nothing found."]
+    if command == "alerts" and isinstance(result, list):
+        return [f"{s['id']}  {s['scope']}{' ' + s['target'] if s['target'] else ''}  -> {s['channel']} {s['address']}  ({s['min_severity']} and above, "
+                f"by {s['created_by']})" for s in result] or ["No subscription."]
+    if command == "alerts" and "removed" in result:
+        return [f"removed subscription {result['removed']['id']}"]
+    if command == "alerts" and "id" in result:
+        return [f"subscription {result['id']}: {result['scope']}{' ' + result['target'] if result['target'] else ''} -> {result['channel']} {result['address']}"]
+    if command == "alerts":
+        out = [("Would send" if result["dry_run"] else "Sent") + f" {len(result['sent'])} message(s)" + (f"; {len(result['failed'])} failed" if result["failed"] else "")]
+        for m in result["sent"]:
+            out += [f"  subscription {m['subscription']} ({m['channel']}): {len(m['alerts'])} alert(s)"] + (
+                ["    " + line for line in m["text"].splitlines()] if result["dry_run"] else [])
+        return out + [f"  subscription {m['subscription']} failed: {m['error']}" for m in result["failed"]]
     if command == "diff":
         head = (f"{result['key']}: {result['severity'] or 'no change'}"
                 + (f"  ({result['from']['revision'] if result['from'] else 'not registered'} -> {result['to']['revision']})"))
@@ -294,6 +307,17 @@ def _users(result) -> list[str]:
 
 
 def run(catalog: Catalog, args):
+    if args.command == "alerts":
+        from . import alerts
+        if args.what == "subscribe":
+            channel, address = next((c, getattr(args, c)) for c in alerts.CHANNELS if getattr(args, c))
+            return alerts.subscribe(catalog, project=args.project, owner=args.owner, everything=args.all, channel=channel, address=address,
+                                    min_severity=args.min_severity)
+        if args.what == "list":
+            return alerts.subscriptions(catalog)
+        if args.what == "remove":
+            return alerts.unsubscribe(catalog, args.id)
+        return alerts.send(catalog, dry_run=args.dry_run)
     if args.command == "users":
         from . import users
         if args.what == "list":
@@ -636,6 +660,24 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("project")
     s.add_argument("--upstream", action="store_true", help="also everything that data is built from")
     s.add_argument("--revision", metavar="REV", help="what this older revision of the project had pinned")
+
+    s = sub.add_parser("alerts", help="tell people when data their projects use changes after they used it, or is gone")
+    kinds = s.add_subparsers(dest="what", required=True)
+    a = kinds.add_parser("subscribe", help="send alerts about a project, an owner's projects or every project (editor)")
+    scope = a.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--project")
+    scope.add_argument("--owner", help="every project whose owner is this")
+    scope.add_argument("--all", action="store_true", help="every project")
+    to = a.add_mutually_exclusive_group(required=True)
+    to.add_argument("--webhook", metavar="URL", help="POST each message as JSON to this https:// address")
+    to.add_argument("--slack", metavar="URL", help="a Slack incoming webhook")
+    to.add_argument("--email", metavar="ADDRESS", help="through the SMTP server in $ODCL_SMTP_HOST")
+    a.add_argument("--min-severity", choices=["cosmetic", "additive", "semantic", "breaking"], default="semantic")
+    kinds.add_parser("list", help="subscriptions: your own, or every one for an admin")
+    a = kinds.add_parser("remove", help="remove a subscription (editor)")
+    a.add_argument("id", type=int)
+    a = kinds.add_parser("send", help="send what is new since the last run; run it after imports (importer)")
+    a.add_argument("--dry-run", action="store_true", help="say what would be sent, and send nothing")
 
     s = sub.add_parser("users", help="who may read and write the catalog, and their API tokens")
     kinds = s.add_subparsers(dest="what", required=True)
