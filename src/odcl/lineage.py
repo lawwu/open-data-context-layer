@@ -30,15 +30,28 @@ def selected(sql: str, dialect, schema: dict | None = None) -> list[str]:
     return [name.lower() for name in tree.named_selects if name != "*"]
 
 
-def parse(sql: str, dialect):
-    """The query sqlglot reads from `sql`, or None when it is not one query sqlglot can read."""
+def parse(sql: str, dialect, *, as_keyed: bool = True):
+    """The query sqlglot reads from `sql`, or None when it is not one query sqlglot can read.
+
+    Table names, and the table part of column names, are lower-cased as the catalog keys tables, unless `as_keyed`
+    is False. sqlglot compares BigQuery table names case-sensitively, so `FROM Proj.DS.Orders` would otherwise
+    miss the columns the catalog knows for proj.ds.orders: a `*` would expand to nothing and lineage would stop
+    there."""
     import sqlglot
     from sqlglot import exp
     try:
         tree = sqlglot.parse_one(sql, dialect=dialect)
     except Exception:  # noqa: BLE001 - unreadable SQL is reported by the caller, not raised
         return None
-    return tree if isinstance(tree, exp.Query) else None
+    if not isinstance(tree, exp.Query):
+        return None
+    if as_keyed:
+        for node in tree.find_all(exp.Table, exp.Column):
+            for part in ("catalog", "db", "this") if isinstance(node, exp.Table) else ("catalog", "db", "table"):
+                name = node.args.get(part)
+                if isinstance(name, exp.Identifier):
+                    name.set("this", name.name.lower())
+    return tree
 
 
 def tables(sql: str, dialect) -> list[str]:
@@ -54,7 +67,7 @@ def tables(sql: str, dialect) -> list[str]:
 def as_written(column: str, sql: str, dialect) -> str | None:
     """The expression the outermost SELECT gives `column`, as the query writes it (without qualifying names)."""
     from sqlglot import exp
-    tree = parse(sql, dialect)
+    tree = parse(sql, dialect, as_keyed=False)
     for item in tree.selects if tree is not None else []:
         if item.alias_or_name.lower() == column.lower() and not isinstance(item, exp.Star):
             return (item.this if isinstance(item, exp.Alias) else item).sql(dialect=dialect)
@@ -69,9 +82,11 @@ def column_parents(column: str, sql: str, dialect, schema: dict) -> tuple[str | 
     the table it counts, and reported as not fully traced so the entry says so."""
     from sqlglot import exp
     from sqlglot.lineage import lineage
-    node = lineage(column, sql, schema=schema or None, dialect=dialect)
-    nodes = list(node.walk())
     tree = parse(sql, dialect)
+    if tree is None:
+        raise ValueError("The SQL is not one query sqlglot can read")
+    node = lineage(column, tree.copy(), schema=schema or None, dialect=dialect)
+    nodes = list(node.walk())
     expression = as_written(column, sql, dialect)
     if expression is None:  # a column reached through `*` has no select item of its own
         expression = node.expression.this.sql(dialect=dialect) if isinstance(node.expression, exp.Alias) else node.expression.sql(dialect=dialect)

@@ -2,7 +2,7 @@
 import pytest
 
 pytest.importorskip("sqlglot")
-from odcl.lineage import column_parents  # noqa: E402
+from odcl.lineage import column_parents, selected, tables  # noqa: E402
 
 COUNTED_THROUGH_CTES = """WITH base AS (SELECT orgId, is_train FROM `p.d.shifts`),
 w AS (SELECT *, TRUE AS flag FROM base),
@@ -46,3 +46,14 @@ def test_a_cte_that_reads_no_table_yields_no_relation_rather_than_its_own_name()
 def test_a_cte_defined_inside_a_subquery_is_followed_too():
     sql = """SELECT n FROM (WITH a AS (SELECT region, x FROM `p.d.t`) SELECT region, COUNT(*) AS n FROM a WHERE x > 0 GROUP BY region)"""
     assert column_parents("n", sql, "bigquery", {}) == ("n", [("p.d.t", "region"), ("p.d.t", "x")], False)
+
+
+def test_table_names_in_any_case_match_the_lower_cased_keys_the_catalog_knows():
+    known = {"proj": {"ds": {"orders": {"id": "unknown", "total": "unknown"}}}}
+    for written in ("Proj.DS.Orders", "`Proj.DS.Orders`", "`Proj`.DS.ORDERS"):
+        sql = f"SELECT * FROM {written}"
+        assert tables(sql, "bigquery") == ["proj.ds.orders"]
+        assert selected(sql, "bigquery", known) == ["id", "total"]  # the star expands to the columns the catalog has
+        assert column_parents("total", sql, "bigquery", known)[1:] == ([("proj.ds.orders", "total")], True)
+    through_cte = "WITH x AS (SELECT * FROM Proj.DS.Orders) SELECT Orders.total FROM X JOIN Proj.DS.Orders USING (id)"
+    assert column_parents("total", through_cte, "bigquery", known) == ("Orders.total", [("proj.ds.orders", "total")], True)  # as written
