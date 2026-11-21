@@ -9,6 +9,7 @@ MCP tools answer. It runs on the standard library's threaded HTTP server, with o
     GET  /v1/entries/{key}/diff?since=&until=    what changed, each change labelled cosmetic, additive, semantic or breaking
     GET  /v1/entries/{key}/quality?at=           the newest result of each data-quality test, as of a time
     GET  /v1/glossary?domain=                    every glossary term
+    GET  /v1/popular?since=30d&limit=            the tables most read by query jobs
     GET  /v1/privacy/proposals?table=&all=&min_confidence=   columns that look like personal data, for review
     POST /v1/terms, POST /v1/domains             editor: add or change a term {name, description, synonyms, domain, owner, status} or a domain
     POST /v1/entries/{key}/terms, /domain        editor: {terms: [...]} a table or column means; {domain} of a table, project or term
@@ -63,7 +64,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from . import alerts, pii, quality
+from . import alerts, pii, popularity, quality
 from . import sso as single_sign_on
 from . import users
 from .store import Catalog, CatalogError, require
@@ -132,7 +133,8 @@ ROUTES = [
     ("GET", r"/v1/query-history", "reader", lambda c, m, q, b: c.table_history(q.get("table", ""), _span(q.get("since", "7d")), _flag(q.get("patterns")),
                                                                              _limit(q.get("limit"), 100))),
     ("GET", r"/v1/datasets/(?P<reference>[^/]+)/trace", "reader", lambda c, m, q, b: _explain_dataset(c, m["reference"])),
-    ("GET", r"/v1/tables", "reader", lambda c, m, q, b: c.tables(q.get("layer") or None, q.get("system") or None, retired=_flag(q.get("retired")))),
+    ("GET", r"/v1/tables", "reader", lambda c, m, q, b: c.tables(q.get("layer") or None, q.get("system") or None, retired=_flag(q.get("retired")),
+                                                                     sort=q.get("sort") or "key")),
     ("GET", r"/v1/projects", "reader", lambda c, m, q, b: c.projects()),
     ("GET", r"/v1/privacy", "reader", lambda c, m, q, b: c.privacy(_flag(q.get("pii_only")), q.get("table") or None)),
     ("GET", r"/v1/models", "reader", lambda c, m, q, b: c.models(q.get("project") or None)),
@@ -148,6 +150,7 @@ ROUTES = [
     ("POST", r"/v1/users/(?P<name>[^/]+)", "admin", lambda c, m, q, b: users.update(c, m["name"], **_fields(b, ("role", "disabled")))),
     ("POST", r"/v1/users/(?P<name>[^/]+)/tokens", "admin", lambda c, m, q, b: users.make_token(c, m["name"], _fields(b, ("label",)).get("label"))),
     ("GET", r"/v1/privacy/proposals", "reader", lambda c, m, q, b: pii.propose(c, q.get("table") or None, _flag(q.get("all")), q.get("min_confidence") or "low")),
+    ("GET", r"/v1/popular", "reader", lambda c, m, q, b: popularity.popular(c, _span(q.get("since", "30d")), _limit(q.get("limit"), 50))),
     ("GET", r"/v1/glossary", "reader", lambda c, m, q, b: c.glossary(q.get("domain") or None)),
     ("POST", r"/v1/terms", "editor", lambda c, m, q, b: c.put("term", _fields(b, ("name", "description", "owner", "status", "synonyms", "domain"),
                                                                               ("name", "description")), merge=True)),

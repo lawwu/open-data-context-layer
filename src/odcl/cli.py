@@ -110,6 +110,9 @@ def lines(command: str, result) -> list[str]:
             if result.get("written_to") else [])
     if command == "privacy" and "accepted" in result:
         return [f"{len(result['accepted'])} recorded, {result['skipped']} left as they were"] + [f"  {short(k)}" for k in result["accepted"]]
+    if command == "popular":
+        return [f"{t['table']}  {t['reads']} reads, {t['shapes']} query shapes, last {t['last_read']}" + ("" if t["key"] else "  (not registered)")
+                for t in result["tables"]] or [f"No job read a table in the last {result['since']}. Run odcl sync bigquery-jobs first."]
     if command == "glossary":
         return [f"{t['title']}" + (f"  [{short(t['domain'])}]" if t["domain"] else "") + f"  meant by {t['meant_by']}" + (f"  ({t['status']})" if t["status"] else "")
                 + f"\n    {t['definition']}" + (f"\n    also: {', '.join(t['synonyms'])}" if t["synonyms"] else "") for t in result] or ["No glossary term yet."]
@@ -488,6 +491,9 @@ def run(catalog: Catalog, args):
         return catalog.set_domain(args.key, args.domain)
     if args.command == "glossary":
         return catalog.glossary(args.domain)
+    if args.command == "popular":
+        from .popularity import popular
+        return {"since": args.since, "tables": popular(catalog, span(args.since), args.limit)}
     if args.command == "quality":
         from .quality import for_entry
         return for_entry(catalog, args.key, args.at)
@@ -713,6 +719,10 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("in-domain", help="put a table, project or term in a domain (no domain takes it out)")
     s.add_argument("key")
     s.add_argument("domain", nargs="?")
+
+    s = sub.add_parser("popular", help="the tables most read by query jobs, from the synced job history")
+    s.add_argument("--since", default="30d", help="a span back from now (default: 30d)")
+    s.add_argument("--limit", type=int, default=20)
 
     s = sub.add_parser("glossary", help="every glossary term, with its domain and how many tables and columns mean it")
     s.add_argument("--domain")

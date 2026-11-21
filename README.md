@@ -70,6 +70,7 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 | `odcl diff KEY [--since REV\|TIME] [--until REV\|TIME]` | What changed, and does it break what uses it? |
 | `odcl import --quality FILE.jsonl` or `--dbt-tests TARGET`; `odcl quality KEY [--at TIME]` | Was it passing its tests, now or then? |
 | `odcl term add`, `odcl domain add`, `odcl means`, `odcl in-domain`, `odcl glossary` | What does this column mean in the business's words, and whose is it? |
+| `odcl popular [--since 30d]` | Which tables are actually queried? |
 | `odcl alerts subscribe\|list\|remove\|send` | Tell the people behind a project when data it uses changes or goes |
 | `odcl used-by KEY` | Which projects depend on it? |
 | `odcl uses PROJECT [--upstream] [--revision REV]` | What did this project use, now or at an older revision of it? |
@@ -150,6 +151,19 @@ A job shows that a table was queried. It does not show which fields a model was 
 **SQL.** By default each query is kept only as its shape: comments removed and every literal and parameter replaced by `?`, so two lookups for different employees are one example. The original SQL is not stored. A script, or SQL that cannot be read for certain, is kept without a shape (`template_unavailable`). `--sql none` does not ask BigQuery for SQL at all. Error messages and user emails are never read.
 
 Grouping uses the catalog's own digest of the shape. BigQuery's normalized query hash is only in `INFORMATION_SCHEMA`, which costs a query to read.
+
+### What is used most
+
+From the synced job history, odcl counts how many query jobs read each table (a script and its statements count once) and through how many query shapes:
+
+```sh
+uv run odcl popular --since 30d            # the most read tables, registered or not
+```
+
+- The tables list has a `reads` column (last 30 days) and sorts by it (`sort=reads` over HTTP, "most read first" on the web page).
+- Search lifts a match on a much-read table, or a column of one, a little: by `1 + 0.1·ln(1 + reads)`, enough to order close matches and not to put a poor match on top.
+- A table's page and `get` have `usage`: its reads, query shapes and last read, and the tables most often read by the same jobs ("often read with"), which is how people find what to join it to.
+- The job history does not keep who ran a query, so neither does this. `GET /v1/popular?since=&limit=`.
 
 ## Importing from PostgreSQL
 

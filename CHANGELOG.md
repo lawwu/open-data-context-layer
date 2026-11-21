@@ -8,6 +8,9 @@ section says how a release is cut.
 
 ## Unreleased
 
+- **Popularity** from the synced job history: `odcl popular`, `GET /v1/popular`, a `reads`
+  count (last 30 days) on every table with `sort=reads`, a table's `usage` with the tables most
+  often read with it, and search lifting matches on much-read tables a little.
 - `odcl privacy propose` suggests `pii` and a data category for columns that say nothing yet,
   from their names, glossary terms and descriptions, with a reason and a confidence;
   `--write` puts them in a file to review and `odcl privacy apply` records the accepted ones.

@@ -735,8 +735,14 @@ class Catalog:
         require(isinstance(query, str) and len(query) <= 300, "query", "Search with at most 300 characters")
         words = TOKEN.findall(query.lower())
         if words:
-            rows = self.db.execute("SELECT e.key FROM entries e, to_tsquery('simple', %s) q WHERE e.search @@ q AND (%s::text IS NULL OR e.kind = %s) "
+            rows = self.db.execute("SELECT e.key, ts_rank(e.search, q) AS rank FROM entries e, to_tsquery('simple', %s) q "
+                                   "WHERE e.search @@ q AND (%s::text IS NULL OR e.kind = %s) "
                                    "ORDER BY ts_rank(e.search, q) DESC, e.key LIMIT 2000", (" & ".join(w + ":*" for w in words), kind, kind)).fetchall()
+            from .popularity import boost, reads  # a match on a much-read table (or a column of one) ranks a little higher
+            tables = {r["key"]: (r["key"] if r["key"].startswith("table:") else
+                                 "table:" + r["key"][7:].rsplit(".", 1)[0] if r["key"].startswith("column:") else None) for r in rows}
+            used = reads(self, sorted({t for t in tables.values() if t}))
+            rows = sorted(rows, key=lambda r: (-r["rank"] * boost((used.get(tables[r["key"]]) or {}).get("reads", 0)), r["key"]))
         else:
             rows = self.db.execute("SELECT key FROM entries WHERE (%s::text IS NULL OR kind = %s) ORDER BY key LIMIT 2000", (kind, kind)).fetchall()
         keys = [r["key"] for r in rows]
@@ -780,6 +786,8 @@ class Catalog:
             out["copies"] = self._linked(key, "instance_of", "up")         # what this definition is copied to
             out["copy_of"] = self._linked(key, "instance_of", "down")      # the definitions this table is a copy of
             out["foreign_keys"], out["referenced_by"] = self._foreign_keys(key)
+            from .popularity import read_with, reads
+            out["usage"] = {**reads(self, [key])[key], "window_days": 30, "read_with": read_with(self, key, limit=5)}
         out["terms"] = self._linked(key, "means", "up")
         if out["kind"] in ("table", "column"):
             from .quality import for_entry
@@ -974,9 +982,11 @@ class Catalog:
                                          "WHERE %(key)s::text IS NULL OR b.project_key = %(key)s ORDER BY b.recorded_at DESC, b.id DESC", {"key": key})]
 
     # ---- lists -----------------------------------------------------------------------------------------------
-    def tables(self, layer: str | None = None, system: str | None = None, retired: bool = False) -> list[dict]:
+    def tables(self, layer: str | None = None, system: str | None = None, retired: bool = False, sort: str = "key") -> list[dict]:
         """Every table, by key: its layer and system, how many columns it has, how many projects depend on it, and
-        when it last changed. Retired tables only with `retired`; retired columns are not counted."""
+        when it last changed. Retired tables only with `retired`; retired columns are not counted. Each also says how many
+        query jobs read it in the last 30 days (`reads`), and `sort="reads"` puts the most read first."""
+        require(sort in ("key", "reads"), "sort", "sort is key or reads")
         rows = self.db.execute("""
             SELECT e.key, r.recorded_at, coalesce(c.n, 0) AS columns
             FROM entries e JOIN revisions r ON r.id = e.head_revision
@@ -985,8 +995,11 @@ class Catalog:
             WHERE e.kind = 'table' AND (%(layer)s::text IS NULL OR r.body ->> 'layer' = %(layer)s)
               AND (%(system)s::text IS NULL OR r.body ->> 'system' = %(system)s) AND (%(retired)s OR NOT (r.body ? 'retired'))
             ORDER BY e.key""", {"layer": layer, "system": system, "retired": retired}).fetchall()
-        return [{**summary, "columns": r["columns"], "changed": stamp(r["recorded_at"])}
-                for r, summary in zip(rows, self._summaries([r["key"] for r in rows], users=True), strict=True)]
+        from .popularity import reads
+        used = reads(self, [r["key"] for r in rows])
+        out = [{**summary, "columns": r["columns"], "changed": stamp(r["recorded_at"]), "reads": used[r["key"]]["reads"]}
+               for r, summary in zip(rows, self._summaries([r["key"] for r in rows], users=True), strict=True)]
+        return sorted(out, key=lambda t: (-t["reads"], t["key"])) if sort == "reads" else out
 
     def set_terms(self, name: str, terms: list[str]) -> dict:
         """Say which glossary terms a table or column means, keeping everything else it says. No terms clears them."""
