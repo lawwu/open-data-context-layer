@@ -408,6 +408,12 @@ async function entryPage(key) {
     parts.push(h("h2", {}, "Used by"),
       table(["Project", "How", "Through", "For", ""], entry.used_by.map((u) => [entryLink(u.project), u.how, u.through === entry.key ? "this entry" : entryLink(u.through),
         u.purpose || "", u.changed_since ? changedBadge() : ""]), "No project depends on this."));
+    if (entry.kind === "table" && entry.usage) {
+      const u = entry.usage;
+      parts.push(h("h2", {}, "Usage"), h("p", {}, u.reads ? [`Read by ${plural(u.reads, "query job")}${u.shapes ? ` through ${plural(u.shapes, "query shape")}` : ""} in the last ${u.window_days} days, last `, when(u.last_read), "."]
+          : h("span", { class: "muted" }, `No synced query job read it in the last ${u.window_days} days.`)),
+        u.read_with.length ? [h("h3", {}, "Often read with"), table(["Table", "Jobs that read both"], u.read_with.map((r) => [r.key ? entryLink(r.key, r.table) : r.table, String(r.jobs)]))] : null);
+    }
     if (entry.kind === "table") parts.push(await historySection(entry.key));
   }
   parts.push(documentedIn(entry));
@@ -715,25 +721,27 @@ function select(label, value, options, go) {
 }
 
 async function tablesPage(params) {
-  const layer = params.get("layer") || "", system = params.get("system") || "";
-  const all = await api("/v1/tables");
+  const layer = params.get("layer") || "", system = params.get("system") || "", sort = params.get("sort") || "";
+  const all = await api(`/v1/tables${sort ? `?sort=${enc(sort)}` : ""}`);
   const shown = all.filter((t) => (!layer || t.layer === layer) && (!system || t.system === system));
   const choices = (field) => [["", "all"], ...[...new Set(all.map((t) => t[field]).filter(Boolean))].sort().map((v) => [v, v])];
   const go = (next) => {
-    const q = new URLSearchParams({ layer, system, ...next });
+    const q = new URLSearchParams({ layer, system, sort, ...next });
     for (const [k, v] of [...q]) if (!v) q.delete(k);
     location.hash = `#/tables${q.toString() ? `?${q}` : ""}`;
   };
   render(h("h1", {}, "Tables"),
     h("p", { class: "sub" }, "Every table the importers and people have registered. Find a column by searching, or from its table."),
     h("div", { class: "controls" }, select("Layer", layer, choices("layer"), (v) => go({ layer: v })),
-      select("System", system, choices("system"), (v) => go({ system: v })), h("span", { class: "muted" }, plural(shown.length, "table"))),
+      select("System", system, choices("system"), (v) => go({ system: v })),
+      select("Order", sort, [["", "by name"], ["reads", "most read first"]], (v) => go({ sort: v })), h("span", { class: "muted" }, plural(shown.length, "table"))),
     shown.length ? h("table", {},
-      h("thead", {}, h("tr", {}, ["Table", "Layer", "System", "Columns", "Used by", "Changed"].map((x, i) => h("th", { scope: "col", class: i === 3 || i === 4 ? "num" : null }, x)))),
+      h("thead", {}, h("tr", {}, ["Table", "Layer", "System", "Columns", "Used by", "Reads (30d)", "Changed"].map((x, i) => h("th", { scope: "col", class: i >= 3 && i <= 5 ? "num" : null }, x)))),
       h("tbody", {}, shown.map((t) => h("tr", {},
         h("td", {}, entryLink(t.key, t.title), t.description ? h("div", { class: "muted" }, t.description.length > 140 ? `${t.description.slice(0, 140)}…` : t.description) : null),
         h("td", {}, t.layer || ""), h("td", {}, t.system || ""), h("td", { class: "num" }, String(t.columns)),
-        h("td", { class: "num" }, t.used_by ? plural(t.used_by, "project") : "—"), h("td", {}, when(t.changed))))))
+        h("td", { class: "num" }, t.used_by ? plural(t.used_by, "project") : "—"), h("td", { class: "num" }, t.reads ? t.reads.toLocaleString() : "—"),
+        h("td", {}, when(t.changed))))))
       : h("p", { class: "muted" }, all.length ? "No table matches these filters." : "No table is registered yet."));
 }
 
