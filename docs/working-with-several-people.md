@@ -71,7 +71,7 @@ what revisions record as the actor.
 - **HTTP:** every write needs a signed-in user whose role allows it. A browser session counts for a write only
   when the request comes from the server's own page (its `Origin`), so another site cannot write in a signed-in
   browser's name. Reads are open unless the server runs with `--require-sign-in` or single sign-on, which close
-  them too. OpenLineage events need an importer's token, or the shared `ODCL_LINEAGE_TOKEN`.
+  them too. OpenLineage events need an importer's token, or the shared `ODCL_LINEAGE_TOKEN`, once the first user is made.
 - **MCP:** `odcl mcp --server https://catalog.example.com` with `$ODCL_TOKEN` reads and writes through the HTTP API,
   so a person's assistant needs no database credentials and its writes are that person's. The write tools are
   offered only with `--allow-writes` and only to an editor or above. `odcl mcp` against the database directly

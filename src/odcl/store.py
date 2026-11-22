@@ -178,6 +178,7 @@ class Catalog:
         they may do (see `odcl.users`)."""
         self.actor = (actor or os.environ.get("ODCL_USER") or getpass.getuser())[:200]
         self.user = user
+        self.anonymous = False  # set by the HTTP server for a caller who did not sign in: not a trusted direct connection
         self.db = connect(dsn, autocommit=True)
         from .history import History
         self.history = History(self.db)  # entries, their revisions and what each pinned: see odcl.history
@@ -208,9 +209,11 @@ class Catalog:
     def allow(self, role: str) -> None:
         """Refuse unless the signed-in user's role is at least `role` (reader < editor < importer < admin). A direct
         connection, with no user, may do anything: its database credentials are the gate."""
-        if self.user is None:
-            return
         from .users import ROLES, rank
+        if self.user is None:
+            require(not self.anonymous or rank(role) <= rank("reader"), "unauthorized",
+                    "Sign in: send an API token as Authorization: Bearer TOKEN")
+            return
         require(self.user["role"] in ROLES and rank(self.user["role"]) >= rank(role), "forbidden",
                 f"{self.user['name']} is a{'n' if self.user['role'][0] in 'aeiou' else ''} {self.user['role']}; this needs {role} or above")
 

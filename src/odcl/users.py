@@ -175,15 +175,31 @@ def tokens(catalog, name: str | None = None) -> list[dict]:
 
 def revoke(catalog, token_id: str) -> dict:
     """Stop a token working: your own, or (an admin) anyone's."""
+    if catalog.user is None:
+        catalog.allow("admin")  # a direct connection may; an anonymous caller of the HTTP API may not
     row = catalog.db.execute("SELECT user_name FROM user_tokens WHERE id = %s AND revoked_at IS NULL", (token_id,)).fetchone()
-    require(row, "not_found", f"No current token {token_id}")
-    if not (catalog.user and catalog.user["name"] == row["user_name"]):
-        catalog.allow("admin")
+    admin = catalog.user is None or catalog.user["role"] == "admin"
+    # someone else's token is "not found" to anyone but an admin, so the answer says nothing about whose it is
+    require(row and (admin or row["user_name"] == catalog.user["name"]), "not_found", f"No current token {token_id} of yours")
     catalog.db.execute("UPDATE user_tokens SET revoked_at = now() WHERE id = %s", (token_id,))
     return {"id": token_id, "user": row["user_name"], "revoked": True}
 
 
 # ---- single sign-on --------------------------------------------------------------------------------------------
+def verified_email(who: dict) -> str | None:
+    """The email someone signed in with, only when the provider says it is verified: `email_verified` true, or
+    Microsoft Entra's `xms_edov` (its domain owner verified it). A provider that says nothing is not taken at its word:
+    Entra sends no `email_verified`, and its `email` can be set by users and other tenants."""
+    email = (who.get("email") or "").lower() or None
+    said = lambda v: v is True or (isinstance(v, str) and v.lower() == "true")  # noqa: E731
+    claims = who.get("claims") or {}
+    return email if email and (said(who.get("email_verified")) or said(claims.get("xms_edov"))) else None
+
+
+def any_users(db) -> bool:
+    return db.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None
+
+
 def handle(*candidates: str | None) -> str:
     """A user name from what the provider says: its username, else the email's local part (ann.lee@example.com -> ann.lee)."""
     for value in candidates:
@@ -198,11 +214,11 @@ def sign_in(db, who: dict, role: str) -> dict:
     """The user someone who signed in through single sign-on is: found by the provider's issuer and subject, which
     never change. The first sign-in makes the user with `role` (decided by the caller from the provider's claims);
     later sign-ins never change the role, so a provider's claims changing cannot silently promote anyone. A user an
-    admin made beforehand with the same verified email is taken over."""
+    admin made beforehand with the same email is taken over, only when the provider says that email is verified."""
     with db.transaction():
         row = db.execute("SELECT * FROM users WHERE oidc_issuer = %s AND oidc_subject = %s", (who["issuer"], who["sub"])).fetchone()
         email = (who.get("email") or "").lower() or None
-        verified = email if email and who.get("email_verified") is not False else None
+        verified = verified_email(who)
         if row is None and verified:
             row = db.execute("SELECT * FROM users WHERE email = %s AND oidc_subject IS NULL ORDER BY name LIMIT 1", (verified,)).fetchone()
             if row:
