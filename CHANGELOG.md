@@ -8,6 +8,12 @@ section says how a release is cut.
 
 ## Unreleased
 
+- **One result shape for every import** of tables and columns: `added`, `changed`, `unchanged`,
+  `retired`, `withdrawn`, `unresolved` and `skipped`, always present. This changes three:
+  BigQuery's `unresolved_references` is now `unresolved`; a Dataform import's counts are at the
+  top level (were under `entries`); a PostgreSQL import names keys to schemas not read, and tables
+  a view reads there, in `unresolved` (were in `skipped`). Importers write through
+  `Catalog.importing(importer, scope=…)` (`odcl.imports`).
 - **One operation table** behind the command line, the HTTP API and the MCP tools
   (`odcl.operations`), so every command, route and tool is declared once. New commands for what
   only the API offered: `odcl tables`, `odcl projects`, `odcl models`, `odcl runs` and

@@ -208,5 +208,6 @@ def import_project(catalog, path, select=None) -> dict:
     longer does. With `select`, only part of the project is read, so nothing is retired."""
     entries = dbt_entries(path, select)
     projects = {p["source"].get("project") for _, p in entries if isinstance(p.get("source"), dict) and p["source"].get("tool") == "dbt"}
-    withdraw = None if select else {"importer": "dbt", "scope": lambda said, _: said.get("project") in projects}
-    return {"retired": [], "withdrawn": [], **catalog.apply(entries, withdraw=withdraw)}
+    with catalog.importing("dbt", scope=None if select else {"project": sorted(p for p in projects if p)}, merge=False) as imp:
+        imp.extend(entries)
+    return imp.result

@@ -87,7 +87,9 @@ def import_definitions(catalog: Catalog, path: str, *, repository: str | None = 
     actions = read(path)
     repository = repository or Path(path).name
     found = definition_entries(catalog, repository, actions, importer=IMPORTER, system=system or dialect, dialect=dialect)
-    counts = catalog.apply(found.entries, merge=True, withdraw={"importer": IMPORTER, "scope": lambda said, _: said.get("repository") == repository})
+    with catalog.importing(IMPORTER, scope={"repository": repository}) as imp:
+        imp.extend(found.entries)
+        imp.unresolved(*found.unresolved)
     traced = [status for columns in found.traced.values() for status in columns.values()]
-    return {**counts, "definitions": len(actions), "columns_traced": traced.count("resolved"), "columns_partial": traced.count("partial"),
-            "unresolved": found.unresolved, "untraced": found.unreadable}
+    return {**imp.result, "definitions": len(actions), "columns_traced": traced.count("resolved"), "columns_partial": traced.count("partial"),
+            "untraced": found.unreadable}

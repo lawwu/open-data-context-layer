@@ -43,7 +43,7 @@ def test_tables_views_lineage_and_foreign_keys_are_read_from_the_system_catalog(
     with Catalog(database, actor="ana") as c:
         result = import_database(c, url, schemas=[schema], database="shop")
         assert (result["relations"], result["views_traced"], result["foreign_keys"]) == (5, 3, 2)
-        assert result["skipped"] == [f"foreign key column:shop.{schema}.orders.store_id -> column:shop.{ref}.stores.id: the referenced table was not read"]
+        assert result["unresolved"] == [f"column:shop.{schema}.orders.store_id -> column:shop.{ref}.stores.id"] and result["skipped"] == []  # its table was not read
         t = lambda name: f"shop.{schema}.{name}"
 
         customers = c.get(t("customers"))
@@ -79,7 +79,7 @@ def test_the_command_line_reads_a_database(database, shop, capsys):
     assert main(["--database-url", database, "import", "--postgres", url, "--schema", schema]) == 0
     out = capsys.readouterr().out
     dbname = psycopg.conninfo.conninfo_to_dict(url)["dbname"]
-    assert f"5 relations from {dbname}" in out and "3 views traced, 2 foreign keys" in out and "skipped: foreign key" in out
+    assert f"5 relations from {dbname}" in out and "3 views traced, 2 foreign keys" in out and "not linked, its target is not registered: column:" in out
 
 
 @pytest.fixture
@@ -126,9 +126,9 @@ def test_importing_a_view_over_a_schema_not_read_again_changes_nothing(database,
         first = import_database(c, url, schemas=[s], database="db")
         v = c.get(f"db.{s}.cross_v.v")
         assert [d["key"] for d in v["derived_from"]] == [f"column:db.{other}.x.v"]
-        assert any(f"db.{other}.x: read by a view" in x for x in first["skipped"])
+        assert f"db.{other}.x" in first["unresolved"]  # read by a view, not in the schemas read: registered by name only
         again = import_database(c, url, schemas=[s], database="db")
-        assert (again["added"], again["changed"]) == (0, 0) and again["skipped"] == first["skipped"]
+        assert (again["added"], again["changed"]) == (0, 0) and again["unresolved"] == first["unresolved"]
         assert [d["key"] for d in c.get(f"db.{s}.cross_v.v")["derived_from"]] == [f"column:db.{other}.x.v"]
 
 

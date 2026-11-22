@@ -136,17 +136,6 @@ def _was(change: dict) -> str:
     return f": {before if before not in (None, '') else '(none)'} -> {after if after not in (None, '') else '(none)'}"
 
 
-def _not_linked(result: dict) -> list[str]:
-    """What an import read but could not link or trace, and what it no longer saw, one line each."""
-    return ([f"  not defined or registered, so registered by name only: {t}" for t in result.get("unresolved") or []]
-            + [f"  SQL not traced (sqlglot could not read its columns): {t}" for t in result.get("untraced") or []] + _gone(result))
-
-
-def _gone(result: dict) -> list[str]:
-    return ([f"  retired (no longer there): {k}" for k in result.get("retired") or []]
-            + [f"  withdrawn (another source still says it): {k}" for k in result.get("withdrawn") or []])
-
-
 def _revision(result, params=None) -> list[str]:
     return [f"{result['key']}  {result['change']}  ({result['revision']})"]
 
@@ -437,20 +426,32 @@ def _import_text(result, params):
         checked = ("already recorded, so the artifact was not read again" if result["artifact_verified"] == "recorded"
                    else f"artifact checked by {result['artifact_verified']}")
         return [f"{result['model']} {result['version']}  {result['change']}  ({result['inputs']} input(s), {checked})"]
+    # the importers of tables and columns: each says its own first line, and all say the rest alike
+    counts = f"{result['added']} added, {result['changed']} changed, {result['unchanged']} unchanged"
     if params.get("dataform"):
-        counts = result["entries"]
-        return ([f"{counts['added']} added, {counts['changed']} changed, {counts['unchanged']} unchanged from {result['compilation_result']}"]
-                + (["Definitions not applied: a newer compilation of this repository was imported before"] if result["definitions"] != "applied" else [])
-                + [f"  {a['target']}  {a['state']}" + (f"  job {a['job_id']}" if a["job_id"] else "") for a in result["actions"]]
-                + _not_linked(result) + _gone(counts))
-    if params.get("postgres"):
-        return ([f"{result['relations']} relations from {result['database']}: {result['added']} entries added, {result['changed']} changed, "
-                 f"{result['unchanged']} unchanged; {result['views_traced']} views traced, {result['foreign_keys']} foreign keys"]
-                + [f"  skipped: {s}" for s in result["skipped"]] + _gone(result))
-    if params.get("sql_definitions"):
-        return [f"{result['definitions']} definitions: {result['added']} entries added, {result['changed']} changed, {result['unchanged']} unchanged; "
-                f"{result['columns_traced']} columns traced, {result['columns_partial']} in part"] + _not_linked(result)
-    return [f"{result['added']} added, {result['changed']} changed, {result['unchanged']} unchanged"] + _gone(result)
+        head = [f"{counts} from {result['compilation_result']}"] + (
+            ["Definitions not applied: a newer compilation of this repository was imported before"] if result["definitions"] != "applied" else []) + [
+            f"  {a['target']}  {a['state']}" + (f"  job {a['job_id']}" if a["job_id"] else "") for a in result["actions"]]
+    elif params.get("postgres"):
+        head = [f"{result['relations']} relations from {result['database']}: {result['added']} entries added, {result['changed']} changed, "
+                f"{result['unchanged']} unchanged; {result['views_traced']} views traced, {result['foreign_keys']} foreign keys"]
+    elif params.get("sql_definitions"):
+        head = [f"{result['definitions']} definitions: {result['added']} entries added, {result['changed']} changed, {result['unchanged']} unchanged; "
+                f"{result['columns_traced']} columns traced, {result['columns_partial']} in part"]
+    else:
+        head = [counts]
+    return head + _import_rest(result)
+
+
+def _import_rest(result: dict) -> list[str]:
+    """What every import of tables and columns says after its first line: what it could not link, trace or register,
+    and what is gone from its source."""
+    return ([f"  not linked, its target is not registered: {u}" if " -> " in u else f"  not defined or registered, so registered by name only: {u}"
+             for u in result.get("unresolved") or []]
+            + [f"  SQL not traced (sqlglot could not read its columns): {t}" for t in result.get("untraced") or []]
+            + [f"  skipped: {x}" for x in result.get("skipped") or []]
+            + [f"  retired (no longer there): {k}" for k in result.get("retired") or []]
+            + [f"  withdrawn (another source still says it): {k}" for k in result.get("withdrawn") or []])
 
 
 def _sync_text(result, params):

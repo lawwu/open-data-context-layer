@@ -70,9 +70,9 @@ def _qualified(sql: str, database: str) -> str | None:
     return tree.sql(dialect="postgres")
 
 
-def entries(catalog: Catalog, found: dict, database: str | None = None) -> tuple[list[tuple[str, dict]], list[str], int]:
-    """(kind, payload) entries for what `read` found: relations, columns, view lineage and foreign keys; the names
-    of what was skipped or could not be linked; and how many views were traced.
+def entries(catalog: Catalog, found: dict, database: str | None = None) -> tuple[list[tuple[str, dict]], list[str], list[str], int]:
+    """(kind, payload) entries for what `read` found: relations, columns, view lineage and foreign keys; what was
+    skipped, with why; what could not be linked; and how many views were traced.
 
     Every relation is registered first, then the columns of tables, then each view, after the views it reads, with
     each of its columns in one payload that says both what the catalog read about it and how it is computed."""
@@ -154,7 +154,6 @@ def entries(catalog: Catalog, found: dict, database: str | None = None) -> tuple
                 continue  # a column of a table read, named by a view: registered above
         out.append((kind, payload))
     out += [("column", p) for t in sql for name, p in columns[t].items() if (t, name) not in traced]  # a view column its SQL did not name
-    skipped += [f"{t}: read by a view but not in the schemas read; registered by name only" for t in definitions.unresolved]
     skipped += [f"{t}: its SQL names no columns sqlglot can read, so its lineage is not traced" for t in definitions.unreadable]
 
     keys = [(path(k["schema"], k["name_from"]), a.lower(), f"column:{path(k['to_schema'], k['name_to'])}.{b.lower()}")
@@ -163,15 +162,17 @@ def entries(catalog: Catalog, found: dict, database: str | None = None) -> tuple
     own = [k for k in keys if f"column:{k[0]}.{k[1]}" in registering]  # a key on a column skipped above is skipped with it
     skipped += [f"foreign key column:{t}.{c} -> {target}: its column was skipped" for t, c, target in keys if f"column:{t}.{c}" not in registering]
     references, unresolved = reference_entries(catalog, own, registering)
-    return out + references, skipped + [f"foreign key {u}: the referenced table was not read" for u in unresolved], len(order)
+    # not in the schemas read: tables a view reads (registered by name only), and columns a foreign key points at (not linked)
+    return out + references, skipped, definitions.unresolved + unresolved, len(order)
 
 
 def import_database(catalog: Catalog, dsn: str, *, schemas: list[str] | None = None, database: str | None = None) -> dict:
     """Register a PostgreSQL database's tables, views, columns, view lineage and foreign keys. All of it, or none."""
     found = read(dsn, schemas)
-    made, skipped, traced = entries(catalog, found, database)
+    made, skipped, unresolved, traced = entries(catalog, found, database)
     name = (database or found["database"]).lower()
-    counts = catalog.apply(made, merge=True, withdraw={"importer": "postgres", "scope": lambda said, _: said.get("database") == name
-                                                        and (not schemas or said.get("schema") in schemas)})
-    return {**counts, "database": (database or found["database"]).lower(), "relations": len(found["relations"]), "views_traced": traced,
-            "foreign_keys": len(found["foreign_keys"]), "skipped": skipped}
+    with catalog.importing("postgres", scope={"database": name, "schema": schemas or None}) as imp:
+        imp.extend(made)
+        imp.unresolved(*unresolved)
+        imp.skip(*skipped)
+    return {**imp.result, "database": name, "relations": len(found["relations"]), "views_traced": traced, "foreign_keys": len(found["foreign_keys"])}
