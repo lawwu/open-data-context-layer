@@ -109,7 +109,8 @@ def _store_job(db, record: dict, shape: str | None, capture: bool) -> bool:
         pattern = db.execute("INSERT INTO query_patterns (scope, template_digest, template) VALUES (%s, %s, %s) "
                              "ON CONFLICT (scope, template_digest) DO UPDATE SET template = excluded.template RETURNING id",
                              (record["project"], hashlib.sha256(shape.encode()).hexdigest(), shape)).fetchone()["id"]
-    kept = db.execute("""
+    done = runs.finished_sql("bigquery")
+    kept = db.execute(f"""
         INSERT INTO query_jobs (execution_project, location, job_id, parent_job_id, created_at, started_at, ended_at, state, statement_type,
                                 error_reason, cache_hit, processed_bytes, billed_bytes, slot_ms, pattern_id, gaps)
         VALUES (%(project)s, %(location)s, %(job_id)s, %(parent_job_id)s, %(created)s, %(started)s, %(ended)s, %(state)s, %(statement_type)s,
@@ -119,7 +120,7 @@ def _store_job(db, record: dict, shape: str | None, capture: bool) -> bool:
           statement_type = excluded.statement_type, error_reason = excluded.error_reason, cache_hit = excluded.cache_hit,
           processed_bytes = excluded.processed_bytes, billed_bytes = excluded.billed_bytes, slot_ms = excluded.slot_ms,
           pattern_id = COALESCE(excluded.pattern_id, query_jobs.pattern_id), gaps = excluded.gaps, observed_at = now()
-        WHERE query_jobs.state <> 'DONE' OR excluded.state = 'DONE'
+        WHERE query_jobs.state NOT IN {done} OR excluded.state IN {done}
         RETURNING (xmax = 0) AS added""", record | {"pattern": pattern, "gaps": gaps}).fetchone()
     if kept is None:
         return False
@@ -160,7 +161,8 @@ def sync_jobs(catalog: Catalog, project: str, *, client, since: datetime | None 
     cursor = None if explicit else db.execute("SELECT completed_until FROM sync_cursors WHERE source = %s AND execution_project = %s AND location = %s",
                         (SOURCE, project, EVERYWHERE)).fetchone()
     if cursor:
-        unfinished = db.execute("SELECT min(created_at) AS oldest FROM query_jobs WHERE execution_project = %s AND state <> 'DONE'", (project,)).fetchone()["oldest"]
+        unfinished = db.execute(f"SELECT min(created_at) AS oldest FROM query_jobs WHERE execution_project = %s AND state NOT IN {runs.finished_sql('bigquery')}",
+                                (project,)).fetchone()["oldest"]
         since = min(cursor["completed_until"] - overlap, unfinished or until)
     elif not explicit:
         since = until - backfill

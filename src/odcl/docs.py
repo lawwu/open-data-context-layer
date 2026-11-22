@@ -41,6 +41,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 
 from .dbt import code_ref, web_url
+from .history import retired_sql
 from .store import DESCRIBED, Catalog, CatalogError, require
 
 FENCE = re.compile(r"^\s{0,3}(```|~~~)")
@@ -209,9 +210,9 @@ def import_docs(catalog: Catalog, paths: list[str], *, repo_url: str | None = No
                 inside = file.resolve().relative_to(named_by.resolve()).as_posix()
                 scopes.add((page["repository"], page["path"].removesuffix(inside)))
         for repository, prefix in scopes:
-            for r in catalog.db.execute("""SELECT r.body FROM entries e JOIN revisions r ON r.id = e.head_revision
+            for r in catalog.db.execute(f"""SELECT r.body FROM entries e JOIN revisions r ON r.id = e.head_revision
                                            WHERE e.kind = 'document' AND r.body ->> 'repository' = %s AND (r.body ->> 'path') LIKE %s
-                                             AND NOT COALESCE((r.body ->> 'retired')::boolean, false)""",
+                                             AND NOT {retired_sql()}""",
                                         (repository, prefix.replace("%", r"\%").replace("_", r"\_") + "%")).fetchall():
                 body = r["body"]
                 if body["key"] not in seen:

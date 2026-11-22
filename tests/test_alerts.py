@@ -88,6 +88,43 @@ def test_a_failed_delivery_is_tried_again_and_a_dry_run_sends_nothing(catalog, h
     assert len(alerts.send(catalog)["sent"]) == 1 and len(got) == 1
 
 
+def test_a_delivery_that_keeps_failing_waits_longer_says_so_and_recovers(catalog, hook, database, capsys):
+    url, got, state = hook
+    made = alerts.subscribe(catalog, everything=True, channel="webhook", address=url)
+    assert alerts.subscriptions(catalog)[0]["delivery"] == {"status": "ok"}
+    catalog.put("column", {"table": "core.sales.daily_totals", "name": "amount", "dtype": "FLOAT64"})
+    state["failing"] = True
+    for _ in range(alerts.RETRY_EVERY_RUN):  # the first tries are made on every run
+        assert len(alerts.send(catalog)["failed"]) == 1
+    delivery = alerts.subscriptions(catalog)[0]["delivery"]
+    assert delivery["status"] == "failing" and delivery["attempts"] == alerts.RETRY_EVERY_RUN and "500" in delivery["last_error"]
+    assert delivery["next_attempt"] is not None  # then it waits an hour
+
+    waited = alerts.send(catalog)
+    assert waited["failed"] == [] and waited["deferred"][0]["subscription"] == made["id"] and waited["deferred"][0]["next_attempt"] == delivery["next_attempt"]
+    assert main(["--database-url", database, "alerts", "list"]) == 0 and "FAILING since" in capsys.readouterr().out
+
+    catalog.db.execute("UPDATE alert_deliveries SET attempted_at = attempted_at - interval '61 minutes'")
+    assert len(alerts.send(catalog)["failed"]) == 1  # tried after the hour, and now waits two
+    assert alerts.subscriptions(catalog)[0]["delivery"]["attempts"] == alerts.RETRY_EVERY_RUN + 1
+    assert alerts.send(catalog)["deferred"]
+    catalog.db.execute("UPDATE alert_deliveries SET attempted_at = attempted_at - interval '121 minutes'")
+    state["failing"] = False
+    assert len(alerts.send(catalog)["sent"]) == 1 and len(got) == 1
+    assert alerts.subscriptions(catalog)[0]["delivery"] == {"status": "ok"}
+
+
+def test_what_was_owed_about_something_no_longer_there_is_dropped(catalog, hook):
+    url, got, state = hook
+    alerts.subscribe(catalog, project="forecast", channel="webhook", address=url)
+    catalog.put("column", {"table": "core.sales.daily_totals", "name": "amount", "dtype": "FLOAT64"})
+    state["failing"] = True
+    assert alerts.send(catalog)["failed"]
+    catalog.use("forecast", ["core.sales.daily_totals.amount"])  # the project has seen the change: nothing left to tell
+    assert alerts.send(catalog) == {"sent": [], "failed": [], "deferred": [], "dry_run": False}
+    assert alerts.subscriptions(catalog)[0]["delivery"] == {"status": "ok"}
+
+
 def test_subscriptions_are_checked_masked_and_kept_to_their_owner(catalog, database, capsys):
     with pytest.raises(CatalogError, match="https"):
         alerts.subscribe(catalog, everything=True, channel="slack", address="http://hooks.example.com/services/T/B/secret")

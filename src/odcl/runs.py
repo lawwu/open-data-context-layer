@@ -52,7 +52,11 @@ def finished_states(system: str) -> tuple[str, ...]:
     return tuple(sorted(s for s, o in STATES[system].items() if o in FINISHED))
 
 
+def finished_sql(system: str) -> str:
+    """The finished states as a SQL list, such as ('DONE'), for `state IN` / `state NOT IN`."""
+    return "(" + ", ".join(f"'{s}'" for s in finished_states(system)) + ")"  # constants from STATES, never input
+
+
 def hold_finished(system: str) -> str:
     """The SET expression for `executions.state` in an upsert: a run already finished keeps its state."""
-    names = ", ".join(f"'{s}'" for s in finished_states(system))  # constants from STATES, never input
-    return f"CASE WHEN executions.state IN ({names}) THEN executions.state ELSE excluded.state END"
+    return f"CASE WHEN executions.state IN {finished_sql(system)} THEN executions.state ELSE excluded.state END"

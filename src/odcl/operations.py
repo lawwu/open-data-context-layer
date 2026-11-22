@@ -521,12 +521,21 @@ def _alerts_send_text(result, params):
     for m in result["sent"]:
         out += [f"  subscription {m['subscription']} ({m['channel']}): {len(m['alerts'])} alert(s)"] + (
             ["    " + line for line in m["text"].splitlines()] if result["dry_run"] else [])
-    return out + [f"  subscription {m['subscription']} failed: {m['error']}" for m in result["failed"]]
+    return (out + [f"  subscription {m['subscription']} failed: {m['error']}" for m in result["failed"]]
+            + [f"  subscription {m['subscription']} waits until {m['next_attempt']} after {m['attempts']} failed tries: {m['last_error']}"
+               for m in result.get("deferred") or []])
+
+
+def _delivery_text(delivery: dict | None) -> str:
+    if not delivery or delivery["status"] == "ok":
+        return ""
+    when = f"next try {delivery['next_attempt']}" if delivery["next_attempt"] else "tried again next run"
+    return f"\n    FAILING since {delivery['since']}, {delivery['attempts']} tries, {when}: {delivery['last_error']}"
 
 
 def _subscriptions_text(result, params):
     return [f"{s['id']}  {s['scope']}{' ' + s['target'] if s['target'] else ''}  -> {s['channel']} {s['address']}  ({s['min_severity']} and above, "
-            f"by {s['created_by']})" for s in result] or ["No subscription."]
+            f"by {s['created_by']})" + _delivery_text(s.get("delivery")) for s in result] or ["No subscription."]
 
 
 def _token_text(result, params):
