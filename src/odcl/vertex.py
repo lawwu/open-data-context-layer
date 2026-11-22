@@ -211,7 +211,7 @@ def import_build(catalog: Catalog, manifest: dict, *, client) -> dict:
         if existing:
             require(existing["manifest_sha256"] == said, "conflict", f"{model} {version} is already recorded from a different manifest; a version is built once")
             return {"model": model, "version": version, "change": "unchanged", "inputs": len(manifest["inputs"]), "artifact_verified": verified}
-        if not catalog._head(project):
+        if not catalog.history.head(project):
             catalog.put("project", {"name": model, "description": f"Model {model}, trained in Vertex AI Pipelines",
                                     "source": {"vertex": {"created_by": "the import of its first model version"}}})
         producer = record_task(db, job, task, manifest["pipeline_run"], manifest["task"])
@@ -237,22 +237,18 @@ def _pin_document(catalog: Catalog, item, trained_at: datetime | None) -> dict:
     require(isinstance(item, dict) and item.get("document"), "relied_on", "relied_on is a list of documents, each a key or {document, revision, digest, why}")
     key = catalog.resolve(str(item["document"]), ("document",))
     why = str(item["why"]).strip()[:500] if item.get("why") else None
-    db = catalog.db
     if item.get("revision"):
-        found = db.execute("SELECT id FROM revisions WHERE entry_key = %s AND id = %s", (key, item["revision"])).fetchone()
-        require(found, "relied_on", f"{key} has no revision {item['revision']}")
-        return {"key": key, "revision": found["id"], "pinned_by": "revision", "why": why}
+        require(isinstance(item["revision"], str) and catalog.history.revision(item["revision"], key), "relied_on", f"{key} has no revision {item['revision']}")
+        return {"key": key, "revision": item["revision"], "pinned_by": "revision", "why": why}
     if item.get("digest"):
-        found = db.execute("SELECT id FROM revisions WHERE entry_key = %s AND body ->> 'digest' = %s ORDER BY recorded_at DESC, seq DESC LIMIT 1",
-                           (key, item["digest"])).fetchone()
+        found = catalog.history.revision_with(key, "digest", str(item["digest"]))
         require(found, "relied_on", f"No revision of {key} has the content digest {item['digest']}: import the page as it was read")
-        return {"key": key, "revision": found["id"], "pinned_by": "digest", "why": why}
+        return {"key": key, "revision": found, "pinned_by": "digest", "why": why}
     if trained_at:
-        found = db.execute("SELECT id FROM revisions WHERE entry_key = %s AND recorded_at <= %s ORDER BY recorded_at DESC, seq DESC LIMIT 1",
-                           (key, trained_at)).fetchone()
+        found = catalog.history.revision_at(key, trained_at)
         if found:
-            return {"key": key, "revision": found["id"], "pinned_by": "at_training", "why": why}
-    return {"key": key, "revision": catalog._head(key)["id"], "pinned_by": "current", "why": why}
+            return {"key": key, "revision": found, "pinned_by": "at_training", "why": why}
+    return {"key": key, "revision": catalog.history.head(key), "pinned_by": "current", "why": why}
 
 
 def _record_relied_on(catalog: Catalog, build: int, pins: list[dict]) -> None:
@@ -360,7 +356,7 @@ def _quality_at(catalog: Catalog, row: dict, inputs: list[dict] | None = None) -
             if not isinstance(c, str) or not c:
                 continue
             c = c if c.startswith("column:") else f"column:{c}"  # traces name columns by path
-            head = catalog._head(c)
+            head = catalog.history.entry(c)
             if head:
                 keys |= {c, head["body"]["table"]}
     at = row.get("trained_at") or row["recorded_at"]

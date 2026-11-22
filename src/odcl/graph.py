@@ -21,7 +21,7 @@ def graph(catalog: Catalog, name: str, direction: str = "both", depth: int | Non
     require(level in ("column", "table"), "level", "level is column or table")
     focus = catalog.resolve(name, ("table", "column"))
     # a table's lineage at table level is also its columns': a dbt or SQL import often links only the columns
-    starts = [focus, *catalog._columns(focus, retired=False)] if level == "table" and focus.startswith("table:") else [focus]
+    starts = [focus, *(r["entry_key"] for r in catalog.history.columns(focus, retired=False))] if level == "table" and focus.startswith("table:") else [focus]
     place: dict[str, tuple[int, int]] = {k: (0, 0) for k in starts}  # key -> (side, depth)
     edges: dict[tuple[str, str], dict] = {}
     for walk, side in (("up", -1), ("down", 1)):
@@ -60,7 +60,7 @@ def graph(catalog: Catalog, name: str, direction: str = "both", depth: int | Non
             edges[(r["target_key"], r["source_key"])] = {"kind": "uses", "changed_since": r["changed"]}
 
     if level == "table":
-        heads = catalog._heads(list(place))
+        heads = catalog.history.entries(place)
         table_of = {k: (heads[k]["body"]["table"] if heads[k]["body"]["kind"] == "column" else k) for k in place}
         folded: dict[str, tuple[int, int]] = {}
         for k, (side, d) in place.items():

@@ -101,11 +101,7 @@ class Definitions:
         """A table's columns, for sqlglot to qualify a query by and expand `*` to. A column an importer registered only
         because a query named it (marked `named_by_query` in its source, and said by nothing else) does not count: the
         next import would qualify against that partial list and lose what the first one traced."""
-        known = {r["name"] for r in self.catalog.db.execute(
-            """SELECT r.body ->> 'name' AS name, r.body -> 'source' AS source FROM entries e JOIN revisions r ON r.id = e.head_revision
-               WHERE e.kind = 'column' AND r.body ->> 'kind' = 'column' AND r.body ->> 'table' = %s
-                 AND NOT (r.body ? 'retired')""", (f"table:{table}",))
-                 if not named_only(r)}
+        known = {r["body"]["name"] for r in self.catalog.history.columns(f"table:{table}", retired=False) if not named_only(r["body"])}
         return {c for c in known | self.columns.get(table, set()) if "." not in c}
 
     def table(self, table: str, payload: dict | None = None) -> None:
@@ -113,7 +109,7 @@ class Definitions:
             self.entries.append(("table", {"path": table, "system": self.system, **payload}))
             self.by_name.discard(table)
         elif table not in self.tables:
-            head = self.catalog._head(f"table:{table}")
+            head = self.catalog.history.entry(f"table:{table}")
             if not head:
                 self.entries.append(("table", {"path": table, "system": self.system, "source": {self.importer: {"named_by_query": True}}}))
             if not head or named_only(head["body"]):
@@ -123,7 +119,7 @@ class Definitions:
     def column(self, table: str, name: str, payload: dict | None = None) -> str:
         self.table(table)
         key = f"column:{table}.{name}"
-        if payload is not None or (name not in self.columns.get(table, set()) and not self.catalog._head(key)):
+        if payload is not None or (name not in self.columns.get(table, set()) and not self.catalog.history.head(key)):
             self.entries.append(("column", {"table": f"table:{table}", "name": name,
                                             **(payload or {"source": {self.importer: {"named_by_query": True}}})}))
         self.columns.setdefault(table, set()).add(name)
@@ -268,10 +264,10 @@ def import_invocation(catalog: Catalog, name: str, *, client) -> dict:
             if not target:
                 continue
             timing, job = action.get("invocationTiming") or {}, (action.get("bigqueryAction") or {}).get("jobId")
-            pinned, head = {}, catalog._head(f"table:{target}") if current and target in definitions.traced else None
+            pinned, head = {}, catalog.history.head(f"table:{target}") if current and target in definitions.traced else None
             if head:
-                pinned = {"definition_revision": head["id"], "columns": {
-                    column: {"key": f"column:{target}.{column}", "revision": catalog._head(f"column:{target}.{column}")["id"], "lineage": status}
+                pinned = {"definition_revision": head, "columns": {
+                    column: {"key": f"column:{target}.{column}", "revision": catalog.history.head(f"column:{target}.{column}"), "lineage": status}
                     for column, status in definitions.traced[target].items()}}
             _execution(db, {
                 "native_key": f"{name}/actions/{target}", "kind": "action", "parent_id": parent, "definition_revision": pinned.get("definition_revision"),

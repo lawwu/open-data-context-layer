@@ -95,21 +95,20 @@ def find(client, pipeline_run: str, task: dict, source_uri: str) -> str:
     return matches[0]
 
 
-def _pin(db, key: str, before: datetime) -> tuple[str, str] | None:
+def _pin(history, key: str, before: datetime) -> tuple[str, str] | None:
     """The revision of `key` recorded most recently before `before`, else the current one; and which it is."""
-    row = db.execute("SELECT id FROM revisions WHERE entry_key = %s AND recorded_at <= %s ORDER BY recorded_at DESC, seq DESC LIMIT 1",
-                     (key, before)).fetchone()
-    if row:
-        return row["id"], "before_export"
-    head = db.execute("SELECT head_revision FROM entries WHERE key = %s", (key,)).fetchone()
-    return (head["head_revision"], "at_binding") if head else None
+    then = history.revision_at(key, before)
+    if then:
+        return then, "before_export"
+    head = history.head(key)
+    return (head, "at_binding") if head else None
 
 
 def _schema(catalog: Catalog, tables: list[str]) -> dict:
     """The catalog's columns of each source table, nested as sqlglot reads a schema."""
     schema: dict = {}
     for table in tables:
-        columns = [k.removeprefix(f"column:{table}.") for k in catalog._columns(f"table:{table}")]
+        columns = [r["body"]["name"] for r in catalog.history.columns(f"table:{table}")]
         if not columns:
             continue
         level = schema
@@ -145,7 +144,7 @@ def evaluate(catalog: Catalog, client, refs: list[str], source_uri: str, objects
     """Check the export jobs against the file set and trace each field through their SELECT. Nothing is written:
     the result is passed to `store`."""
     require(sql in ("templates", "none"), "sql", "sql is templates (keep the job's SQL as its shape) or none")
-    db, jobs, traced, filters = catalog.db, [], {}, {}
+    jobs, traced, filters = [], {}, {}
     first_created = min((_time(o["created"]) for o in objects if o.get("created")), default=None)
     for ref in dict.fromkeys(refs):
         project, location, job_id = job_ref(ref)
@@ -164,7 +163,8 @@ def evaluate(catalog: Catalog, client, refs: list[str], source_uri: str, objects
                 f"{ref} was created at {created.isoformat() if created else '?'}, after the files ({first_created.isoformat()}); it cannot have written them")
         export = (stats.get("query") or {}).get("exportDataStatistics") or {}
         sources = lineage.tables(select, DIALECT)
-        absent = [t for t in sources if not catalog._head(f"table:{t}")]
+        absent = sorted({f"table:{t}" for t in sources} - catalog.history.known(f"table:{t}" for t in sources))
+        absent = [t.removeprefix("table:") for t in absent]
         require(not absent, "missing_dependency", f"{ref} reads {', '.join(absent)}, which the catalog does not have. "
                                                   "Register it (odcl import --bigquery …), then bind again")
         schema = _schema(catalog, sources)
@@ -178,7 +178,7 @@ def evaluate(catalog: Catalog, client, refs: list[str], source_uri: str, objects
                 expression, parents, complete = lineage.as_written(field, select, DIALECT), [], False
             pins = {}
             for table, column in parents:
-                pin = _pin(db, f"column:{table}.{column}", created)
+                pin = _pin(catalog.history, f"column:{table}.{column}", created)
                 if pin:
                     pins[f"column:{table}.{column}"] = pin
                 else:
@@ -190,7 +190,7 @@ def evaluate(catalog: Catalog, client, refs: list[str], source_uri: str, objects
                 seen.update(sources={**seen["sources"], **pins}, complete=False)
         pairs, written = _filters(select, schema, sources)
         for table, column in pairs:
-            pin = _pin(db, f"column:{table}.{column}", created)
+            pin = _pin(catalog.history, f"column:{table}.{column}", created)
             if pin:
                 filters[f"column:{table}.{column}"] = pin
         shape = lineage.template(written and f"SELECT 1 FROM t WHERE {written}", DIALECT) if sql == "templates" else None

@@ -146,9 +146,8 @@ def explain_dataset(catalog: Catalog, reference: str) -> dict:
 
     columns = []
     for row in db.execute("SELECT * FROM version_columns WHERE dataset_version_id = %s ORDER BY field_path", (version["id"],)).fetchall():
-        body = db.execute("SELECT body FROM revisions WHERE id = %s", (row["column_revision"],)).fetchone()["body"]
-        inputs = db.execute("""SELECT l.target_key, l.target_revision, e.head_revision FROM revision_links l JOIN entries e ON e.key = l.target_key
-                               WHERE l.source_revision = %s AND l.relation = 'derived_from' ORDER BY l.target_key""", (row["column_revision"],)).fetchall()
+        body = catalog.history.revision(row["column_revision"])["body"]
+        inputs = catalog.history.links(row["column_revision"], "derived_from")
         columns.append({"field": row["field_path"], "column": row["column_key"].removeprefix("column:"), "revision": row["column_revision"],
                         "expression": body.get("definition"), "lineage": row["lineage_status"],
                         "derived_from": [{"column": i["target_key"].removeprefix("column:"), "revision": i["target_revision"],

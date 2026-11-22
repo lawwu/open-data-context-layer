@@ -160,7 +160,7 @@ def read_page(catalog: Catalog, file: Path, named_by: Path, repo_url: str | None
     repository = _repository(url_base, root.name if ref else base.resolve().name)
     marks = headings(body)
     anchors = {h["anchor"] for h in marks}
-    keys = [r["key"] for r in catalog.db.execute("SELECT key FROM entries WHERE kind = ANY(%s) ORDER BY key", (list(DESCRIBED),))]
+    keys = catalog.history.keys(DESCRIBED)
     known = set(keys)
     describes, patterns, unresolved = [], [], []
     for item in block.get("describes") or []:

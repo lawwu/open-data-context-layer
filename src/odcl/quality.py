@@ -58,13 +58,12 @@ def record(catalog: Catalog, results: list[dict], source: str) -> dict:
                      when, str(r.get("run") or when.isoformat())[:300]))
     with db.transaction():
         for key, test, kind, status, failures, message, when, run in rows:
-            pinned = db.execute("""SELECT id FROM revisions WHERE entry_key = %s AND recorded_at <= %s ORDER BY seq DESC LIMIT 1""", (key, when)).fetchone() \
-                or db.execute("SELECT head_revision AS id FROM entries WHERE key = %s", (key,)).fetchone()
+            pinned = catalog.history.revision_at(key, when) or catalog.history.head(key)
             inserted = db.execute("""INSERT INTO quality_results (entry_key, entry_revision, source, run, test, test_kind, status, failures, message,
                                                                   observed_at, recorded_by)
                                      VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (source, run, test, entry_key) DO NOTHING
                                      RETURNING id""",
-                                  (key, pinned["id"], source, run, test, kind and str(kind)[:100], status, failures, message, when, catalog.actor)).fetchone()
+                                  (key, pinned, source, run, test, kind and str(kind)[:100], status, failures, message, when, catalog.actor)).fetchone()
             added, kept = added + bool(inserted), kept + (not inserted)
     return {"added": added, "unchanged": kept, "unresolved": sorted(set(unresolved))}
 
@@ -131,7 +130,7 @@ def for_entry(catalog: Catalog, name: str, at=None) -> dict:
     if isinstance(at, str):
         from .times import moment
         at = moment(at, "at")
-    keys = [key, *catalog._columns(key)] if key.startswith("table:") else [key]
+    keys = [key, *(r["entry_key"] for r in catalog.history.columns(key))] if key.startswith("table:") else [key]
     found = latest(catalog, keys, at)
     return {"key": key, "at": stamp(at) if at else None, "results": found,
             "failing": [r for r in found if r["status"] in BAD], "status": _status(found)}

@@ -58,7 +58,7 @@ def read_with(catalog: Catalog, table: str, since=WINDOW, limit: int = 10) -> li
         FROM r mine JOIN r o ON o.execution_project = mine.execution_project AND o.job = mine.job AND o.path <> mine.path
         WHERE mine.path = %(path)s GROUP BY o.path ORDER BY together DESC, o.path LIMIT %(limit)s""",
                               {"since": _since(since), "path": path.lower(), "limit": limit}).fetchall()
-    known = {r["key"] for r in catalog.db.execute("SELECT key FROM entries WHERE key = ANY(%s)", ([f"table:{r['path']}" for r in rows],))}
+    known = catalog.history.known(f"table:{r['path']}" for r in rows)
     return [{"table": r["path"], "key": f"table:{r['path']}" if f"table:{r['path']}" in known else None, "jobs": r["together"]} for r in rows]
 
 
@@ -68,6 +68,6 @@ def popular(catalog: Catalog, since=WINDOW, limit: int = 50) -> list[dict]:
     rows = catalog.db.execute(f"""
         SELECT path, count(DISTINCT (execution_project, job)) AS reads, count(DISTINCT pattern_id) AS shapes, max(created_at) AS last
         FROM ({READS}) r GROUP BY path ORDER BY reads DESC, path LIMIT %(limit)s""", {"since": _since(since), "limit": limit}).fetchall()
-    known = {r["key"] for r in catalog.db.execute("SELECT key FROM entries WHERE key = ANY(%s)", ([f"table:{r['path']}" for r in rows],))}
+    known = catalog.history.known(f"table:{r['path']}" for r in rows)
     return [{"table": r["path"], "key": f"table:{r['path']}" if f"table:{r['path']}" in known else None, "reads": r["reads"], "shapes": r["shapes"],
              "last_read": stamp(r["last"])} for r in rows]

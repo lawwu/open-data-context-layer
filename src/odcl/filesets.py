@@ -112,7 +112,7 @@ def record(catalog: Catalog, *, client, pipeline_run: str | None = None, task: s
     table = revision = None
     if from_table:
         table = catalog.resolve(from_table, ("table",))
-        revision = catalog._head(table)["id"]
+        revision = catalog.history.head(table)
 
     db = catalog.db
     with db.transaction():
@@ -166,9 +166,9 @@ def explain(catalog: Catalog, version: dict) -> dict:
     task = db.execute("SELECT * FROM executions WHERE id = %s", (version["producer_execution"],)).fetchone() if version["producer_execution"] else None
     exported = None
     if version["table_key"]:
-        head = db.execute("SELECT head_revision FROM entries WHERE key = %s", (version["table_key"],)).fetchone()
+        head = catalog.history.head(version["table_key"])
         exported = {"table": version["table_key"].removeprefix("table:"), "revision": version["table_revision"],
-                    "changed_since": bool(head and head["head_revision"] != version["table_revision"])}
+                    "changed_since": bool(head and head != version["table_revision"])}
     said = version["verification"].get("schema", "read")
     from .exports import name
     jobs = db.execute("SELECT * FROM dataset_version_exports WHERE dataset_version_id = %s ORDER BY created_at, job_id", (version["id"],)).fetchall()
