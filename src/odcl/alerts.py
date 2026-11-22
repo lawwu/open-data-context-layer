@@ -82,19 +82,6 @@ def unsubscribe(catalog: Catalog, subscription: int) -> dict:
     return {"removed": _masked(row)}
 
 
-def _state(db, key: str) -> str:
-    """An entry's newest revision, or for a table the newest of it and its columns: what an alert is about."""
-    return db.execute("""SELECT id FROM revisions WHERE entry_key = %s OR (body ->> 'kind' = 'column' AND body ->> 'table' = %s)
-                         ORDER BY seq DESC LIMIT 1""", (key, key)).fetchone()["id"]
-
-
-def _use_point(db, project: str, key: str, revision: str) -> str:
-    row = db.execute("""SELECT r.id FROM revision_links l JOIN revisions r ON r.id = l.source_revision
-                        WHERE r.entry_key = %s AND l.relation = 'uses' AND l.target_key = %s AND l.target_revision = %s
-                        ORDER BY r.seq LIMIT 1""", (project, key, revision)).fetchone()
-    return row["id"] if row else revision
-
-
 def findings(catalog: Catalog) -> list[dict]:
     """Every entry a project uses that changed after the use or is retired, with what changed and how much."""
     db, out = catalog.db, []
@@ -107,7 +94,7 @@ def findings(catalog: Catalog) -> list[dict]:
             found = {"kind": "retired", "severity": "breaking", "changes": []}
         elif r["target_revision"] != r["head_revision"] or r["kind"] == "table":
             try:
-                d = diff(catalog, r["key"], since=_use_point(db, r["project"], r["key"], r["target_revision"]))
+                d = diff(catalog, r["key"], since=catalog.history.link_started(r["project"], "uses", r["key"], r["target_revision"]) or r["target_revision"])
             except CatalogError:
                 continue
             if not d["severity"]:
@@ -115,7 +102,7 @@ def findings(catalog: Catalog) -> list[dict]:
             found = {"kind": "changed", "severity": d["severity"], "changes": d["changes"]}
         else:
             continue
-        out.append({"project": r["project"], "owner": r["owner"], "key": r["key"], "state": _state(db, r["key"]), **found})
+        out.append({"project": r["project"], "owner": r["owner"], "key": r["key"], "state": catalog.history.newest_touching(r["key"]), **found})
     return out
 
 

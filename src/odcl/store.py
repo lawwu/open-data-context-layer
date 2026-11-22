@@ -179,6 +179,8 @@ class Catalog:
         self.actor = (actor or os.environ.get("ODCL_USER") or getpass.getuser())[:200]
         self.user = user
         self.db = connect(dsn, autocommit=True)
+        from .history import History
+        self.history = History(self.db)  # entries, their revisions and what each pinned: see odcl.history
         self._importing = 0     # > 0 inside apply(), which holds every entry lock
         self._new_tables = None  # inside apply(), tables first registered, to link to their definitions once at the end
         # Catalog reads are many short index lookups. A recursive walk's cost is estimated high enough that PostgreSQL
@@ -235,7 +237,7 @@ class Catalog:
         return found[0]
 
     def _head(self, key: str) -> dict | None:
-        return self.db.execute("SELECT r.* FROM entries e JOIN revisions r ON r.id=e.head_revision WHERE e.key=%s", (key,)).fetchone()
+        return self.history.entry(key)
 
     def _lock(self, key: str) -> None:
         """Hold an entry, registered yet or not, until the transaction ends, so its head is compared and moved by one writer at a time.
@@ -599,18 +601,14 @@ class Catalog:
             out["retired"].append(body["key"])
 
     def _columns(self, table: str, retired: bool = True) -> list[str]:
-        rows = self.db.execute("SELECT e.key FROM entries e JOIN revisions r ON r.id = e.head_revision "
-                               "WHERE e.kind = 'column' AND r.body ->> 'kind' = 'column' AND r.body ->> 'table' = %s "
-                               "AND (%s OR NOT (r.body ? 'retired')) ORDER BY e.key", (table, retired))
-        return [r["key"] for r in rows]
+        return [r["entry_key"] for r in self.history.columns(table, retired)]
 
     def _summary(self, key: str, users=False) -> dict:
         return self._summaries([key], users)[0]
 
     def _heads(self, keys) -> dict[str, dict]:
         """The head revisions of many entries, by key, in one query."""
-        return {r["entry_key"]: r for r in self.db.execute(
-            "SELECT r.* FROM entries e JOIN revisions r ON r.id = e.head_revision WHERE e.key = ANY(%s)", (list(set(keys)),))}
+        return self.history.entries(keys)
 
     def _summaries(self, keys: list[str], users=False) -> list[dict]:
         """`_summary` of many entries, in the order given, in a few queries rather than a few per entry."""
