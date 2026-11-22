@@ -129,7 +129,7 @@ def for_entry(catalog: Catalog, name: str, at=None) -> dict:
     """The newest result of each test on a table (and its columns) or a column, as of `at`."""
     key = catalog.resolve(name, ("table", "column"))
     if isinstance(at, str):
-        from .cli import moment
+        from .times import moment
         at = moment(at, "at")
     keys = [key, *catalog._columns(key)] if key.startswith("table:") else [key]
     found = latest(catalog, keys, at)

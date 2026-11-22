@@ -8,6 +8,15 @@ section says how a release is cut.
 
 ## Unreleased
 
+- **One operation table** behind the command line, the HTTP API and the MCP tools
+  (`odcl.operations`), so every command, route and tool is declared once. New commands for what
+  only the API offered: `odcl tables`, `odcl projects`, `odcl models`, `odcl runs` and
+  `odcl graph KEY`. Results now have one shape everywhere, which changes a few:
+  `odcl privacy set --json` answers `{"changed": [...]}` (was `entries`), `odcl privacy export
+  --json` and `odcl docs --json` answer a list (as their HTTP routes did),
+  `GET /v1/privacy/proposals` answers `{"proposals": [...]}` and `GET /v1/popular`
+  `{"since", "tables"}` (as the command line did), `odcl popular` lists 50 by default (was 20),
+  and `GET /v1/projects/{name}/uses` takes `revision` like the command line.
 - **Lineage explorer** on the web page (`#/lineage/KEY`): every edge around a table or column,
   by direction and steps, as columns or tables, with the projects that use them; hover to
   follow a path, click for details. `GET /v1/entries/{key}/graph` and `Catalog.graph` return

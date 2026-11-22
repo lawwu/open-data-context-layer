@@ -76,7 +76,7 @@ def _point(db, key: str, value, default: int) -> int:
     if value is None or value == "":
         return default
     if isinstance(value, str) and not value.startswith("rev_"):
-        from .cli import moment  # a time, or a span back from now such as 7d
+        from .times import moment  # a time, or a span back from now such as 7d
         value = moment(value, "since")
     if isinstance(value, str):
         row = db.execute("SELECT seq FROM revisions WHERE id = %s", (value,)).fetchone()

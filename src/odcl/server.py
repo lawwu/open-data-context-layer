@@ -65,9 +65,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from . import alerts, pii, popularity, quality
 from . import sso as single_sign_on
 from . import users
+from .operations import OPERATIONS, prepare
 from .store import Catalog, CatalogError, require
 
 MAX_BODY = 5 * 1024 * 1024
@@ -77,107 +77,33 @@ POLICY = "default-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 
 STATUS = {"not_found": 404, "database": 503, "schema": 503, "unauthorized": 401, "forbidden": 403, "exists": 409}
 
 
-def _span(value: str):
-    from .cli import span
-    return span(value)
-
-
-def _explain_dataset(catalog: Catalog, reference: str) -> dict:
-    from .builds import explain_dataset
-    return explain_dataset(catalog, reference)
-
-
-def _flag(value: str | None) -> bool:
-    return (value or "").lower() in ("1", "true", "yes")
-
-
-def _limit(value: str | None, default: int) -> int:
-    require(value is None or value.isdigit(), "limit", "limit is a whole number")
-    return int(value) if value else default
-
-
-def _fields(body, allowed: tuple[str, ...], required: tuple[str, ...] = ()) -> dict:
+def _given(op, method: str, path: dict, query: dict, body) -> dict:
+    """What a request says for each of an operation's params: from its path, its query (GET) or its JSON body (POST).
+    A body field the operation does not take, or a required one left out, is refused."""
+    given = dict(path)
+    fields = {p.field: p for p in op.params if p.http is not None and p.name not in path}
+    if method == "GET":
+        given |= {p.name: query[f] for f, p in fields.items() if f in query}
+        return given
+    body = {} if body is None else body
     require(isinstance(body, dict), "body", "Send a JSON object")
-    unknown = sorted(set(body) - set(allowed))
-    require(not unknown, "body", f"Unknown field{'s' if len(unknown) > 1 else ''} {', '.join(unknown)}; send {', '.join(allowed)}")
-    missing = [f for f in required if body.get(f) in (None, "", [])]
+    unknown = sorted(set(body) - set(fields))
+    require(not unknown, "body", f"Unknown field{'s' if len(unknown) > 1 else ''} {', '.join(unknown)}; send {', '.join(fields)}")
+    missing = [f for f, p in fields.items() if p.required and body.get(f) in (None, "", [])]
     require(not missing, "body", f"Send {', '.join(missing)}")
-    return body
+    return given | {p.name: body[f] for f, p in fields.items() if f in body}
 
 
-def _privacy(c: Catalog, b) -> list[dict]:
-    b = _fields(b, ("keys", "pii", "scrubbing", "data_category", "retention"), ("keys",))
-    return c.set_privacy(b["keys"], **{k: v for k, v in b.items() if k != "keys"})
+def _route(op) -> tuple:
+    method, path = op.http.split(" ", 1)
+    pattern = re.sub(r"\{(\w+)\}", r"(?P<\1>[^/]+)", path)
+    return (method, pattern, op.role, lambda c, m, q, b: op.run(c, **prepare(op, _given(op, method, m, q, b))))
 
 
-def _subscribe(c: Catalog, b) -> dict:
-    b = _fields(b, ("project", "owner", "all", "channel", "address", "min_severity"), ("channel", "address"))
-    return alerts.subscribe(c, project=b.get("project"), owner=b.get("owner"), everything=bool(b.get("all")), channel=b["channel"],
-                            address=b["address"], min_severity=b.get("min_severity") or "semantic")
-
-
-PROJECT = ("name", "description", "owner", "repository", "status", "tags")
-
-# (method, pattern, role, handler(catalog, match, query, body)). `anyone` needs no sign-in; `reader` needs one only
-# when the server asks for sign-in; any other role always needs a signed-in user with that role or above.
-ROUTES = [
-    ("GET", r"/v1/overview", "reader", lambda c, m, q, b: c.overview()),
-    ("GET", r"/v1/search", "reader", lambda c, m, q, b: c.find(q.get("q", ""), q.get("kind") or None, q.get("layer") or None, _limit(q.get("limit"), 50),
-                                                                     retired=_flag(q.get("retired")))),
-    ("GET", r"/v1/entries/(?P<key>[^/]+)", "reader", lambda c, m, q, b: c.get(m["key"])),
-    ("GET", r"/v1/entries/(?P<key>[^/]+)/lineage", "reader", lambda c, m, q, b: c.lineage(m["key"], q.get("direction", "both"))),
-    ("GET", r"/v1/entries/(?P<key>[^/]+)/graph", "reader",
-     lambda c, m, q, b: c.graph(m["key"], q.get("direction", "both"), int(q["depth"]) if (q.get("depth") or "").isdigit() else None,
-                                _flag(q.get("projects")), q.get("level") or "column")),
-    ("GET", r"/v1/entries/(?P<key>[^/]+)/used-by", "reader", lambda c, m, q, b: c.used_by(m["key"])),
-    ("GET", r"/v1/entries/(?P<key>[^/]+)/documents", "reader", lambda c, m, q, b: c.documents(m["key"])),
-    ("GET", r"/v1/entries/(?P<key>[^/]+)/quality", "reader", lambda c, m, q, b: quality.for_entry(c, m["key"], q.get("at") or None)),
-    ("GET", r"/v1/entries/(?P<key>[^/]+)/diff", "reader", lambda c, m, q, b: c.diff(m["key"], q.get("since") or None, q.get("until") or None)),
-    ("GET", r"/v1/projects/(?P<name>[^/]+)/uses", "reader", lambda c, m, q, b: c.uses(m["name"], _flag(q.get("upstream")))),
-    ("GET", r"/v1/query-history", "reader", lambda c, m, q, b: c.table_history(q.get("table", ""), _span(q.get("since", "7d")), _flag(q.get("patterns")),
-                                                                             _limit(q.get("limit"), 100))),
-    ("GET", r"/v1/datasets/(?P<reference>[^/]+)/trace", "reader", lambda c, m, q, b: _explain_dataset(c, m["reference"])),
-    ("GET", r"/v1/tables", "reader", lambda c, m, q, b: c.tables(q.get("layer") or None, q.get("system") or None, retired=_flag(q.get("retired")),
-                                                                     sort=q.get("sort") or "key")),
-    ("GET", r"/v1/projects", "reader", lambda c, m, q, b: c.projects()),
-    ("GET", r"/v1/privacy", "reader", lambda c, m, q, b: c.privacy(_flag(q.get("pii_only")), q.get("table") or None)),
-    ("GET", r"/v1/models", "reader", lambda c, m, q, b: c.models(q.get("project") or None)),
-    ("GET", r"/v1/models/(?P<name>[^/]+)/versions/(?P<version>[^/]+)/trace", "reader", lambda c, m, q, b: c.explain_model(m["name"], m["version"])),
-    ("GET", r"/v1/runs", "reader", lambda c, m, q, b: c.runs(q.get("system") or None, _limit(q.get("limit"), 100))),
-    # who is asking
-    ("GET", r"/v1/me", "anyone", lambda c, m, q, b: {"user": c.user}),
-    ("GET", r"/v1/me/tokens", "reader", lambda c, m, q, b: users.tokens(c)),
-    ("POST", r"/v1/me/tokens", "reader", lambda c, m, q, b: users.make_token(c, None, _fields(b, ("label",)).get("label"))),
-    ("POST", r"/v1/me/tokens/(?P<id>[^/]+)/revoke", "reader", lambda c, m, q, b: users.revoke(c, m["id"])),
-    ("GET", r"/v1/users", "admin", lambda c, m, q, b: users.listing(c)),
-    ("POST", r"/v1/users", "admin", lambda c, m, q, b: users.add(c, **_fields(b, ("name", "role", "display_name", "email"), ("name", "role")))),
-    ("POST", r"/v1/users/(?P<name>[^/]+)", "admin", lambda c, m, q, b: users.update(c, m["name"], **_fields(b, ("role", "disabled")))),
-    ("POST", r"/v1/users/(?P<name>[^/]+)/tokens", "admin", lambda c, m, q, b: users.make_token(c, m["name"], _fields(b, ("label",)).get("label"))),
-    ("GET", r"/v1/privacy/proposals", "reader", lambda c, m, q, b: pii.propose(c, q.get("table") or None, _flag(q.get("all")), q.get("min_confidence") or "low")),
-    ("GET", r"/v1/popular", "reader", lambda c, m, q, b: popularity.popular(c, _span(q.get("since", "30d")), _limit(q.get("limit"), 50))),
-    ("GET", r"/v1/glossary", "reader", lambda c, m, q, b: c.glossary(q.get("domain") or None)),
-    ("POST", r"/v1/terms", "editor", lambda c, m, q, b: c.put("term", _fields(b, ("name", "description", "owner", "status", "synonyms", "domain"),
-                                                                              ("name", "description")), merge=True)),
-    ("POST", r"/v1/domains", "editor", lambda c, m, q, b: c.put("domain", _fields(b, ("name", "description", "owner"), ("name", "description")), merge=True)),
-    ("POST", r"/v1/entries/(?P<key>[^/]+)/terms", "editor", lambda c, m, q, b: c.set_terms(m["key"], _fields(b, ("terms",)).get("terms") or [])),
-    ("POST", r"/v1/entries/(?P<key>[^/]+)/domain", "editor", lambda c, m, q, b: c.set_domain(m["key"], _fields(b, ("domain",)).get("domain"))),
-    ("POST", r"/v1/quality", "importer", lambda c, m, q, b: quality.record(c, _fields(b, ("source", "results"), ("source", "results"))["results"], b["source"])),
-    # alerts
-    ("GET", r"/v1/alerts/subscriptions", "reader", lambda c, m, q, b: alerts.subscriptions(c)),
-    ("POST", r"/v1/alerts/subscriptions", "editor", lambda c, m, q, b: _subscribe(c, b)),
-    ("POST", r"/v1/alerts/subscriptions/(?P<id>\d+)/remove", "editor", lambda c, m, q, b: alerts.unsubscribe(c, int(m["id"]))),
-    ("POST", r"/v1/alerts/send", "importer", lambda c, m, q, b: alerts.send(c, bool(_fields(b or {}, ("dry_run",)).get("dry_run")))),
-    # annotations
-    ("POST", r"/v1/projects", "editor", lambda c, m, q, b: c.put("project", _fields(b, PROJECT, ("name", "description")))),
-    ("POST", r"/v1/projects/(?P<name>[^/]+)/uses", "editor",
-     lambda c, m, q, b: c.use(m["name"], _fields(b, ("keys", "purpose"), ("keys",))["keys"], b.get("purpose"))),
-    ("POST", r"/v1/privacy", "editor", lambda c, m, q, b: {"changed": _privacy(c, b)}),
-    ("POST", r"/v1/entries/(?P<key>[^/]+)/created-by", "editor", lambda c, m, q, b: c.set_created_by(m["key"], _fields(b, ("created_by",)).get("created_by"))),
-    ("POST", r"/v1/entries/(?P<key>[^/]+)/references", "editor", lambda c, m, q, b: c.set_references(m["key"], _fields(b, ("columns",)).get("columns") or [])),
-    ("POST", r"/v1/entries/(?P<key>[^/]+)/instances", "editor", lambda c, m, q, b: c.set_instances(m["key"], _fields(b, ("patterns",)).get("patterns") or [])),
-    ("POST", r"/v1/models/(?P<name>[^/]+)/versions/(?P<version>[^/]+)/relied-on", "editor",
-     lambda c, m, q, b: c.rely(m["name"], m["version"], _fields(b, ("documents", "why"), ("documents",))["documents"], b.get("why"))),
-]
+# (method, pattern, role, handler(catalog, match, query, body)), one for each operation with an HTTP route. `anyone`
+# needs no sign-in; `reader` needs one only when the server asks for sign-in; any other role always needs a signed-in
+# user with that role or above.
+ROUTES = [_route(op) for op in OPERATIONS if op.http]
 
 
 class Refused(Exception):
