@@ -3,8 +3,7 @@
 Versions follow [semantic versioning](https://semver.org). While the version is `0.x`,
 commands, the Python interface and the HTTP API may still change between minor versions,
 and the entry says so when one does. The catalog's schema is migrated in place by
-`odcl migrate`. The README's [Versioning and releases](README.md#versioning-and-releases)
-section says how a release is cut.
+`odcl migrate`. [Versioning and releases](docs/developing.md#versioning-and-releases) says how a release is cut.
 
 ## Unreleased
 
@@ -26,8 +25,8 @@ Run `odcl migrate` after upgrading (migration 0015).
   instead of a copy in each importer. A Vertex AI task that was `NOT_TRIGGERED` now counts as finished, too.
 - A Docker image for each release, `ghcr.io/lawwu/open-data-context-layer`, for amd64 and arm64: odcl with every
   extra on Debian 13 and Python 3.14, as an unprivileged user, migrating the catalog before it serves. Each one is
-  started against PostgreSQL before it is published, and carries build provenance and an SBOM. See the README's
-  [In Docker](README.md#in-docker).
+  started against PostgreSQL before it is published, and carries build provenance and an SBOM. See
+  [In Docker](docs/serving.md#in-docker).
 
 ## 0.2.0 (2026-11-22)
 

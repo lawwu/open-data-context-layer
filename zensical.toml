@@ -12,7 +12,15 @@ docs_dir = "build/docs"
 site_dir = "site"
 nav = [
   { "Home" = "index.md" },
+  { "Commands" = "commands.md" },
+  { "Importing" = "importing.md" },
+  { "Describing data" = "describing-data.md" },
+  { "Changes, quality and alerts" = "changes-quality-alerts.md" },
+  { "Models and runs" = "models-and-runs.md" },
+  { "Serving, the web page and sign-in" = "serving.md" },
+  { "For agents and from Python" = "agents-and-python.md" },
   { "Working with several people" = "working-with-several-people.md" },
+  { "Developing and releases" = "developing.md" },
   { "Implementation plan" = "implementation-plan.md" },
   { "Changelog" = "changelog.md" },
 ]
