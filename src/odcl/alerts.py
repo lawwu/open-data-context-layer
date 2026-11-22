@@ -17,7 +17,8 @@ import re
 import urllib.parse
 import urllib.request
 
-from .changes import SEVERITY, diff
+from .changes import SEVERITY
+from .impact import impact
 from .store import Catalog, CatalogError, require
 
 CHANNELS = ("webhook", "slack", "email")
@@ -83,27 +84,8 @@ def unsubscribe(catalog: Catalog, subscription: int) -> dict:
 
 
 def findings(catalog: Catalog) -> list[dict]:
-    """Every entry a project uses that changed after the use or is retired, with what changed and how much."""
-    db, out = catalog.db, []
-    for r in db.execute("""SELECT l.source_key AS project, l.target_key AS key, l.target_revision, t.head_revision, t.kind,
-                                  hr.body ? 'retired' AS retired, pr.body ->> 'owner' AS owner
-                           FROM current_links l JOIN entries t ON t.key = l.target_key JOIN revisions hr ON hr.id = t.head_revision
-                           JOIN entries p ON p.key = l.source_key JOIN revisions pr ON pr.id = p.head_revision
-                           WHERE l.relation = 'uses' ORDER BY l.source_key, l.target_key""").fetchall():
-        if r["retired"]:
-            found = {"kind": "retired", "severity": "breaking", "changes": []}
-        elif r["target_revision"] != r["head_revision"] or r["kind"] == "table":
-            try:
-                d = diff(catalog, r["key"], since=catalog.history.link_started(r["project"], "uses", r["key"], r["target_revision"]) or r["target_revision"])
-            except CatalogError:
-                continue
-            if not d["severity"]:
-                continue
-            found = {"kind": "changed", "severity": d["severity"], "changes": d["changes"]}
-        else:
-            continue
-        out.append({"project": r["project"], "owner": r["owner"], "key": r["key"], "state": catalog.history.newest_touching(r["key"]), **found})
-    return out
+    """What there is to tell people: every exposure of every project that has a severity. See `odcl.impact`."""
+    return [i for i in impact(catalog) if i["severity"]]
 
 
 def _covers(subscription: dict, finding: dict) -> bool:
@@ -124,8 +106,10 @@ def _link(key: str) -> str | None:
 def _text(findings: list[dict]) -> str:
     lines = [f"{len(findings)} change{'s' if len(findings) != 1 else ''} to data your projects use, after they used it:", ""]
     for f in findings:
-        what = "is gone from its source" if f["kind"] == "retired" else "changed"
+        what = {"retired": "is gone from its source", "changed": "changed", "failing": "is failing a test"}[f["kind"]]
         lines.append(f"- {f['project'].removeprefix('project:')} uses {f['key'].split(':', 1)[1]}, which {what}: {f['severity']}")
+        for t in f.get("failing", [])[:SHOWN]:
+            lines.append(f"    {t['entry'].split(':', 1)[1]}: {t['test']} {t['status']}" + (f" ({t['failures']} failing)" if t["failures"] else "") + f" [{t['source']}]")
         for c in f["changes"][:SHOWN]:
             shown = lambda v: "(none)" if v in (None, "") else v
             detail = "" if (c.get("before") is None and c.get("after") is None) or isinstance(c.get("after"), list) else f" ({shown(c['before'])} -> {shown(c['after'])})"
@@ -166,8 +150,8 @@ def deliver(subscription: dict, found: list[dict]) -> None:
     if subscription["channel"] == "slack":
         _post(subscription["address"], {"text": text})
     elif subscription["channel"] == "webhook":
-        _post(subscription["address"], {"source": "odcl", "alerts": [{**{k: f[k] for k in ("project", "key", "kind", "severity", "changes")},
-                                                                       "url": _link(f["key"])} for f in found], "text": text})
+        said = ("project", "key", "kind", "severity", "changes", "failing")
+        _post(subscription["address"], {"source": "odcl", "text": text, "alerts": [{**{k: f[k] for k in said if k in f}, "url": _link(f["key"])} for f in found]})
     else:
         _email(subscription["address"], f"odcl: {len(found)} change{'s' if len(found) != 1 else ''} to data your projects use", text)
 

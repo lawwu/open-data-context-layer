@@ -579,6 +579,13 @@ def _ops() -> list[Operation]:
                   (KEY, Param("at", "as of a time, or a span back from now such as 7d (default: now)")),
                   cli="quality", http="GET /v1/entries/{key}/quality", text=_quality_text),
         Operation("overview", "how much is registered, and what changed after a project used it", lambda c: c.overview(), cli="overview", http="GET /v1/overview"),
+        Operation("impact", "what each project is exposed to through the data it uses: changed, gone or failing a test",
+                  lambda c, project=None: _module("impact").impact(c, project), (Param("project", "only this project"),),
+                  cli="impact", http="GET /v1/impact",
+                  text=lambda r, p: [f"{short(i['project'])} uses {short(i['key'])}: {i['kind']}" + (f" ({i['severity']})" if i["severity"] and i["kind"] == "changed" else "")
+                                     + "".join(f"\n    {short(c['key'])}: {c['change']} [{c['severity']}]" for c in i["changes"][:5])
+                                     + "".join(f"\n    {short(t['entry'])}: {t['test']} {t['status']}" for t in i.get("failing", [])) for i in r]
+                  or ["Every project uses data as it is defined now, still at its source and passing its tests."]),
         Operation("tables", "every table, with its columns and users counted", lambda c, layer=None, system=None, retired=False, sort="key":
                   c.tables(layer, system, retired=bool(retired), sort=sort),
                   (Param("layer"), Param("system"), Param("retired", kind="bool"), Param("sort", choices=("key", "reads"), default="key")),
