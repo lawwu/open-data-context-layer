@@ -318,6 +318,7 @@ uv run odcl alerts send            # after imports, from the same scheduler; --d
 - **Once each.** A delivery is recorded per subscription, project, entry and the entry's newest revision (a table's newest column counts), so a change is sent once, and a later change to the same entry is sent again. Recording use again (`odcl use`) clears it. A failed delivery is retried on the next `send`.
 - **Who.** An editor subscribes and removes their own subscriptions; an admin sees and removes all of them. `send` needs an importer, like the imports it follows. A webhook address is `https://` (or `http://` on this machine); its path, often its secret, is not shown when subscriptions are listed. Anyone with the database's credentials can read the addresses.
 - **Email** goes through `$ODCL_SMTP_HOST` (`$ODCL_SMTP_PORT`, default 587 with STARTTLS; `$ODCL_SMTP_USER`, `$ODCL_SMTP_PASSWORD`; `$ODCL_SMTP_FROM`). With `$ODCL_PUBLIC_URL`, each alert links to the entry's page.
+- On the web page, an editor's Account page lists their subscriptions (an admin's, everyone's) and adds and removes them.
 - Over HTTP: `GET`/`POST /v1/alerts/subscriptions`, `POST /v1/alerts/subscriptions/{id}/remove`, `POST /v1/alerts/send`. Run `odcl migrate` for migration 0012.
 
 ## Binding data to the build that made it

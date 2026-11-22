@@ -8,6 +8,8 @@ section says how a release is cut.
 
 ## Unreleased
 
+- The web page's Account page has an Alerts panel: an editor lists, adds and removes their alert
+  subscriptions; an admin sees everyone's.
 - **One read of what projects are exposed to** (`odcl impact`, `GET /v1/impact`,
   `odcl.impact`): data a project uses that changed, is gone, or is failing a test. The overview,
   project pages and alerts all read it, so alerts now also tell of failing data-quality tests

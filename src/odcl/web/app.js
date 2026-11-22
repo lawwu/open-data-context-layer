@@ -945,6 +945,44 @@ async function signOut() {
   location.href = answer.next || "/";
 }
 
+// alert subscriptions: an editor's own, or everyone's for an admin; sent by odcl alerts send after imports
+async function alertsSection(me) {
+  const subscriptions = await api("/v1/alerts/subscriptions");
+  const message = h("p", { class: "muted", role: "status" });
+  const remove = async (id) => {
+    try { await api(`/v1/alerts/subscriptions/${enc(id)}/remove`, { method: "POST" }); route(); } catch (error) { message.textContent = error.message; }
+  };
+  const field = (label, control) => h("label", { class: "field" }, h("span", {}, label), control);
+  const scope = h("select", { "aria-label": "About" }, [["project", "one project"], ["owner", "the projects I own"], ["all", "every project"]].map(([v, t]) =>
+    h("option", { value: v }, t)));
+  const project = h("input", { type: "text", placeholder: "project name", "aria-label": "Project" });
+  const channel = h("select", { "aria-label": "Send to" }, [["slack", "Slack incoming webhook"], ["email", "email"], ["webhook", "webhook (JSON)"]].map(([v, t]) =>
+    h("option", { value: v }, t)));
+  const address = h("input", { type: "text", placeholder: "https://hooks.slack.com/services/…", "aria-label": "Address", size: 40 });
+  const severity = h("select", { "aria-label": "At least" }, ["cosmetic", "additive", "semantic", "breaking"].map((v) =>
+    h("option", { value: v, selected: v === "semantic" }, v)));
+  scope.addEventListener("change", () => { project.hidden = scope.value !== "project"; });
+  channel.addEventListener("change", () => {
+    address.placeholder = { slack: "https://hooks.slack.com/services/…", email: "you@example.com", webhook: "https://…" }[channel.value];
+  });
+  const subscribe = async (event) => {
+    event.preventDefault();
+    const body = { channel: channel.value, address: address.value.trim(), min_severity: severity.value,
+                   ...(scope.value === "project" ? { project: project.value.trim() } : scope.value === "owner" ? { owner: me.name } : { all: true }) };
+    try { await api("/v1/alerts/subscriptions", { method: "POST", body }); route(); } catch (error) { message.textContent = error.message; }
+  };
+  const about = (s) => (s.scope === "project" ? entryLink(s.target, short(s.target)) : s.scope === "owner" ? `projects owned by ${s.target}` : "every project");
+  return [h("h2", {}, "Alerts"),
+    h("p", { class: "muted" }, "Be told when data a project uses changes after it used it, is gone from its source, or fails a data-quality test. ",
+      "They are sent when ", h("code", {}, "odcl alerts send"), " runs, usually after the imports."),
+    table(["About", "Sent to", "At least", me.role === "admin" ? "By" : null, ""].filter((x) => x !== null), subscriptions.map((s) => [
+      about(s), `${s.channel} ${s.address}`, severityBadge(s.min_severity), ...(me.role === "admin" ? [s.created_by] : []),
+      s.created_by === me.name || me.role === "admin" ? h("button", { type: "button", onclick: () => remove(s.id) }, "Remove") : ""]), "No alerts yet."),
+    h("form", { class: "controls subscribe", onsubmit: subscribe }, field("About", scope), project, field("Send to", channel), address,
+      field("At least", severity), h("button", { type: "submit" }, "Subscribe")),
+    message];
+}
+
 async function accountPage() {
   const me = (await api("/v1/me")).user;
   if (!me) {
@@ -969,6 +1007,7 @@ async function accountPage() {
     shown, h("h2", {}, "Your tokens"),
     table(["Token", "For", "Made", "Last used", ""], tokens.map((t) => [h("code", {}, t.id), t.label || "—", when(t.created_at), when(t.last_used_at),
       h("button", { type: "button", onclick: () => revoke(t.id) }, "Revoke")]), "No tokens.")];
+  if (me.role !== "reader") parts.push(...await alertsSection(me));
   if (me.role === "admin") {
     const everyone = await api("/v1/users");
     const set = async (name, change) => {
