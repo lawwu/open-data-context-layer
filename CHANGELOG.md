@@ -8,6 +8,16 @@ section says how a release is cut.
 
 ## Unreleased
 
+Run `odcl migrate` after upgrading (migration 0015).
+
+- Alert deliveries that keep failing back off: after three failed tries in a row a subscription waits an hour, then
+  twice as long after each further failure, up to a day (`odcl alerts send` lists it under `deferred`). Each
+  subscription now says whether its messages get through (`delivery`: `ok`, or `failing` with since when, the number
+  of tries, the last error and the next try), in `odcl alerts list`, the API and the Account page. A delivery still
+  owed about something that is no longer there to tell is dropped instead of being retried for ever.
+- Whether a table or column is retired is read one way in SQL (`odcl.history.retired_sql`), the value rather than
+  whether the key is present, so a document's `"retired": false` can no longer read as retired. BigQuery query jobs
+  take their finished states from `odcl/runs.py` like every other run.
 - Every run and query job now reports an `outcome` (`running`, `succeeded`, `failed`, `cancelled`, `skipped` or
   `unknown`) beside its system's own `state`: `odcl runs`, query history, dataset versions and Dataform imports. An
   agent no longer needs each system's state names to tell whether a run worked. A BigQuery job that ended `DONE` with

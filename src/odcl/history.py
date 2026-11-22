@@ -13,6 +13,12 @@ from __future__ import annotations
 from datetime import datetime
 
 
+def retired_sql(revision: str = "r") -> str:
+    """Whether a revision's body says retired, as SQL: the value, as Python's body.get("retired") reads it. A document
+    keeps "retired": false, so asking whether the key is there (body ? 'retired') would call every live page retired."""
+    return f"COALESCE(({revision}.body ->> 'retired')::boolean, false)"
+
+
 class History:
     def __init__(self, db):
         self.db = db
@@ -42,9 +48,9 @@ class History:
 
     def columns(self, table: str, retired: bool = True) -> list[dict]:
         """The head revision rows of a table's columns, by key. Retired columns only with `retired`."""
-        return self.db.execute("""SELECT r.* FROM entries e JOIN revisions r ON r.id = e.head_revision
+        return self.db.execute(f"""SELECT r.* FROM entries e JOIN revisions r ON r.id = e.head_revision
                                   WHERE e.kind = 'column' AND r.body ->> 'kind' = 'column' AND r.body ->> 'table' = %s
-                                    AND (%s OR NOT (r.body ? 'retired')) ORDER BY e.key""", (table, retired)).fetchall()
+                                    AND (%s OR NOT {retired_sql()}) ORDER BY e.key""", (table, retired)).fetchall()
 
     # ---- revisions --------------------------------------------------------------------------------------------
     def revision(self, revision: str, key: str | None = None) -> dict | None:

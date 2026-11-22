@@ -13,6 +13,7 @@ import json
 import re
 from pathlib import Path
 
+from .history import retired_sql
 from .store import Catalog, CatalogError, require
 
 LEVELS = ("low", "medium", "high")
@@ -89,7 +90,7 @@ def propose(catalog: Catalog, table: str | None = None, everything: bool = False
     require(minimum in LEVELS, "confidence", f"A confidence is one of: {', '.join(LEVELS)}")
     table = catalog.resolve(table, ("table",)) if table else None
     out = []
-    for r in catalog.db.execute("""
+    for r in catalog.db.execute(f"""
             SELECT c.key, cr.body AS col, tr.body AS tbl,
                    ARRAY(SELECT tb.body ->> 'title' || ' ' || coalesce(tb.body ->> 'description', '') || ' ' ||
                                 coalesce(array_to_string(ARRAY(SELECT jsonb_array_elements_text(tb.body -> 'synonyms')), ' '), '')
@@ -97,7 +98,7 @@ def propose(catalog: Catalog, table: str | None = None, everything: bool = False
                          WHERE l.source_revision = cr.id AND l.relation = 'means') AS terms
             FROM entries c JOIN revisions cr ON cr.id = c.head_revision JOIN entries t ON t.key = cr.body ->> 'table'
             JOIN revisions tr ON tr.id = t.head_revision
-            WHERE c.kind = 'column' AND cr.body ->> 'kind' = 'column' AND NOT (cr.body ? 'retired')
+            WHERE c.kind = 'column' AND cr.body ->> 'kind' = 'column' AND NOT {retired_sql('cr')}
               AND (%(table)s::text IS NULL OR cr.body ->> 'table' = %(table)s) ORDER BY c.key""", {"table": table}):
         col, tbl = r["col"], r["tbl"]
         if col.get("pii") is not None and not everything:

@@ -91,6 +91,12 @@ def test_a_page_removed_is_retired_and_its_links_stay_as_history(catalog, kb):
     assert page["retired"] is True and page["describes"] == [] and len(page["history"]) == 2
     assert catalog.get(STATUS)["documents"] == []  # not current any more
     assert load(catalog, kb)["documents"]["retired"] == 0  # retired once
+    # a live page keeps "retired": false, and the one SQL reading of retired reads the value, not whether the key is there
+    from odcl.history import retired_sql
+    rows = catalog.db.execute(f"""SELECT e.key, {retired_sql()} AS retired FROM entries e JOIN revisions r ON r.id = e.head_revision
+                                  WHERE e.kind = 'document' ORDER BY e.key""").fetchall()
+    assert {r["key"]: r["retired"] for r in rows} == {PAGE: True, **{r["key"]: False for r in rows if r["key"] != PAGE}} and len(rows) == 2
+    assert all("retired" in catalog.history.entry(r["key"])["body"] for r in rows)
     # importing one file does not retire the pages it was not asked about
     assert load(catalog, kb, kb / "docs" / "glossary" / "amount.md")["documents"]["retired"] == 0
 

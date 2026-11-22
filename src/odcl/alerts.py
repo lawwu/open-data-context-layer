@@ -4,7 +4,12 @@ A subscription covers one project, every project of one owner, or every project,
 Slack incoming webhook or an email address, for changes at or above a severity (see `odcl.changes`). `send` finds
 what is new since the last run and delivers it, one message per subscription; run it after imports, from the same
 scheduler. Each change is sent once per subscription: a delivery is recorded for the project, the entry and the
-entry's state (its newest revision, or its newest column's for a table). A failed delivery is tried again next run.
+entry's state (its newest revision, or its newest column's for a table).
+
+A delivery that fails is tried again on each of the next runs; after RETRY_EVERY_RUN failed tries in a row it waits
+between runs, an hour and then twice as long each time, up to a day. Until a message gets through, the subscription's
+`delivery` says it is failing: since when, how many tries, the last error, and when it is tried next. A delivery still
+owed about something that is no longer there to tell (the entry changed again, the test passes again) is dropped.
 
 Email goes through the SMTP server named by $ODCL_SMTP_HOST ($ODCL_SMTP_PORT, $ODCL_SMTP_USER, $ODCL_SMTP_PASSWORD,
 $ODCL_SMTP_FROM). With $ODCL_PUBLIC_URL, each alert links to the entry's page.
@@ -17,14 +22,17 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import timedelta
 
 from .changes import SEVERITY
 from .impact import impact
-from .store import Catalog, CatalogError, require
+from .store import Catalog, CatalogError, require, stamp
 
 CHANNELS = ("webhook", "slack", "email")
 EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 SHOWN = 5  # changes listed per alert in a message; the webhook's JSON has them all
+RETRY_EVERY_RUN = 3  # failed tries in a row before a delivery waits between runs
+WAIT_FIRST, WAIT_MOST = timedelta(hours=1), timedelta(hours=24)  # the wait doubles with each further failure
 
 
 def _address(channel: str, address: str) -> str:
@@ -73,9 +81,31 @@ def _mine(catalog: Catalog) -> tuple[str, list]:
     return "created_by = %s", [catalog.actor]
 
 
+def _delivery(db, subscription_id: int) -> tuple[dict, bool]:
+    """Whether a subscription's messages are getting through, and whether `send` waits before trying it again.
+
+    `ok`, or `failing` while any delivery is still owed: `since` the first failed try, `attempts` (the most tries of
+    one delivery), the `last_error`, and `next_attempt`: a time, or None for the next run."""
+    row = db.execute("""
+        SELECT count(*) AS owed, max(attempts) AS attempts, min(first_attempted_at) AS since, max(attempted_at) AS last,
+               (array_agg(error ORDER BY attempted_at DESC))[1] AS error,
+               CASE WHEN max(attempts) >= %(every_run)s
+                    THEN max(attempted_at) + LEAST(%(first)s * power(2, max(attempts) - %(every_run)s), %(most)s) END AS next_attempt,
+               now() AS now
+        FROM alert_deliveries WHERE subscription_id = %(id)s AND sent_at IS NULL""",
+                     {"id": subscription_id, "every_run": RETRY_EVERY_RUN, "first": WAIT_FIRST, "most": WAIT_MOST}).fetchone()
+    if not row["owed"]:
+        return {"status": "ok"}, False
+    waiting = row["next_attempt"] is not None and row["next_attempt"] > row["now"]
+    return {"status": "failing", "since": stamp(row["since"]), "attempts": row["attempts"], "last_attempt": stamp(row["last"]),
+            "last_error": row["error"], "next_attempt": stamp(row["next_attempt"]) if waiting else None}, waiting
+
+
 def subscriptions(catalog: Catalog) -> list[dict]:
+    """The caller's subscriptions (see `_mine`), each with its `delivery`: whether its messages are getting through."""
     where, params = _mine(catalog)
-    return [_masked(r) for r in catalog.db.execute(f"SELECT * FROM alert_subscriptions WHERE {where} ORDER BY id", params)]
+    return [{**_masked(r), "delivery": _delivery(catalog.db, r["id"])[0]}
+            for r in catalog.db.execute(f"SELECT * FROM alert_subscriptions WHERE {where} ORDER BY id", params)]
 
 
 def unsubscribe(catalog: Catalog, subscription: int) -> dict:
@@ -190,19 +220,33 @@ def deliver(subscription: dict, found: list[dict]) -> None:
 
 
 def send(catalog: Catalog, dry_run: bool = False) -> dict:
-    """Deliver what each subscription has not been sent yet. With `dry_run`, say what would be sent and send nothing."""
+    """Deliver what each subscription has not been sent yet. With `dry_run`, say what would be sent and send nothing.
+
+    Says what was `sent`, what `failed`, and which subscriptions were `deferred`: failing, and waiting before the next try."""
     catalog.allow("importer")
     db, found = catalog.db, findings(catalog)
-    out = {"sent": [], "failed": [], "dry_run": dry_run}
+    out = {"sent": [], "failed": [], "deferred": [], "dry_run": dry_run}
     for s in db.execute("SELECT * FROM alert_subscriptions ORDER BY id").fetchall():
         sent = {(r["project_key"], r["entry_key"], r["entry_state"]) for r in db.execute(
             "SELECT project_key, entry_key, entry_state FROM alert_deliveries WHERE subscription_id = %s AND sent_at IS NOT NULL", (s["id"],))}
         new = [f for f in found if _covers(s, f) and (f["project"], f["key"], f["state"]) not in sent]
+        if not dry_run:  # what was owed about something no longer there to tell is owed no more
+            owing = {(f["project"], f["key"], f["state"]) for f in new}
+            for r in db.execute("SELECT project_key, entry_key, entry_state FROM alert_deliveries WHERE subscription_id = %s AND sent_at IS NULL",
+                                (s["id"],)).fetchall():
+                if (r["project_key"], r["entry_key"], r["entry_state"]) not in owing:
+                    db.execute("DELETE FROM alert_deliveries WHERE subscription_id = %s AND project_key = %s AND entry_key = %s AND entry_state = %s",
+                               (s["id"], r["project_key"], r["entry_key"], r["entry_state"]))
         if not new:
             continue
         summary = {"subscription": s["id"], "channel": s["channel"], "alerts": [{k: f[k] for k in ("project", "key", "kind", "severity")} for f in new]}
         if dry_run:
             out["sent"].append({**summary, "text": _text(new)})
+            continue
+        delivery, waiting = _delivery(db, s["id"])
+        if waiting:
+            out["deferred"].append({**summary, "attempts": delivery["attempts"], "last_error": delivery["last_error"],
+                                    "next_attempt": delivery["next_attempt"]})
             continue
         error = None
         try:
@@ -214,7 +258,7 @@ def send(catalog: Catalog, dry_run: bool = False) -> dict:
                 db.execute("""INSERT INTO alert_deliveries (subscription_id, project_key, entry_key, entry_state, kind, severity, sent_at, error)
                               VALUES (%s, %s, %s, %s, %s, %s, CASE WHEN %s::text IS NULL THEN now() END, %s)
                               ON CONFLICT (subscription_id, project_key, entry_key, entry_state) DO UPDATE SET
-                                attempted_at = now(), sent_at = excluded.sent_at, error = excluded.error""",
+                                attempted_at = now(), attempts = alert_deliveries.attempts + 1, sent_at = excluded.sent_at, error = excluded.error""",
                            (s["id"], f["project"], f["key"], f["state"], f["kind"], f["severity"], error, error))
         (out["failed"] if error else out["sent"]).append({**summary, **({"error": error} if error else {})})
     return out

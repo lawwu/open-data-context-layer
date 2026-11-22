@@ -947,6 +947,14 @@ async function signOut() {
   location.href = answer.next || "/";
 }
 
+// whether a subscription's messages get through: failing until one does, with the last error and the next try
+function deliveryBadge(delivery) {
+  if (!delivery || delivery.status === "ok") return h("span", { class: "status good" }, "✓ ok");
+  const next = delivery.next_attempt ? `next try ${delivery.next_attempt}` : "tried again on the next run";
+  return h("span", { class: "status critical", title: `${delivery.last_error || "failed"}\nfailing since ${delivery.since} · ${delivery.attempts} tries · ${next}` },
+    `✕ failing · ${delivery.attempts} ${delivery.attempts === 1 ? "try" : "tries"}`);
+}
+
 // alert subscriptions: an editor's own, or everyone's for an admin; sent by odcl alerts send after imports
 async function alertsSection(me) {
   const subscriptions = await api("/v1/alerts/subscriptions");
@@ -977,8 +985,8 @@ async function alertsSection(me) {
   return [h("h2", {}, "Alerts"),
     h("p", { class: "muted" }, "Be told when data a project uses changes after it used it, is gone from its source, or fails a data-quality test. ",
       "They are sent when ", h("code", {}, "odcl alerts send"), " runs, usually after the imports."),
-    table(["About", "Sent to", "At least", me.role === "admin" ? "By" : null, ""].filter((x) => x !== null), subscriptions.map((s) => [
-      about(s), `${s.channel} ${s.address}`, severityBadge(s.min_severity), ...(me.role === "admin" ? [s.created_by] : []),
+    table(["About", "Sent to", "At least", "Delivery", me.role === "admin" ? "By" : null, ""].filter((x) => x !== null), subscriptions.map((s) => [
+      about(s), `${s.channel} ${s.address}`, severityBadge(s.min_severity), deliveryBadge(s.delivery), ...(me.role === "admin" ? [s.created_by] : []),
       s.created_by === me.name || me.role === "admin" ? h("button", { type: "button", onclick: () => remove(s.id) }, "Remove") : ""]), "No alerts yet."),
     h("form", { class: "controls subscribe", onsubmit: subscribe }, field("About", scope), project, field("Send to", channel), address,
       field("At least", severity), h("button", { type: "submit" }, "Subscribe")),

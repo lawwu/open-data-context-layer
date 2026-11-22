@@ -31,3 +31,7 @@ def test_an_unknown_state_is_never_read_as_finished():
 
 def test_the_upsert_keeps_a_finished_state():
     assert runs.hold_finished("bigquery") == "CASE WHEN executions.state IN ('DONE') THEN executions.state ELSE excluded.state END"
+
+
+def test_the_finished_states_are_a_sql_list():
+    assert runs.finished_sql("bigquery") == "('DONE')" and runs.finished_sql("openlineage") == "('ABORT', 'COMPLETE', 'FAIL')"

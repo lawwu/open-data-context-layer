@@ -36,8 +36,11 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from . import runs
+from .history import retired_sql
 
 KINDS = ("table", "column", "project", "document", "term", "domain")
+
+
 DESCRIBED = ("table", "column", "project", "term", "domain")  # what a document can describe
 DOCUMENT = re.compile(r"^[a-z0-9_][a-z0-9_.\-/@~+]{0,499}$")
 PATH = re.compile(r"^[a-z0-9_][a-z0-9_.\-$]{0,299}$")
@@ -938,13 +941,13 @@ class Catalog:
         when it last changed. Retired tables only with `retired`; retired columns are not counted. Each also says how many
         query jobs read it in the last 30 days (`reads`), and `sort="reads"` puts the most read first."""
         require(sort in ("key", "reads"), "sort", "sort is key or reads")
-        rows = self.db.execute("""
+        rows = self.db.execute(f"""
             SELECT e.key, r.recorded_at, coalesce(c.n, 0) AS columns
             FROM entries e JOIN revisions r ON r.id = e.head_revision
             LEFT JOIN (SELECT cr.body ->> 'table' AS tbl, count(*) AS n FROM entries c JOIN revisions cr ON cr.id = c.head_revision
-                       WHERE c.kind = 'column' AND cr.body ->> 'kind' = 'column' AND NOT (cr.body ? 'retired') GROUP BY 1) c ON c.tbl = e.key
+                       WHERE c.kind = 'column' AND cr.body ->> 'kind' = 'column' AND NOT {retired_sql('cr')} GROUP BY 1) c ON c.tbl = e.key
             WHERE e.kind = 'table' AND (%(layer)s::text IS NULL OR r.body ->> 'layer' = %(layer)s)
-              AND (%(system)s::text IS NULL OR r.body ->> 'system' = %(system)s) AND (%(retired)s OR NOT (r.body ? 'retired'))
+              AND (%(system)s::text IS NULL OR r.body ->> 'system' = %(system)s) AND (%(retired)s OR NOT {retired_sql()})
             ORDER BY e.key""", {"layer": layer, "system": system, "retired": retired}).fetchall()
         from .popularity import reads
         used = reads(self, [r["key"] for r in rows])
@@ -1036,10 +1039,11 @@ class Catalog:
     def overview(self) -> dict:
         counts = {kind: 0 for kind in KINDS}
         counts.update({r["kind"]: r["n"] for r in self.db.execute(
-            "SELECT e.kind, COUNT(*) AS n FROM entries e JOIN revisions r ON r.id = e.head_revision WHERE NOT (r.body ? 'retired' AND e.kind IN ('table', 'column')) "
+            "SELECT e.kind, COUNT(*) AS n FROM entries e JOIN revisions r ON r.id = e.head_revision "
+            f"WHERE NOT ({retired_sql()} AND e.kind IN ('table', 'column')) "
             "GROUP BY e.kind")})
         retired = self.db.execute("SELECT COUNT(*) AS n FROM entries e JOIN revisions r ON r.id = e.head_revision "
-                                            "WHERE e.kind IN ('table', 'column') AND r.body ? 'retired'").fetchone()["n"]
+                                            f"WHERE e.kind IN ('table', 'column') AND {retired_sql()}").fetchone()["n"]
         from .impact import impact
         exposed = impact(self)  # what each project is exposed to through what it uses: see odcl.impact
         stale = [{"project": i["project"], "key": i["key"], "severity": i["severity"]} for i in exposed if i["kind"] == "changed"]
