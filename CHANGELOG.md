@@ -8,6 +8,11 @@ section says how a release is cut.
 
 ## Unreleased
 
+- A Docker image for each release, `ghcr.io/lawwu/open-data-context-layer`, for amd64 and arm64: odcl with every
+  extra on Debian 13 and Python 3.14, as an unprivileged user, migrating the catalog before it serves. Each one is
+  started against PostgreSQL before it is published, and carries build provenance and an SBOM. See the README's
+  [In Docker](README.md#in-docker).
+
 ## 0.2.0 (2026-11-22)
 
 The first release. odcl was installed from `main` before this, already reporting 0.2.0; what

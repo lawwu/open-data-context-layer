@@ -491,6 +491,25 @@ Unless the server runs with `--require-sign-in` or single sign-on, anyone who ca
 
 **The lineage explorer** (`#/lineage/KEY`, "Explore →" beside an entry's lineage) draws every edge around a table or column, not only the first path to each entry, so where inputs meet or one input feeds many outputs shows. Upstream is to the left and downstream to the right, in columns by steps from the focus. Choose the direction, how many steps, columns or tables (a table's view folds its columns' lineage in), and whether to show the projects that use what is drawn. Hovering an entry lights what feeds it and what it feeds; clicking one shows it with links to open it or explore from it; typing highlights entries by name. Dotted edges are copies of a definition; dashed amber edges were redefined after the link was recorded. It reads `GET /v1/entries/{key}/graph?direction=&depth=&projects=&level=` (`Catalog.graph`), which returns the nodes and every edge, the nearest 400 at most.
 
+### In Docker
+
+Each release is also an image, `ghcr.io/lawwu/open-data-context-layer`, for `linux/amd64` and `linux/arm64`: Debian 13 and Python 3.14 with every extra installed, run as an unprivileged user (uid 1000). The catalog stays in PostgreSQL, so give it `ODCL_DATABASE_URL`:
+
+```sh
+docker run -d --name odcl -p 127.0.0.1:8080:8080 \
+  -e ODCL_DATABASE_URL=postgresql://odcl:secret@db.example.com/odcl \
+  ghcr.io/lawwu/open-data-context-layer:0.2
+```
+
+It runs `odcl migrate` before serving (`-e ODCL_MIGRATE=false` to do that yourself) and listens on every interface inside the container, so `-p` decides who reaches it. Every setting above is an environment variable: `ODCL_PUBLIC_URL`, the `ODCL_OIDC_*` ones for single sign-on, `ODCL_SMTP_*` for alerts, `ODCL_LINEAGE_TOKEN`. Options go after the image, replacing the default command: `… open-data-context-layer:0.2 serve --host 0.0.0.0 --require-sign-in`. Any other command runs the same way, or inside the running container:
+
+```sh
+docker exec odcl odcl users add alice --role admin
+docker run --rm -e ODCL_DATABASE_URL=… ghcr.io/lawwu/open-data-context-layer:0.2 find orders
+```
+
+Importing from BigQuery or Vertex AI in a container needs Google credentials in it, such as a service account key mounted read-only with `GOOGLE_APPLICATION_CREDENTIALS` pointing at it. The image reports itself healthy once `GET /v1/me` answers, which needs the database. Tags: `0.2.0` for that release exactly, `0.2` for the newest 0.2.x, `latest` for the newest release, and `sha-…` for a commit. Each image carries its build provenance and an SBOM (`docker buildx imagetools inspect ghcr.io/lawwu/open-data-context-layer:0.2.0 --format '{{json .Provenance}}'`).
+
 ## Users and sign-in
 
 odcl has users, each with one role: `reader` reads; `editor` also annotates (projects and their uses, privacy fields, `created_by`, `references`, copies, documents relied on); `importer` also imports (every `odcl import`, builds, model versions, query history, OpenLineage); `admin` also manages users. [Working with several people](docs/working-with-several-people.md) says why: importers run centrally under a service user, and people annotate as themselves.
@@ -708,7 +727,7 @@ Releases are git tags, `vX.Y.Z`, following semantic versioning; [`CHANGELOG.md`]
 uv tool install "open-data-context-layer[mcp] @ git+https://github.com/lawwu/open-data-context-layer@latest"
 ```
 
-Without the `@…` you get the latest `main`, which takes Dependabot's updates as soon as they merge, before any release. Each release on GitHub also carries the sdist and wheel, with [build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations) (`gh attestation verify FILE -R lawwu/open-data-context-layer`).
+Without the `@…` you get the latest `main`, which takes Dependabot's updates as soon as they merge, before any release. Each release is also a Docker image (see [In Docker](#in-docker)). Each release on GitHub also carries the sdist and wheel, with [build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations) (`gh attestation verify FILE -R lawwu/open-data-context-layer`).
 
 To cut a release:
 
@@ -728,7 +747,7 @@ To cut a release:
    git push origin vX.Y.Z
    ```
 
-The tag starts `release.yml`, which refuses a tag that isn't on `main`, whose version doesn't match `pyproject.toml` and `src/odcl/__init__.py`, or that has no changelog section. It builds the sdist and wheel, checks the wheel installs and runs, attests both, and creates the GitHub release with the changelog section as its notes (a release already made by hand keeps its title and notes and gets the files). `latest.yml` moves the `latest` tag to the highest `vX.Y.Z`, so a patch to an older line doesn't move it back. Both can also be run by hand from the Actions tab.
+The tag starts `release.yml`, which refuses a tag that isn't on `main`, whose version doesn't match `pyproject.toml` and `src/odcl/__init__.py`, or that has no changelog section. It builds the sdist and wheel, checks the wheel installs and runs, attests both, and creates the GitHub release with the changelog section as its notes (a release already made by hand keeps its title and notes and gets the files). `docker.yml` builds the image for both architectures, starts each against PostgreSQL (`scripts/docker-smoke.sh`), and publishes it; run by hand with a tag, it publishes an older release's image. `latest.yml` moves the `latest` tag to the highest `vX.Y.Z`, so a patch to an older line doesn't move it back. Both can also be run by hand from the Actions tab.
 
 ## Not built yet
 
