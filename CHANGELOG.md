@@ -8,6 +8,11 @@ section says how a release is cut.
 
 ## Unreleased
 
+## 0.2.0 (2026-11-22)
+
+The first release. odcl was installed from `main` before this, already reporting 0.2.0; what
+follows is what changed since then. Run `odcl migrate` after upgrading (migrations up to 0014).
+
 - The web page's Account page has an Alerts panel: an editor lists, adds and removes their alert
   subscriptions; an admin sees everyone's.
 - The command line works through an `odcl serve` with `--server URL` or `$ODCL_SERVER`, signed in
