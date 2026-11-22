@@ -675,11 +675,12 @@ class Catalog:
                                    "WHERE target_key = %s AND relation = %s ORDER BY source_key", (key, relation)).fetchall()
         out = [{**summary, "linked_revision": r["target_revision"], "changed_since": r["target_revision"] != r["target_head"],
                 **({"purpose": r["purpose"]} if relation == "uses" else {})} for r, summary in zip(rows, self._summaries([r["other"] for r in rows]), strict=True)]
-        if relation == "uses" and direction == "up":  # how much what a project used has changed since: see odcl.changes
-            from .changes import severity_since_use
+        if relation == "uses" and direction == "up":  # how much what a project used has changed since: see odcl.impact
+            from .impact import impact
+            exposed = {i["key"]: i for i in impact(self, key, revision, kinds=("changed", "retired"))}
             for u in out:  # a table also changes when its columns do
-                u["severity"] = severity_since_use(self, key, u["key"], u["linked_revision"]) if u["changed_since"] or u["kind"] == "table" else None
-                u["changed_since"] = u["changed_since"] or u["severity"] is not None
+                u["severity"] = exposed[u["key"]]["severity"] if u["key"] in exposed else None
+                u["changed_since"] = u["changed_since"] or u["key"] in exposed
         return out
 
     def _walk_edges(self, key: str, direction: str) -> list[dict]:
@@ -1082,15 +1083,17 @@ class Catalog:
 
     def projects(self) -> list[dict]:
         """Every project: how much data it uses, how much of that changed after it was used, and its latest model version."""
-        out = []
+        from .impact import impact
+        out, stale = [], {}
+        for i in impact(self, kinds=("changed", "retired")):  # counted as the overview lists them: a used table changes when its columns do
+            stale[i["project"]] = stale.get(i["project"], 0) + 1
         for r in self.db.execute("""
                 SELECT e.key, r.recorded_at,
                        (SELECT count(*) FROM current_links l WHERE l.source_key = e.key AND l.relation = 'uses') AS uses,
-                       (SELECT count(*) FROM current_links l WHERE l.source_key = e.key AND l.relation = 'uses' AND l.target_revision <> l.target_head) AS stale,
                        (SELECT b.version FROM model_builds b WHERE b.project_key = e.key ORDER BY b.recorded_at DESC, b.id DESC LIMIT 1) AS latest,
                        (SELECT count(*) FROM model_builds b WHERE b.project_key = e.key) AS versions
                 FROM entries e JOIN revisions r ON r.id = e.head_revision WHERE e.kind = 'project' ORDER BY e.key"""):
-            out.append({**self._summary(r["key"]), "uses": r["uses"], "changed_since_used": r["stale"], "model_versions": r["versions"],
+            out.append({**self._summary(r["key"]), "uses": r["uses"], "changed_since_used": stale.get(r["key"], 0), "model_versions": r["versions"],
                         "latest_version": r["latest"], "changed": stamp(r["recorded_at"])})
         return out
 
@@ -1101,22 +1104,18 @@ class Catalog:
             "GROUP BY e.kind")})
         retired = self.db.execute("SELECT COUNT(*) AS n FROM entries e JOIN revisions r ON r.id = e.head_revision "
                                             "WHERE e.kind IN ('table', 'column') AND r.body ? 'retired'").fetchone()["n"]
-        gone = [{"project": r["source_key"], "key": r["target_key"]} for r in self.db.execute(
-            """SELECT l.source_key, l.target_key FROM current_links l JOIN entries e ON e.key = l.target_key JOIN revisions r ON r.id = e.head_revision
-               WHERE l.relation = 'uses' AND r.body ? 'retired' ORDER BY l.source_key, l.target_key""")]
-        from .changes import severity_since_use
-        stale = [{"project": r["source_key"], "key": r["target_key"], "severity": severity_since_use(self, r["source_key"], r["target_key"], r["target_revision"])}
-                 for r in self.db.execute("SELECT source_key, target_key, target_revision FROM current_links WHERE relation = 'uses' "
-                                          "AND (target_revision <> target_head OR target_key LIKE 'table:%%') ORDER BY source_key, target_key")]
-        stale = [x for x in stale if x["severity"] is not None or not x["key"].startswith("table:")]  # a used table changed if its columns did
+        from .impact import impact
+        exposed = impact(self)  # what each project is exposed to through what it uses: see odcl.impact
+        stale = [{"project": i["project"], "key": i["key"], "severity": i["severity"]} for i in exposed if i["kind"] == "changed"]
+        gone = [{"project": i["project"], "key": i["key"]} for i in exposed if i["kind"] == "retired"]
+        failing = [{"project": i["project"], "key": i["key"], "failing": t["entry"], "test": t["test"]} for i in exposed if i["kind"] == "failing"
+                   for t in i["failing"]]
         described = [{"document": r["source_key"], "key": r["target_key"]} for r in self.db.execute(
             "SELECT source_key, target_key FROM current_links WHERE relation = 'describes' AND target_revision <> target_head ORDER BY source_key, target_key")]
         relied = [{"model": r["project_key"].removeprefix("project:"), "version": r["version"], "document": r["document_key"]} for r in self.db.execute(
             """SELECT b.project_key, b.version, d.document_key FROM build_documents d JOIN model_builds b ON b.id = d.build_id
                JOIN entries e ON e.key = d.document_key WHERE e.head_revision <> d.document_revision ORDER BY b.project_key, b.version, d.document_key""")]
         info = self.db.info
-        stale = [x for x in stale if {"project": x["project"], "key": x["key"]} not in gone]  # a retired entry is listed as gone, not as changed
-        from .quality import failing_and_used
-        return {"counts": counts, "retired": retired, "changed_since_used": stale, "retired_but_used": gone, "failing_and_used": failing_and_used(self),
+        return {"counts": counts, "retired": retired, "changed_since_used": stale, "retired_but_used": gone, "failing_and_used": failing,
                 "changed_since_described": described, "changed_since_relied_on": relied,
                 "database": f"{info.host}:{info.port}/{info.dbname}"}

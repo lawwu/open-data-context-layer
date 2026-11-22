@@ -8,6 +8,11 @@ section says how a release is cut.
 
 ## Unreleased
 
+- **One read of what projects are exposed to** (`odcl impact`, `GET /v1/impact`,
+  `odcl.impact`): data a project uses that changed, is gone, or is failing a test. The overview,
+  project pages and alerts all read it, so alerts now also tell of failing data-quality tests
+  (run `odcl migrate` for migration 0014), and the project list counts a used table whose
+  column changed, as the overview does.
 - **One result shape for every import** of tables and columns: `added`, `changed`, `unchanged`,
   `retired`, `withdrawn`, `unresolved` and `skipped`, always present. This changes three:
   BigQuery's `unresolved_references` is now `unresolved`; a Dataform import's counts are at the

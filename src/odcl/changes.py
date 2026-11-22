@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from .store import CatalogError, require, stamp
+from .store import require, stamp
 
 SEVERITY = ("cosmetic", "additive", "semantic", "breaking")
 IGNORED = {"key", "kind", "title", "path", "table", "name", "links", "source", "retired", "retired_by", "headings", "digest", "commit", "url"}
@@ -115,13 +115,3 @@ def diff(catalog, name: str, since=None, until=None) -> dict:
             changes += [{"key": column, **c} for c in body_changes(was and was["body"], now_ and now_["body"])]
     return {"key": key, "kind": last["body"]["kind"], "from": side(first), "to": side(last), "severity": worst(c["severity"] for c in changes),
             "changes": changes}
-
-
-def severity_since_use(catalog, project: str, key: str, revision: str) -> str | None:
-    """The worst change to an entry since a project used it. The use is dated by the first revision of the project
-    that pinned this revision of the entry: a table's columns may have been registered after the table's revision,
-    and before the use."""
-    try:
-        return diff(catalog, key, since=catalog.history.link_started(project, "uses", key, revision) or revision)["severity"]
-    except CatalogError:
-        return None

@@ -139,16 +139,3 @@ def for_entry(catalog: Catalog, name: str, at=None) -> dict:
 def _status(results: list[dict]) -> str | None:
     statuses = {r["status"] for r in results}
     return next((s for s in ("error", "fail", "warn", "pass") if s in statuses), None)
-
-
-def failing_and_used(catalog: Catalog) -> list[dict]:
-    """Entries a project uses whose newest result of some test failed: the column itself, or a column of a used table."""
-    rows = catalog.db.execute("""
-        WITH newest AS (SELECT DISTINCT ON (entry_key, source, test) entry_key, test, status FROM quality_results
-                        ORDER BY entry_key, source, test, observed_at DESC, id DESC),
-             bad AS (SELECT n.entry_key, n.test, r.body ->> 'table' AS tbl FROM newest n JOIN entries e ON e.key = n.entry_key
-                     JOIN revisions r ON r.id = e.head_revision WHERE n.status IN ('fail', 'error'))
-        SELECT DISTINCT l.source_key AS project, l.target_key AS key, b.entry_key AS failing, b.test FROM current_links l
-        JOIN bad b ON b.entry_key = l.target_key OR b.tbl = l.target_key
-        WHERE l.relation = 'uses' ORDER BY 1, 2, 3, 4""").fetchall()
-    return [dict(r) for r in rows]

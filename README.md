@@ -71,6 +71,7 @@ A project depends on data in one of four ways, strongest first: `direct` (it use
 | `odcl import --quality FILE.jsonl` or `--dbt-tests TARGET`; `odcl quality KEY [--at TIME]` | Was it passing its tests, now or then? |
 | `odcl term add`, `odcl domain add`, `odcl means`, `odcl in-domain`, `odcl glossary` | What does this column mean in the business's words, and whose is it? |
 | `odcl popular [--since 30d]` | Which tables are actually queried? |
+| `odcl impact [--project P]` | What is each project exposed to: data that changed, is gone, or is failing a test? |
 | `odcl alerts subscribe\|list\|remove\|send` | Tell the people behind a project when data it uses changes or goes |
 | `odcl used-by KEY` | Which projects depend on it? |
 | `odcl uses PROJECT [--upstream] [--revision REV]` | What did this project use, now or at an older revision of it? |
@@ -313,7 +314,7 @@ uv run odcl alerts subscribe --all --webhook https://ops.example.com/odcl
 uv run odcl alerts send            # after imports, from the same scheduler; --dry-run to see what would go
 ```
 
-- **What is sent.** An entry a project uses that changed after the use (with each change and its severity, as `odcl diff` gives them), or that is retired. A used table changes when its columns do. One message per subscription and run; the webhook's JSON has every change, with `project`, `key`, `kind` (`changed` or `retired`), `severity` and `changes`.
+- **What is sent.** What `odcl impact` lists: an entry a project uses that changed after the use (with each change and its severity, as `odcl diff` gives them), that is retired, or that is failing a data-quality test (it, or a column of a used table; told again when it fails anew after passing). A used table changes when its columns do. One message per subscription and run; the webhook's JSON has every change, with `project`, `key`, `kind` (`changed`, `retired` or `failing`), `severity` and `changes`.
 - **Once each.** A delivery is recorded per subscription, project, entry and the entry's newest revision (a table's newest column counts), so a change is sent once, and a later change to the same entry is sent again. Recording use again (`odcl use`) clears it. A failed delivery is retried on the next `send`.
 - **Who.** An editor subscribes and removes their own subscriptions; an admin sees and removes all of them. `send` needs an importer, like the imports it follows. A webhook address is `https://` (or `http://` on this machine); its path, often its secret, is not shown when subscriptions are listed. Anyone with the database's credentials can read the addresses.
 - **Email** goes through `$ODCL_SMTP_HOST` (`$ODCL_SMTP_PORT`, default 587 with STARTTLS; `$ODCL_SMTP_USER`, `$ODCL_SMTP_PASSWORD`; `$ODCL_SMTP_FROM`). With `$ODCL_PUBLIC_URL`, each alert links to the entry's page.
@@ -668,6 +669,8 @@ ODCL_TEST_DATABASE_URL=postgresql://localhost/odcl_test uv run pytest -q
 ```
 
 Without `ODCL_TEST_DATABASE_URL` the database tests are skipped locally and fail in CI. Schema changes go in a new numbered file in `src/odcl/migrations/`.
+
+**Impact.** `odcl.impact.impact(catalog, project=None)` is the one read of what projects are exposed to through what they use: an item per project, used entry and kind (`changed`, `retired`, `failing`), with its severity, changes or failing tests, the project's owner, and a `state` that moves when the exposure does. The overview's three lists, a project's `uses`, the project list's counts and alerts all come from it, so a new kind of exposure reaches all of them.
 
 **Reading history.** `catalog.history` ([`src/odcl/history.py`](src/odcl/history.py)) is the one place that knows how entries, revisions and their pinned links are stored: an entry's head, its revisions in order, the revision that was its head at a time, a point in the order of all revisions, what a revision pinned, and when a link began. Modules that ask about the past (diffs, alerts, quality results, exports, model traces) ask it rather than the tables.
 
