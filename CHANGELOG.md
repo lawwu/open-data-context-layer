@@ -8,6 +8,8 @@ section says how a release is cut.
 
 ## Unreleased
 
+- The web page's Account page has an Alerts panel: an editor lists, adds and removes their alert
+  subscriptions; an admin sees everyone's.
 - The command line works through an `odcl serve` with `--server URL` or `$ODCL_SERVER`, signed in
   with `$ODCL_TOKEN`, so people read and annotate without database credentials. Commands that
   read from where the data is (imports, syncs) still need a database connection, and say so.

@@ -154,3 +154,6 @@ button.link:hover { text-decoration: underline; }
 .graph .node.selected rect.box { stroke: var(--link); stroke-width: 2; }
 .graph .node.retired text { fill: var(--muted); }
 .graph .edge, .graph .node { transition: opacity 120ms; }
+.subscribe { flex-wrap: wrap; align-items: end; gap: 8px; }
+.subscribe .field { display: inline-flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--ink-2); }
+.subscribe input[hidden] { display: none; }
