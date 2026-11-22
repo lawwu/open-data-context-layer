@@ -2,7 +2,7 @@
 
 Who should write to the catalog once more than one person uses it: everyone, or one admin? This page lays out the
 options for odcl as it is built, the one chosen, and what that means for credentials, the HTTP API, MCP, and hand
-edits versus imports. The [README](../README.md#users-and-sign-in) says how to set it up.
+edits versus imports. [Users and sign-in](serving.md#users-and-sign-in) says how to set it up.
 
 ## What odcl already gives several writers
 
