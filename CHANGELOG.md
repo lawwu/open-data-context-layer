@@ -8,6 +8,9 @@ section says how a release is cut.
 
 ## Unreleased
 
+- The command line works through an `odcl serve` with `--server URL` or `$ODCL_SERVER`, signed in
+  with `$ODCL_TOKEN`, so people read and annotate without database credentials. Commands that
+  read from where the data is (imports, syncs) still need a database connection, and say so.
 - **One read of what projects are exposed to** (`odcl impact`, `GET /v1/impact`,
   `odcl.impact`): data a project uses that changed, is gone, or is failing a test. The overview,
   project pages and alerts all read it, so alerts now also tell of failing data-quality tests

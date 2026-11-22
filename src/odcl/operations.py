@@ -69,9 +69,26 @@ class Operation:
     mcp_help: str | None = None
     mcp_wrap: str | None = None  # the key an MCP result is put under, for a result that is a list
     text: Callable[[Any, dict], list[str]] | None = None
+    remote: Callable[[dict], tuple[str, dict]] | None = None  # through a server: the operation and params to send, worked out here
+
 
     def lines(self, result, params: dict) -> list[str]:
         return self.text(result, params) if self.text else [json.dumps(result, indent=2, default=str)]
+
+
+def through_server(remote, op: Operation, params: dict):
+    """Run an operation through an `odcl serve` (`odcl.mcp.Remote`) rather than the database. An operation whose
+    params need working out on this machine first, such as a local file read from git, says how in `remote`. One
+    that reads from somewhere only this machine reaches (an import, a sync) cannot go through a server."""
+    sent, what = op, params
+    if op.remote:
+        name, what = op.remote(params)
+        sent = BY_NAME[name]
+    require(sent.http, "server", f"odcl {op.cli} reads from where the data is, so it needs a database connection, not --server")
+    left = [p.name.upper() if p.cli == "positional" else p.flag for p in sent.params
+            if p.http is None and p.cli is not None and what.get(p.name) not in (None, False, [], p.default)]
+    require(not left, "server", f"{', '.join(left)} cannot go through a server")
+    return remote.call(sent, what)
 
 
 def prepare(op: Operation, given: dict) -> dict:
@@ -177,6 +194,20 @@ def _created_by(catalog, key, what=None, kind=None, command_line=None, note=None
     if created_by is None and not clear and (what or command_line or note):
         created_by = _module("provenance").describe(what, kind=kind, command=command_line, note=note, repo_url=repo_url, commit=commit)
     return catalog.set_created_by(key, None if clear else created_by)
+
+
+def _created_by_remote(p: dict) -> tuple[str, dict]:
+    said = p.get("created_by")
+    if said is None and not p.get("clear") and (p.get("what") or p.get("command_line") or p.get("note")):
+        said = _module("provenance").describe(p.get("what"), kind=p.get("kind"), command=p.get("command_line"), note=p.get("note"),
+                                              repo_url=p.get("repo_url"), commit=p.get("commit"))
+    return "created_by", {"key": p["key"], "created_by": None if p.get("clear") else said}
+
+
+def _subscribe_remote(p: dict) -> tuple[str, dict]:
+    said = [(c, p.get(c)) for c in ("webhook", "slack", "email") if p.get(c)]
+    channel, address = said[0] if said else (p.get("channel"), p.get("address"))
+    return "alerts_subscribe", {**{k: v for k, v in p.items() if k not in ("webhook", "slack", "email")}, "channel": channel, "address": address}
 
 
 def _proposals(catalog, table=None, all=False, min_confidence="low", write=None):  # noqa: A002
@@ -503,6 +534,14 @@ def _token_text(result, params):
             "Use it as ODCL_TOKEN=... for the CLI and odcl mcp, or as Authorization: Bearer ... over HTTP."]
 
 
+def _whoami_text(r, params) -> list[str]:
+    if "user" in r:  # through a server: who the token signs in as
+        return [_user(r["user"])] if r["user"] else ["Not signed in: set $ODCL_TOKEN to an API token to write, or to read from a server that asks for sign-in."]
+    if r.get("direct"):
+        return [f"{r['name']}: a direct database connection, without a token. Writes are recorded under this name."]
+    return [_user(r)]
+
+
 def _propose_manifest_text(result, params):
     out = [json.dumps(result["manifest"], indent=2), "", "Where each value came from:"] + [f"  {k}: {v}" for k, v in result["sources"].items()]
     out += ["", "Ready to import." if result["ready"] else "Review before importing:"] + [f"  - {r}" for r in result["review"]]
@@ -672,7 +711,7 @@ def _ops() -> list[Operation]:
                    Param("note", "anything else worth knowing", http=None), Param("repo_url", "the repository, when the file is not in a local checkout", http=None),
                    Param("commit", "the commit, when git cannot say", http=None), Param("clear", "forget what created it", kind="bool", http=None),
                    Param("created_by", kind="any", cli=None)),
-                  role="editor", cli="created-by", http="POST /v1/entries/{key}/created-by",
+                  role="editor", cli="created-by", http="POST /v1/entries/{key}/created-by", remote=_created_by_remote,
                   text=lambda r, p: _revision(r) + [f"  created by {_created(r.get('created_by'))}" if r.get("created_by") else "  nothing recorded"]),
         Operation("references", "say which columns a column's values are drawn from: a foreign key", lambda c, key, columns=None: c.set_references(key, columns or []),
                   (Param("key", cli="positional", metavar="COLUMN", required=True),
@@ -716,7 +755,7 @@ def _ops() -> list[Operation]:
                    Param("email", "through the SMTP server in $ODCL_SMTP_HOST", metavar="ADDRESS", group="to!", http=None),
                    Param("channel", cli=None), Param("address", cli=None),
                    Param("min_severity", choices=("cosmetic", "additive", "semantic", "breaking"), default="semantic")),
-                  role="editor", cli="alerts subscribe", http="POST /v1/alerts/subscriptions",
+                  role="editor", cli="alerts subscribe", http="POST /v1/alerts/subscriptions", remote=_subscribe_remote,
                   text=lambda r, p: [f"subscription {r['id']}: {r['scope']}{' ' + r['target'] if r['target'] else ''} -> {r['channel']} {r['address']}"]),
         Operation("alerts_list", "subscriptions: your own, or every one for an admin", lambda c: _module("alerts").subscriptions(c),
                   cli="alerts list", http="GET /v1/alerts/subscriptions", text=_subscriptions_text),
@@ -729,8 +768,8 @@ def _ops() -> list[Operation]:
 
         # users and tokens
         Operation("me", "the signed-in user, or null", lambda c: {"user": c.user}, role="anyone", http="GET /v1/me"),
-        Operation("whoami", "who this connection writes as", users.whoami, cli="users whoami",
-                  text=lambda r, p: [f"{r['name']}: a direct database connection, without a token. Writes are recorded under this name."] if r.get("direct") else [_user(r)]),
+        Operation("whoami", "who this connection writes as", users.whoami, cli="users whoami", remote=lambda p: ("me", {}),
+                  text=_whoami_text),
         Operation("users_list", "every user (admin)", users.listing, role="admin", cli="users list", http="GET /v1/users",
                   text=lambda r, p: [_user(u) for u in r] or ["No users yet. Make the first admin: odcl users add NAME --role admin"]),
         Operation("users_add", "make a user: a person, or a service user for importers (admin)", users.add,
@@ -741,10 +780,13 @@ def _ops() -> list[Operation]:
                   (Param("name", cli="positional", required=True), Param("role", choices=ROLE_CHOICES), Param("disabled", kind="bool", cli=None),
                    Param("disable", "their tokens and sessions stop working", kind="bool", group="on", http=None),
                    Param("enable", kind="bool", group="on", http=None)),
-                  role="admin", cli="users set", http="POST /v1/users/{name}", text=lambda r, p: [_user(r)]),
+                  role="admin", cli="users set", http="POST /v1/users/{name}", text=lambda r, p: [_user(r)],
+                  remote=lambda p: ("users_set", {"name": p["name"], "role": p.get("role"),
+                                                  "disabled": True if p.get("disable") else False if p.get("enable") else None})),
         Operation("token", "make an API token, shown once: your own, or (admin) a user's", users.make_token,
                   (Param("name", cli="positional", nargs="?", http=None), Param("label", "what it is for, e.g. ci or laptop")),
-                  cli="users token", http="POST /v1/me/tokens", text=_token_text),
+                  cli="users token", http="POST /v1/me/tokens", text=_token_text,
+                  remote=lambda p: ("token_for", p) if p.get("name") else ("token", p)),  # another user's token: an admin's route
         Operation("token_for", "make an API token for a user (admin)", users.make_token, (Param("name", cli=None), Param("label")),
                   role="admin", http="POST /v1/users/{name}/tokens", text=_token_text),
         Operation("tokens", "the current tokens of a user (yours, or admin: anyone's)", users.tokens, (Param("name", cli="positional", nargs="?", http=None),),
