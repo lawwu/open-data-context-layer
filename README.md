@@ -111,6 +111,8 @@ Add `--json` before the command for the full result. A bare path such as `churn.
 
 The database is one PostgreSQL database: `--database-url`, else `$ODCL_DATABASE_URL`. Run `odcl migrate` once on a new database and again after upgrading. With `$ODCL_TOKEN` set to an API token, the command signs in as that token's user, records changes under their name and checks their role (see [Users and sign-in](#users-and-sign-in)). Without one it is a direct connection, trusted because it holds the database's credentials, and changes are recorded under `--as`, else `$ODCL_USER`, else your login name.
 
+With `--server URL` (or `$ODCL_SERVER`) the command works through an `odcl serve` instead, so a person needs no database credentials: reads and writes go over its HTTP API, signed in with `$ODCL_TOKEN`, recorded under that user and checked against their role by the server. What is worked out on your machine is worked out before it is sent, such as `odcl created-by` reading a local file's repository and commit from git. Commands that read from where the data is (`import`, `sync`, `handoff`, `record`, `discover`, `propose`, `add table`, `add column`, `privacy apply`) need a database connection and say so, as do options that write a local file, such as `privacy propose --write`.
+
 ## Importing from dbt
 
 `odcl import --dbt target/` reads `manifest.json` (run `dbt compile` or `dbt run` first), and `catalog.json` for column types when `dbt docs generate` has written it.
@@ -734,7 +736,6 @@ The tag starts `release.yml`, which refuses a tag that isn't on `main`, whose ve
 - Sending the catalog's runs and lineage out as OpenLineage events.
 - Discovering Dataform invocations, and Dataform runs started from the CLI rather than the managed service.
 - Permissions finer than a role, such as who may change which tables. Whoever holds the database's credentials can still do anything.
-- The CLI through `odcl serve` (as `odcl mcp --server` does), so people annotate from the command line without database credentials.
 - Retiring what an OpenLineage producer stopped emitting: events say what a run touched, not everything that exists.
 
 The distribution is `open-data-context-layer`, the Python package is `odcl`, and the command is `odcl`. The repository is [lawwu/open-data-context-layer](https://github.com/lawwu/open-data-context-layer).

@@ -8,6 +8,9 @@ section says how a release is cut.
 
 ## Unreleased
 
+- The command line works through an `odcl serve` with `--server URL` or `$ODCL_SERVER`, signed in
+  with `$ODCL_TOKEN`, so people read and annotate without database credentials. Commands that
+  read from where the data is (imports, syncs) still need a database connection, and say so.
 - **Security fixes** from a review of sign-in and the HTTP API:
   - Single sign-on counts an email only when the provider says it is verified (`email_verified`
     true, or Entra's `xms_edov`), for `ODCL_OIDC_ADMIN_EMAILS` and for taking over a user an admin

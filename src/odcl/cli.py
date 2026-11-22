@@ -10,7 +10,7 @@ import json
 import os
 import sys
 
-from .operations import GROUPS, OPERATIONS, Operation, operation, prepare
+from .operations import GROUPS, OPERATIONS, Operation, operation, prepare, through_server
 from .store import Catalog, CatalogError, migrate
 from .times import moment, span  # noqa: F401 - kept where they were for callers that import them from here
 
@@ -52,6 +52,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--database-url", metavar="URL", help="the PostgreSQL database (default: $ODCL_DATABASE_URL)")
     p.add_argument("--as", dest="actor", help="who is registering, on a direct connection without $ODCL_TOKEN (default: $ODCL_USER, else your login name)")
     p.add_argument("--json", action="store_true", help="print the full result as JSON")
+    p.add_argument("--server", dest="via_server", metavar="URL",
+                   help="work through an odcl serve at URL instead of the database, signed in with $ODCL_TOKEN (default: $ODCL_SERVER)")
     sub = p.add_subparsers(dest="command", required=True)
     groups: dict[str, argparse._SubParsersAction] = {}
     for op in OPERATIONS:
@@ -110,10 +112,19 @@ def main(argv=None) -> int:
         if args.command == "serve":
             return _serve(args)
         token = os.environ.get("ODCL_TOKEN") or None
-        if args.command == "mcp" and args.server:
+        server = args.via_server or os.environ.get("ODCL_SERVER") or None
+        if args.command == "mcp" and (args.server or server):
             from .mcp import Remote
             from .mcp import main as serve
-            return serve(Remote(args.server, token), args.allow_writes)
+            return serve(Remote(args.server or server, token), args.allow_writes)
+        if server:  # through an odcl serve: no database credentials here, and writes are recorded as the token's user
+            from .mcp import Remote
+            op = operation(args.op)
+            params = prepare(op, {p.name: getattr(args, p.name, None) for p in op.params})
+            remote = Remote(server, token)
+            result = through_server(remote, op, params)
+            print(json.dumps(result, indent=2, default=str) if args.json else "\n".join(op.lines(result, params)))
+            return 0
         with Catalog(args.database_url, args.actor, token=token) as catalog:
             if args.command == "mcp":
                 from .mcp import main as serve
