@@ -287,68 +287,36 @@ class Catalog:
                 require(NAME.match(name), "name", f"A {kind} name is letters, digits, _ . or -")
                 key, title = f"{kind}:{name}", name
                 extra = {"name": name}
+            from .fields import of
+            fields = of(kind)  # what an entry of this kind can say, and how each field is kept and stored: see odcl.fields
+            prior = None
+            if merge or kind == "project" or any(f.beside and f.name not in p for f in fields):
                 self._lock(key)
                 prior = self._head(key)
-                if kind == "project":  # uses are recorded by `use`, so saying the project again keeps them
-                    links = [link for link in prior["body"]["links"] if link["relation"] == "uses"] if prior else []
-                if prior and not merge and "domain" not in p:  # as is its domain, which its own command sets
-                    p = {**p, "domain": next((link["to"] for link in prior["body"]["links"] if link["relation"] == "in_domain"), None)}
+            if kind == "project" and prior:  # uses are recorded by `use`, so saying the project again keeps them
+                links = [link for link in prior["body"]["links"] if link["relation"] == "uses"]
+            if prior and merge:  # what the payload leaves out, or says as None, keeps what the entry says
+                said = prior["body"]
+                kept = {"description": said["description"] or None, "tags": said["tags"], **{f.name: f.said(said) for f in fields}}
+                require(isinstance(payload.get("source") or {}, dict), "source", "source is a small object saying where the entry came from")
+                p = {**kept, **{k: v for k, v in payload.items() if v is not None}, "source": {**said["source"], **(payload.get("source") or {})}}
+            elif prior:  # a payload says the whole entry, but not what is said beside it: what it leaves out of that is kept
+                kept = {f.name: f.said(prior["body"]) for f in fields if f.beside and f.name not in p}
+                p = {**p, **{k: v for k, v in kept.items() if v not in (None, [])}}
             if merge:
-                self._lock(key)
-                prior = self._head(key)
-                if prior:
-                    said = prior["body"]
-                    linked = lambda relation: [link["to"] for link in said["links"] if link["relation"] == relation]
-                    kept = {"description": said["description"] or None, **{f: said.get(f) for f in TEXT[kind]}, "tags": said["tags"],
-                            **({f: said.get(f) for f in ("pii", *PRIVACY)} if kind in ("table", "column") else {}),
-                            **({"instances": said.get("instances"), "created_by": said.get("created_by")} if kind == "table" else {}),
-                            "derived_from": linked("derived_from"), "terms": linked("means"), "domain": next(iter(linked("in_domain")), None),
-                            **({"synonyms": said.get("synonyms")} if kind == "term" else {}),
-                            **({"references": linked("references")} if kind == "column" else {})}
-                    require(isinstance(payload.get("source") or {}, dict), "source", "source is a small object saying where the entry came from")
-                    p = {**kept, **{k: v for k, v in payload.items() if v is not None}, "source": {**said["source"], **(payload.get("source") or {})}}
                 p = self._own_tags(p, payload, prior["body"] if prior else None)
-            elif kind in ("table", "column"):
-                p = self._keep_annotations(kind, key, p)
-            if kind in ("table", "column"):
-                for parent in names(p.get("derived_from"), "derived_from"):
-                    parent = self.resolve(parent, (kind,))
-                    require(parent != key, "derived_from", f"{key} cannot be derived from itself")
-                    links.append({"relation": "derived_from", "to": parent, "revision": self._head(parent)["id"]})
-            if kind == "column":  # a foreign key: the columns this one's values are drawn from; not lineage
-                for target in names(p.get("references"), "references", 20):
-                    target = self.resolve(target, ("column",))
-                    require(target != key, "references", f"{key} cannot reference itself")
-                    links.append({"relation": "references", "to": target, "revision": self._head(target)["id"]})
-            if kind in ("table", "column"):  # the glossary terms it means
-                for term in names(p.get("terms"), "terms", 20):
-                    term = self.resolve(term, ("term",))
-                    links.append({"relation": "means", "to": term, "revision": self._head(term)["id"]})
-            if kind in ("table", "project", "term") and p.get("domain"):  # the one domain it belongs to
-                domain = self.resolve(str(p["domain"]), ("domain",))
-                links.append({"relation": "in_domain", "to": domain, "revision": self._head(domain)["id"]})
-            synonyms = None
-            if kind == "term" and p.get("synonyms"):
-                synonyms = names(p["synonyms"], "synonyms", 20)
-                require(all(len(x) <= 100 for x in synonyms), "synonyms", "A synonym is at most 100 characters")
-                synonyms = sorted(set(synonyms))
-            instances = None
-            if kind == "table" and p.get("instances") is not None:
-                instances = names(p["instances"], "instances", 50)
-                instances = sorted({i.lower().removeprefix("table:") for i in instances})
-                require(all(GLOB.match(i) for i in instances), "instances", "An instance pattern is a table path with * ? or [ ] in it, like t-*.sales.orders")
-                links += self._instance_links(key, instances)
+            said_by_fields: dict = {}
+            for f in fields:
+                body_part, made = f.store(self, kind, key, p.get(f.name))
+                said_by_fields |= body_part
+                links += made
             tags = p.get("tags") or []
             require(isinstance(tags, list) and len(tags) <= 30 and all(isinstance(t, str) and 0 < len(t) <= 60 for t in tags), "tags", "Use at most 30 short tags")
             source = p.get("source") or {}
             require(isinstance(source, dict) and len(json.dumps(source)) <= 5000, "source", "source is a small object saying where the entry came from")
             body = {"key": key, "kind": kind, "title": title, **extra,
                     "description": text(p.get("description"), "description", 4000, optional=kind not in ("project", "term")) or "",
-                    **{field: text(p.get(field), field, limit, optional=True) for field, limit in TEXT[kind].items()},
-                    **(self._privacy(p) if kind in ("table", "column") else {}), **({"instances": instances} if instances else {}),
-                    **({"synonyms": synonyms} if synonyms else {}),
-                    **({"created_by": created} if kind == "table" and (created := self._created_by(p)) else {}),
-                    "tags": sorted(set(tags)), "source": source, "links": links}
+                    **said_by_fields, "tags": sorted(set(tags)), "source": source, "links": links}
             # a hand edit annotates a retired entry; only its source seeing it again revives it
             written = self._write(body, keep_retired=not payload.get("source") and payload.get("retired") is not False)
             if kind == "table" and written["change"] == "added":
@@ -357,27 +325,6 @@ class Catalog:
                 else:
                     self._link_to_definitions([key])
             return written
-
-    def _keep_annotations(self, kind: str, key: str, p: dict) -> dict:
-        """Without `merge`, a payload says the whole entry, but an importer such as dbt does not know what was said
-        beside it: the copies of a definition, what created a table, a column's foreign keys and the privacy fields.
-        Those it leaves out (the field is absent, not None) keep what the entry says now; their own commands change them."""
-        fields = ("pii", *PRIVACY, "terms", *(("instances", "created_by", "domain") if kind == "table" else ()), *(("references",) if kind == "column" else ()))
-        if all(f in p for f in fields):
-            return p
-        self._lock(key)
-        prior = self._head(key)
-        if not prior:
-            return p
-        said = prior["body"]
-        kept = {f: said[f] for f in fields if f not in p and f in said}
-        if "references" in fields and "references" not in p:
-            kept["references"] = [link["to"] for link in said["links"] if link["relation"] == "references"] or None
-        if "terms" not in p:
-            kept["terms"] = [link["to"] for link in said["links"] if link["relation"] == "means"] or None
-        if "domain" in fields and "domain" not in p:
-            kept["domain"] = next((link["to"] for link in said["links"] if link["relation"] == "in_domain"), None)
-        return {**p, **{k: v for k, v in kept.items() if v is not None}}
 
     def _instance_links(self, key: str, patterns: list[str]) -> list[dict]:
         """`instance_of` links from a definition table to every other table whose path one of its patterns matches."""
@@ -394,23 +341,6 @@ class Catalog:
                                     WHERE r.body ? 'instances' ORDER BY r.entry_key""").fetchall():
             if any(key != r["body"]["key"] and fnmatchcase(key[6:], p) for key in keys for p in r["body"]["instances"]):
                 self.put("table", {"path": r["body"]["path"]}, merge=True)
-
-    @staticmethod
-    def _created_by(p: dict) -> dict | None:
-        from .provenance import check
-        return check(p.get("created_by"))
-
-    @staticmethod
-    def _privacy(p: dict) -> dict:
-        """Whether a table or column holds personal data, its data category, how long it is kept and how it is scrubbed.
-        Only what is said is kept, so entries that say none of it read as they did before these fields existed."""
-        pii = p.get("pii")
-        if isinstance(pii, str):
-            require(pii.lower() in ("yes", "no", "true", "false"), "pii", "pii is yes or no")
-            pii = pii.lower() in ("yes", "true")
-        require(pii is None or isinstance(pii, bool), "pii", "pii is yes or no")
-        found = {field: text(p.get(field), field, limit, optional=True) for field, limit in PRIVACY.items()}
-        return {k: v for k, v in {"pii": pii, **found}.items() if v is not None}
 
     @staticmethod
     def _own_tags(p: dict, payload: dict, said: dict | None) -> dict:
