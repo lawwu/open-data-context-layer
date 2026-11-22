@@ -25,7 +25,7 @@ import hashlib
 import re
 from datetime import datetime, timezone
 
-from . import lineage
+from . import lineage, runs
 from .store import Catalog, CatalogError, require
 
 DIALECT = "bigquery"
@@ -152,7 +152,7 @@ def evaluate(catalog: Catalog, client, refs: list[str], source_uri: str, objects
         stats, status = job.get("statistics") or {}, job.get("status") or {}
         kind = (stats.get("query") or {}).get("statementType")
         require(kind == "EXPORT_DATA", "export_job", f"{ref} is a {kind or 'non-query'} job, not EXPORT DATA")
-        require(status.get("state") == "DONE" and not status.get("errorResult"), "export_job_failed",
+        require(runs.succeeded("bigquery", status.get("state"), status.get("errorResult")), "export_job_failed",
                 f"{ref} did not succeed ({status.get('state')}{': ' + status['errorResult'].get('reason', '') if status.get('errorResult') else ''}), "
                 "so it wrote no files to bind")
         query = ((job.get("configuration") or {}).get("query") or {}).get("query") or ""

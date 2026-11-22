@@ -27,11 +27,11 @@ from datetime import datetime
 
 from psycopg.types.json import Jsonb
 
+from . import runs
 from .lineage import template
 from .store import PATH, Catalog, CatalogError, require
 
 RUN_STATES = ("START", "RUNNING", "COMPLETE", "ABORT", "FAIL", "OTHER")
-FINISHED = ("COMPLETE", "ABORT", "FAIL")
 # namespaces whose dataset names are already database.schema.table, the way the other importers key tables
 WAREHOUSES = {"bigquery": "bigquery", "postgres": "postgres", "postgresql": "postgres", "mysql": "mysql", "snowflake": "snowflake",
               "redshift": "redshift", "trino": "trino", "presto": "presto", "duckdb": "duckdb", "sqlserver": "tsql", "mssql": "tsql",
@@ -230,9 +230,10 @@ def _record_run(db, run_id: str, run: dict, state: str, at: datetime, job: str, 
                 "inputs": sorted(set(said.get("inputs", [])) | {d.key for d in inputs}),
                 "outputs": sorted(set(said.get("outputs", [])) | {d.key for d in outputs}),
                 "parent": parent or said.get("parent"), "sql": shape or said.get("sql")}
-    started = at if state == "START" or (prior is None and state not in FINISHED) else None
-    ended = at if state in FINISHED else None
-    if prior and prior["state"] in FINISHED and state not in FINISHED:
+    done = runs.finished("openlineage", state)
+    started = at if state == "START" or (prior is None and not done) else None
+    ended = at if done else None
+    if prior and runs.finished("openlineage", prior["state"]) and not done:
         state = prior["state"]  # a run that finished does not go back to running
     parent_id = db.execute("SELECT id FROM executions WHERE system = 'openlineage' AND native_key = %s", (parent,)).fetchone() if parent else None
     db.execute("""

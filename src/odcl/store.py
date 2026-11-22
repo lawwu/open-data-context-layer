@@ -35,6 +35,8 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from . import runs
+
 KINDS = ("table", "column", "project", "document", "term", "domain")
 DESCRIBED = ("table", "column", "project", "term", "domain")  # what a document can describe
 DOCUMENT = re.compile(r"^[a-z0-9_][a-z0-9_.\-/@~+]{0,499}$")
@@ -848,6 +850,7 @@ class Catalog:
     def _job(row: dict) -> dict:
         return {"project": row["execution_project"], "location": row["location"], "job_id": row["job_id"], "parent_job_id": row["parent_job_id"],
                 "created": stamp(row["created_at"]), "ended": stamp(row["ended_at"]) if row["ended_at"] else None, "state": row["state"],
+                "outcome": runs.outcome("bigquery", row["state"], row["error_reason"]),
                 "statement_type": row["statement_type"], "error_reason": row["error_reason"], "cache_hit": row["cache_hit"],
                 "processed_bytes": row["processed_bytes"], "billed_bytes": row["billed_bytes"], "slot_ms": row["slot_ms"],
                 "pattern_id": row["pattern_id"], "gaps": row["gaps"]}
@@ -915,7 +918,7 @@ class Catalog:
             ev = r["evidence"]
             job = ev.get("job") or ev.get("target") or (f"{ev['pipeline_run'].rsplit('/', 1)[-1]} / {ev['task']}" if ev.get("task") else None) or r["native_key"]
             outputs = ev.get("outputs") or ([f"table:{ev['target']}"] if ev.get("target") else [])
-            out.append({"system": r["system"], "kind": r["kind"], "run": r["native_key"], "job": job, "state": r["state"],
+            out.append({"system": r["system"], "kind": r["kind"], "run": r["native_key"], "job": job, "state": r["state"], "outcome": runs.outcome(r["system"], r["state"]),
                         "started": stamp(r["started_at"]) if r["started_at"] else None, "ended": stamp(r["ended_at"]) if r["ended_at"] else None,
                         "inputs": ev.get("inputs") or [], "outputs": outputs, "parent": r["parent_key"] or ev.get("parent"), "sql": ev.get("sql"),
                         "bigquery_job": {"project": r["job_project"], "location": r["job_location"], "job_id": r["job_id"]} if r["job_id"] else None})

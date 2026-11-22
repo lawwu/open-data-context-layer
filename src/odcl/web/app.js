@@ -120,11 +120,13 @@ function consoleLink(url, text = "Console") {
   return url ? h("a", { class: "console", href: url, target: "_blank", rel: "noopener noreferrer", title: "Open in the Google Cloud console" }, text, " ↗") : null;
 }
 
-function stateBadge(state) {
-  const value = String(state || "UNKNOWN");
-  const good = /^(COMPLETE|SUCCEEDED|PIPELINE_STATE_SUCCEEDED|DONE)$/.test(value);
-  const bad = /(FAIL|ABORT|CANCEL)/.test(value);
-  return h("span", { class: `status ${good ? "good" : bad ? "critical" : ""}` }, good ? "✓ " : bad ? "✕ " : "◷ ", value.replace("PIPELINE_STATE_", ""));
+// A run's state in its own system's words, marked by the outcome the server read it as (odcl/runs.py). A trace
+// that leaves the outcome out holds only runs already checked to have succeeded.
+const OUTCOME_BADGE = { succeeded: ["good", "✓"], failed: ["critical", "✕"], cancelled: ["critical", "✕"], skipped: ["", "–"], running: ["", "◷"], unknown: ["", "?"] };
+
+function stateBadge(state, outcome = "succeeded") {
+  const [cls, mark] = OUTCOME_BADGE[outcome] || OUTCOME_BADGE.unknown;
+  return h("span", { class: `status ${cls}`, title: outcome }, `${mark} `, String(state || "UNKNOWN").replace("PIPELINE_STATE_", ""));
 }
 
 function changedBadge(severity) {
@@ -591,7 +593,7 @@ async function historySection(key) {
     const history = await api(`/v1/query-history?table=${enc(short(key))}&since=30d&limit=20`);
     if (!history.jobs.length) return h("div", {});
     return h("div", {}, h("h2", {}, `Query jobs in the last 30 days (${history.totals.jobs})`),
-      table(["Job", "Read or write", "State", "Created"], history.jobs.map((j) => [[h("code", {}, j.job_id), " ", consoleLink(gcp.job(j.project, j.location, j.job_id))], j.roles.join(", "), stateBadge(j.state), when(j.created)])),
+      table(["Job", "Read or write", "State", "Created"], history.jobs.map((j) => [[h("code", {}, j.job_id), " ", consoleLink(gcp.job(j.project, j.location, j.job_id))], j.roles.join(", "), stateBadge(j.state, j.outcome), when(j.created)])),
       history.more ? h("p", { class: "muted" }, "More jobs than shown.") : null);
   } catch {
     return h("div", {});
@@ -722,7 +724,7 @@ function filesSteps(files) {
     step("Written by", written ? `${written.pipeline_run.split("/").pop()} / task ${written.task}` : files.created_by ? files.created_by.kind : "not recorded",
       written ? h("span", {}, written.pipeline_run, " ", consoleLink(gcp.pipelineRun(written.pipeline_run)))
         : files.created_by ? createdBy(files.created_by) : "the files were named by URI, not read from a pipeline task's output",
-      written?.state ? h("span", {}, stateBadge(written.state)) : null),
+      written?.state ? h("span", {}, stateBadge(written.state, written.outcome)) : null),
     step("Exported from", exported ? entryLink(`table:${exported.table}`, exported.table) : "not recorded",
       exported ? h("span", {}, "table-level lineage only, pinned when the files were recorded",
         exported.changed_since ? [" ", changedBadge()] : null) : null),
@@ -826,7 +828,7 @@ async function datasetPage(reference) {
     h("ol", { class: "trace" },
       step("Snapshot of", entryLink(`table:${d.snapshot_of}`), `taken ${d.snapshot_time}`, h("span", {}, consoleLink(gcp.table(d.snapshot), "Snapshot in BigQuery"))),
       step("Produced by", d.produced_by.dataform_invocation ? d.produced_by.dataform_invocation.split("/").pop() : "?", d.produced_by.dataform_invocation,
-        h("span", {}, stateBadge(d.produced_by.state), " ", when(d.produced_by.started), " → ", when(d.produced_by.ended), " ",
+        h("span", {}, stateBadge(d.produced_by.state, d.produced_by.outcome), " ", when(d.produced_by.started), " → ", when(d.produced_by.ended), " ",
           consoleLink(gcp.invocation(d.produced_by.dataform_invocation)))),
       step("Executed as", d.executed_as ? d.executed_as.job_id : "an unknown job",
         d.executed_as ? h("span", {}, `BigQuery job in ${d.executed_as.project}, ${d.executed_as.location} · ${d.executed_as.statement_type} · ${(d.executed_as.billed_bytes ?? 0).toLocaleString()} bytes billed `,
@@ -919,7 +921,7 @@ function runsTable(runs) {
   const keys = (list) => list.map((k, n) => [n ? ", " : "", entryLink(k)]);
   return table(["Run", "System", "State", "Started", "Ended", "Read", "Wrote"], runs.map((r) => [
     [h("span", { title: r.run }, /^projects\//.test(r.job) ? r.job.split("/").pop() : r.job), " ", consoleLink(runConsole(r))],
-    r.system, stateBadge(r.state), when(r.started), when(r.ended), keys(r.inputs), keys(r.outputs)]), "No run is recorded yet.");
+    r.system, stateBadge(r.state, r.outcome), when(r.started), when(r.ended), keys(r.inputs), keys(r.outputs)]), "No run is recorded yet.");
 }
 
 async function runsPage(params) {

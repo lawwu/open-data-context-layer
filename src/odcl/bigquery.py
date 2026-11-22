@@ -13,7 +13,7 @@ import re
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-from . import store
+from . import runs, store
 from .lineage import MAX_SQL, template  # noqa: F401 - the SQL shape is shared with the OpenLineage importer
 from .store import Catalog, CatalogError, reference_entries, require
 
@@ -126,7 +126,7 @@ def _store_job(db, record: dict, shape: str | None, capture: bool) -> bool:
     job = (record["project"], record["location"], record["job_id"])
     # a time-travel or partition decorator is how the table was read, not another table
     tables = [(*job, table, "read", "jobs.list referencedTables") for table in sorted({DECORATOR.sub("", t) for t in record["referenced_tables"]})]
-    succeeded = record["state"] == "DONE" and not record["error_reason"]
+    succeeded = runs.succeeded("bigquery", record["state"], record["error_reason"])
     if succeeded and record["destination_table"] and not record["destination_temporary"]:
         tables.append((*job, DECORATOR.sub("", record["destination_table"]), "write", "jobs.list destinationTable"))
     db.execute("DELETE FROM query_tables WHERE execution_project = %s AND location = %s AND job_id = %s", job)

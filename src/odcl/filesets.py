@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from psycopg.types.json import Jsonb
 
-from . import parquet
+from . import parquet, runs
 from .store import Catalog, require
 
 TAIL = 64 * 1024  # most footers fit; a larger one is read again at its own size
@@ -84,7 +84,7 @@ def record(catalog: Catalog, *, client, pipeline_run: str | None = None, task: s
     catalog.allow("importer")
     from . import exports
     from .provenance import check
-    from .vertex import GCS, SUCCEEDED, record_task, task_detail
+    from .vertex import GCS, record_task, task_detail
     created_by = check(created_by)
     require(bool(pipeline_run) != bool(uris), "files", "Name the files one way: --pipeline-run with --task and --output, or gs:// URIs")
     detail = job = None
@@ -92,7 +92,7 @@ def record(catalog: Catalog, *, client, pipeline_run: str | None = None, task: s
         require(task and output, "files", "A pipeline run's files are named by its --task and that task's --output")
         job = client.get(pipeline_run)
         detail = task_detail(job, pipeline_run, task)
-        require(detail.get("state") in SUCCEEDED, "task_not_succeeded", f"Task {task} is {detail.get('state')}, so it wrote no output to read")
+        require(runs.succeeded("vertex", detail.get("state")), "task_not_succeeded", f"Task {task} is {detail.get('state')}, so it wrote no output to read")
         outputs = detail.get("outputs") or {}
         artifacts = (outputs.get(output) or {}).get("artifacts") or []
         require(artifacts and artifacts[0].get("uri"), "output_not_found",
@@ -223,6 +223,7 @@ def explain(catalog: Catalog, version: dict) -> dict:
     return {
         "reference": version["reference"], "kind": "gcs_files", "uri": version["source_uri"], "objects": found,
         "produced_by": {"pipeline_run": task["evidence"].get("pipeline_run"), "task": task["evidence"].get("task"), "state": task["state"],
+                        "outcome": runs.outcome("vertex", task["state"]),
                         "started": stamp(task["started_at"]) if task["started_at"] else None, "ended": stamp(task["ended_at"]) if task["ended_at"] else None}
         if task else None,
         **({"created_by": created_by} if created_by else {}),
