@@ -29,3 +29,21 @@ updates:
         update-types: [minor, patch]
     commit-message:
       prefix: ci
+
+  # The Dockerfile's base images (python, astral/uv), pinned by digest. Python stays on 3.14: a new minor
+  # changes what odcl runs on and waits for a person.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: python
+        update-types: ['version-update:semver-major', 'version-update:semver-minor']
+    groups:
+      docker:
+        patterns: ['*']
+    commit-message:
+      prefix: deps

@@ -1,0 +1,8 @@
+# Only what the image builds from: pyproject.toml, uv.lock, README.md, src/ and scripts/docker-entrypoint.sh.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!src/
+!scripts/docker-entrypoint.sh
+**/__pycache__
