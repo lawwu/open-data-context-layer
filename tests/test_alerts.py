@@ -10,8 +10,10 @@ from odcl.cli import main
 
 
 @pytest.fixture
-def hook():
-    """A local webhook that keeps what is posted to it, and fails while `failing` is set."""
+def hook(monkeypatch):
+    """A local webhook that keeps what is posted to it, and fails while `failing` is set. It is on this machine, an
+    internal address, so it is allowed the way an admin would allow one."""
+    monkeypatch.setenv("ODCL_ALERT_ALLOW_HOSTS", "127.0.0.1")
     got, state = [], {"failing": False}
 
     class Handler(BaseHTTPRequestHandler):

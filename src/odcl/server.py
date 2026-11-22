@@ -113,6 +113,7 @@ class Refused(Exception):
 
 
 class Handler(BaseHTTPRequestHandler):
+    timeout = 30  # seconds a client may take to send a request: a slow one does not hold a thread for ever
     server_version = "odcl"
     dsn: str | None = None
     actor: str | None = None
@@ -157,6 +158,18 @@ class Handler(BaseHTTPRequestHandler):
             return f"{url.scheme}://{url.netloc}"
         return f"http://{self.headers.get('Host') or '%s:%s' % self.server.server_address[:2]}"
 
+    def _same_origin(self, origin: str | None) -> bool:
+        """Whether a request's Origin is this server's own page. Behind a proxy that rewrites Host, the public address
+        ($ODCL_PUBLIC_URL, else ODCL_OIDC_REDIRECT_URI) is what the browser's Origin is compared with."""
+        if not origin:
+            return False
+        said = urlsplit(origin)
+        public = os.environ.get("ODCL_PUBLIC_URL") or (self.sso.redirect_uri if self.sso else None)
+        if public:
+            ours = urlsplit(public)
+            return (said.scheme, said.netloc) == (ours.scheme, ours.netloc)
+        return said.netloc == (self.headers.get("Host") or "")
+
     def _bearer(self) -> str | None:
         auth = self.headers.get("Authorization")
         if auth is None:
@@ -172,10 +185,8 @@ class Handler(BaseHTTPRequestHandler):
         if token is not None:
             catalog.user = users.authenticate(catalog.db, token)
         elif self.sso and (secret := single_sign_on.read_cookie(self.headers.get("Cookie"), single_sign_on.SESSION_COOKIE)):
-            if self.command not in ("GET", "HEAD"):
-                origin = self.headers.get("Origin")
-                if origin is None or urlsplit(origin).netloc != (self.headers.get("Host") or ""):
-                    raise Refused(403, "forbidden", "A change made with a browser session has to come from this server's own page")
+            if self.command not in ("GET", "HEAD") and not self._same_origin(self.headers.get("Origin")):
+                raise Refused(403, "forbidden", "A change made with a browser session has to come from this server's own page")
             catalog.user = users.session_user(catalog.db, secret)
         if catalog.user:
             catalog.actor = catalog.user["name"]
@@ -217,11 +228,8 @@ class Handler(BaseHTTPRequestHandler):
         _, role, handler, match = chosen
         query = {k: v[-1] for k, v in parse_qs(url.query).items()}
         params = {k: unquote(v) for k, v in match.groupdict().items()}
-        try:
-            body = self._body() if method == "POST" else None
-        except Refused as e:
-            return self._error(e.status, e.code, str(e))
-        self._answer(lambda c: handler(c, params, query, body), role)
+        # the body is read only once the caller is known to be allowed this, so no one is made to wait for one who is not
+        self._answer(lambda c: handler(c, params, query, self._body() if method == "POST" else None), role, write=method == "POST")
 
     def _body(self):
         length = self.headers.get("Content-Length", "")
@@ -235,14 +243,16 @@ class Handler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, UnicodeDecodeError):
             raise Refused(400, "body", "The body is not JSON") from None
 
-    def _answer(self, operation, role: str, created: bool = False, token: str | None = None, trusted: bool = False) -> None:
+    def _answer(self, operation, role: str, created: bool = False, token: str | None = None, trusted: bool = False, write: bool = False) -> None:
         """Open the catalog as the caller, check they may do this, and answer what `operation` returns. `trusted`
-        (the shared lineage token) lets an unsigned request through as the server's own actor."""
+        (the shared lineage token) lets an unsigned request through as the server's own actor. A caller who did not
+        sign in is never taken for a direct connection, which may do anything: every write needs a signed-in user."""
         try:
             token = token if token is not None or trusted else self._bearer()
             with Catalog(self.dsn, actor=self.actor) as catalog:
                 self._identify(catalog, token)
-                needs_user = role != "anyone" and (role != "reader" or self.require_sign_in or self.sso is not None)
+                catalog.anonymous = catalog.user is None and not trusted
+                needs_user = role != "anyone" and (write or role != "reader" or self.require_sign_in or self.sso is not None)
                 if needs_user and catalog.user is None and not trusted:
                     raise Refused(401, "unauthorized", "Sign in" + (" in the browser, or send" if self.sso else ": send") + " an API token as Authorization: Bearer TOKEN")
                 if role != "anyone":
@@ -252,6 +262,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(e.status, e.code, str(e))
         except CatalogError as e:
             return self._error(STATUS.get(e.code, 400), e.code, str(e))
+        except Exception:  # noqa: BLE001 - anything else is this server's fault: say so, and keep the details in its log
+            import traceback
+            self.log_error("%s", traceback.format_exc())
+            return self._error(500, "server", "Something went wrong in the server; its log says what")
         status = 201 if created and isinstance(result, dict) and result.get("change") == "recorded" else 200
         self._json(status, result)
 
@@ -266,7 +280,15 @@ class Handler(BaseHTTPRequestHandler):
         trusted = bool(shared and bearer and hmac.compare_digest(bearer.encode(), shared.encode()))
         if not trusted and bearer is None and (shared or self.require_sign_in or self.sso):
             return self._error(401, "unauthorized", "Send the lineage token, or an importer's API token, as Authorization: Bearer TOKEN")
-        trusted = trusted or bearer is None  # no token is asked for: as before users, the server's own actor records it
+        if not trusted and bearer is None:
+            try:
+                with Catalog(self.dsn, actor=self.actor) as catalog:
+                    someone = users.any_users(catalog.db)
+            except CatalogError as e:
+                return self._error(STATUS.get(e.code, 400), e.code, str(e))
+            if someone:  # once there are users, events are written as one, or with the shared token
+                return self._error(401, "unauthorized", "Send the lineage token (ODCL_LINEAGE_TOKEN), or an importer's API token, as Authorization: Bearer TOKEN")
+        trusted = trusted or bearer is None  # no token is asked for, and no one has signed up: the server's own actor records it
         try:
             event = self._body()
         except Refused as e:
@@ -345,6 +367,10 @@ def make_server(dsn: str | None = None, *, host: str = "127.0.0.1", port: int = 
     settings = single_sign_on.settings() if sso is True else (sso or None)
     if settings:
         import jwt  # noqa: F401 - single sign-on needs the sso extra; say so at start, not at the first sign-in
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            require((settings.redirect_uri or "").startswith("https://"), "sso",
+                    "On an address others reach, single sign-on needs ODCL_OIDC_REDIRECT_URI set to this server's https:// address, "
+                    "so its session cookie is sent only over TLS")
     with Catalog(dsn, actor=actor):
         pass
     handler = type("OdclHandler", (Handler,), {"dsn": dsn, "actor": actor or "openlineage", "accept_lineage": accept_lineage,

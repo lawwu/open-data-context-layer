@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -43,8 +44,8 @@ def _masked(row: dict) -> dict:
     """A subscription as it is shown: a webhook's path, which is often its secret, is left out."""
     address = row["address"]
     if row["channel"] != "email":
-        parts = urllib.parse.urlsplit(address)
-        address = f"{parts.scheme}://{parts.netloc}/…"
+        parts = urllib.parse.urlsplit(address)  # the host only: a path, or a user:password@, is often the secret
+        address = f"{parts.scheme}://{parts.hostname}{f':{parts.port}' if parts.port else ''}/…"
     return {"id": row["id"], "scope": row["scope"], "target": row["target"], "channel": row["channel"], "address": address,
             "min_severity": row["min_severity"], "created_by": row["created_by"]}
 
@@ -65,6 +66,8 @@ def subscribe(catalog: Catalog, *, project: str | None = None, owner: str | None
 
 def _mine(catalog: Catalog) -> tuple[str, list]:
     """Which subscriptions the caller may see and remove: their own, or every one for an admin or a direct connection."""
+    if catalog.user is None and getattr(catalog, "anonymous", False):
+        return "FALSE", []  # someone who did not sign in sees no one's
     if catalog.user is None or catalog.user["role"] == "admin":
         return "TRUE", []
     return "created_by = %s", [catalog.actor]
@@ -121,10 +124,40 @@ def _text(findings: list[dict]) -> str:
     return "\n".join(lines)
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None  # a webhook that redirects is a failed delivery: following it could reach anywhere
+
+
+def _reachable(url: str) -> None:
+    """Refuse a webhook on an internal address (loopback, private, link-local such as a cloud's metadata service), unless
+    its host is in $ODCL_ALERT_ALLOW_HOSTS. Checked when sending, since what a name resolves to can change."""
+    import ipaddress
+    import socket
+    parts = urllib.parse.urlsplit(url)
+    require(parts.scheme in ("https", "http") and parts.hostname, "delivery", "The webhook's address is not a web address")
+    allowed = {h.strip().lower() for h in os.environ.get("ODCL_ALERT_ALLOW_HOSTS", "").split(",") if h.strip()}
+    if parts.hostname.lower() in allowed:
+        return
+    require(parts.scheme == "https", "delivery", "A webhook is sent only over https://")
+    try:
+        found = {info[4][0] for info in socket.getaddrinfo(parts.hostname, parts.port or 443, proto=socket.IPPROTO_TCP)}
+    except OSError:
+        raise CatalogError("delivery", f"Could not find {parts.hostname}") from None
+    inside = [a for a in found if not ipaddress.ip_address(a.split("%")[0]).is_global]
+    require(not inside, "delivery", f"{parts.hostname} is an internal address; an admin can allow it with ODCL_ALERT_ALLOW_HOSTS")
+
+
 def _post(url: str, payload: dict) -> None:
+    _reachable(url)
     request = urllib.request.Request(url, method="POST", data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310 - the scheme is checked when subscribing
-        require(200 <= response.status < 300, "delivery", f"{response.status} from the webhook")
+    try:
+        with urllib.request.build_opener(_NoRedirects).open(request, timeout=10) as response:  # noqa: S310 - checked above
+            require(200 <= response.status < 300, "delivery", f"The webhook answered {response.status}")
+    except urllib.error.HTTPError as e:
+        raise CatalogError("delivery", f"The webhook answered {e.code}") from None
+    except (urllib.error.URLError, OSError):
+        raise CatalogError("delivery", "Could not reach the webhook") from None
 
 
 def _email(address: str, subject: str, text: str) -> None:

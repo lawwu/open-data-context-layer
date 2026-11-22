@@ -71,13 +71,15 @@ what revisions record as the actor.
 - **HTTP:** every write needs a signed-in user whose role allows it. A browser session counts for a write only
   when the request comes from the server's own page (its `Origin`), so another site cannot write in a signed-in
   browser's name. Reads are open unless the server runs with `--require-sign-in` or single sign-on, which close
-  them too. OpenLineage events need an importer's token, or the shared `ODCL_LINEAGE_TOKEN`.
+  them too. OpenLineage events need an importer's token, or the shared `ODCL_LINEAGE_TOKEN`, once the first user is made.
 - **MCP:** `odcl mcp --server https://catalog.example.com` with `$ODCL_TOKEN` reads and writes through the HTTP API,
   so a person's assistant needs no database credentials and its writes are that person's. The write tools are
   offered only with `--allow-writes` and only to an editor or above. `odcl mcp` against the database directly
   works as before, and with `$ODCL_TOKEN` it checks that user's role.
-- **CLI:** with `$ODCL_TOKEN` set, the CLI signs in as that user and their role is checked; without it, it is a
-  trusted direct connection.
+- **CLI:** `odcl --server https://catalog.example.com ...` (or `$ODCL_SERVER`) with `$ODCL_TOKEN` reads and writes
+  through the HTTP API like MCP does, so a person needs no database credentials. Against the database, with
+  `$ODCL_TOKEN` set the CLI signs in as that user and their role is checked; without it, it is a trusted direct
+  connection.
 
 ### Hand edits and importer writes
 
@@ -110,4 +112,8 @@ ODCL_OIDC_ROLE_CLAIM=roles ODCL_OIDC_ROLE_VALUES=Odcl.Editor=editor,Odcl.Admin=a
 
 # a person's assistant, with a token from the Account page
 ODCL_TOKEN=odcl_... odcl mcp --server https://catalog.example.com --allow-writes
+
+# the same person at the command line
+export ODCL_SERVER=https://catalog.example.com ODCL_TOKEN=odcl_...
+odcl use churn-model analytics.gold.accounts.plan --for "a feature"
 ```

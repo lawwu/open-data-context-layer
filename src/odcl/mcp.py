@@ -43,6 +43,11 @@ def _tool(op: Operation) -> dict:
 TOOLS = [_tool(op) for op in OPERATIONS if op.mcp]
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None  # a redirect would carry the token to wherever it points: refuse it, and say so
+
+
 class Remote:
     """The few `Catalog` operations the tools call, answered by an `odcl serve` over its HTTP API."""
 
@@ -61,9 +66,11 @@ class Remote:
                    **({"Content-Type": "application/json"} if body is not None else {})}
         request = urllib.request.Request(url, method=method, headers=headers, data=json.dumps(body).encode() if body is not None else None)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:  # noqa: S310 - the scheme is checked in __init__
+            with urllib.request.build_opener(_NoRedirects).open(request, timeout=self.timeout) as response:  # noqa: S310 - checked in __init__
                 return json.loads(response.read())
         except urllib.error.HTTPError as e:
+            if 300 <= e.code < 400:
+                raise CatalogError("server", f"{self.url} redirected to {e.headers.get('Location')}; give odcl its final address") from None
             try:
                 error = json.loads(e.read())["error"]
             except (ValueError, KeyError, TypeError):

@@ -10,6 +10,25 @@ section says how a release is cut.
 
 - The web page's Account page has an Alerts panel: an editor lists, adds and removes their alert
   subscriptions; an admin sees everyone's.
+- The command line works through an `odcl serve` with `--server URL` or `$ODCL_SERVER`, signed in
+  with `$ODCL_TOKEN`, so people read and annotate without database credentials. Commands that
+  read from where the data is (imports, syncs) still need a database connection, and say so.
+- **Security fixes** from a review of sign-in and the HTTP API:
+  - Single sign-on counts an email only when the provider says it is verified (`email_verified`
+    true, or Entra's `xms_edov`), for `ODCL_OIDC_ADMIN_EMAILS` and for taking over a user an admin
+    made. A missing claim, or the string `"false"`, made an admin before.
+  - Someone who did not sign in is no longer taken for a trusted direct connection: they could
+    revoke anyone's token and read every alert subscription. Every HTTP write needs a signed-in
+    user, and revoking says nothing of whose a token is.
+  - Webhooks: a redirect is a failed delivery, an internal address is refused unless
+    `$ODCL_ALERT_ALLOW_HOSTS` allows it, errors are generic, and listing shows only the host.
+  - OpenLineage events without a token are refused once the first user is made.
+  - `odcl mcp --server` and the CLI do not follow a server's redirects, so a token is not sent on.
+  - The sign-in cookie is signed (`$ODCL_SESSION_SECRET`) and where it returns to is checked again;
+    single sign-on on a public address needs an `https://` `ODCL_OIDC_REDIRECT_URI`.
+  - Behind a proxy, a browser's change is checked against `$ODCL_PUBLIC_URL`, not the `Host` a
+    proxy rewrites. A request the server fails on gets a 500 instead of a dropped connection, and
+    a client has 30 seconds to send one.
 - **One read of what projects are exposed to** (`odcl impact`, `GET /v1/impact`,
   `odcl.impact`): data a project uses that changed, is gone, or is failing a test. The overview,
   project pages and alerts all read it, so alerts now also tell of failing data-quality tests

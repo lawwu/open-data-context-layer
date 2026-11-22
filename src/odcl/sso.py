@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -132,6 +133,23 @@ def _b64(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
 
+# The sign-in cookie is signed, so a cookie planted from a sibling subdomain is refused. The key is
+# $ODCL_SESSION_SECRET, else made when the server starts: a restart in the middle of a sign-in asks for it again.
+_KEY = (os.environ.get("ODCL_SESSION_SECRET") or "").encode() or secrets.token_bytes(32)
+_MAC = 43  # the length of an HMAC-SHA256 in unpadded base64
+
+
+def _sign(value: str) -> str:
+    return value + _b64(hmac.new(_KEY, value.encode(), hashlib.sha256).digest())
+
+
+def _signed(raw: str | None) -> str | None:
+    if not raw or len(raw) <= _MAC:
+        return None
+    value, mac = raw[:-_MAC], raw[-_MAC:]
+    return value if hmac.compare_digest(mac, _b64(hmac.new(_KEY, value.encode(), hashlib.sha256).digest())) else None
+
+
 def redirect_uri(s: Settings, origin: str) -> str:
     return s.redirect_uri or f"{origin}{CALLBACK}"
 
@@ -164,7 +182,7 @@ def start_login(s: Settings, origin: str, next_path: str | None) -> tuple[str, s
              "state": state, "nonce": nonce, "code_challenge": _b64(hashlib.sha256(verifier.encode()).digest()), "code_challenge_method": "S256"}
     endpoint = meta["authorization_endpoint"]
     url = endpoint + ("&" if "?" in endpoint else "?") + urllib.parse.urlencode(query)
-    value = _b64(json.dumps({"state": state, "verifier": verifier, "nonce": nonce, "next": safe_next(next_path)}).encode())
+    value = _sign(_b64(json.dumps({"state": state, "verifier": verifier, "nonce": nonce, "next": safe_next(next_path)}).encode()))
     return url, cookie(LOGIN_COOKIE, value, max_age=LOGIN_MINUTES * 60, path="/auth", secure=origin.startswith("https:"))
 
 
@@ -176,7 +194,7 @@ def finish_login(s: Settings, origin: str, query: dict, cookie_header: str | Non
     """Back from the provider: check its answer against this browser's sign-in (state, PKCE verifier, nonce) and the
     ID token, and say who signed in. Raises CatalogError("sign_in") when the sign-in did not start in this browser."""
     import jwt
-    raw = read_cookie(cookie_header, LOGIN_COOKIE)
+    raw = _signed(read_cookie(cookie_header, LOGIN_COOKIE))
     try:
         started = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))) if raw else None
     except (ValueError, UnicodeDecodeError):
@@ -211,14 +229,15 @@ def finish_login(s: Settings, origin: str, query: dict, cookie_header: str | Non
         raise CatalogError("sso", "The provider's ID token was issued to another client")
     text = lambda v: v if isinstance(v, str) and v else None
     return {"issuer": claims["iss"], "sub": str(claims["sub"]), "email": text(claims.get("email")), "email_verified": claims.get("email_verified"),
-            "username": text(claims.get("preferred_username")), "display_name": text(claims.get("name")), "claims": claims, "next": started.get("next", "/")}
+            "username": text(claims.get("preferred_username")), "display_name": text(claims.get("name")), "claims": claims,
+            "next": safe_next(started.get("next"))}  # checked again: the cookie came back from the browser
 
 
 def first_role(s: Settings, who: dict) -> str:
     """The role someone gets when they first sign in: admin by a verified email in ODCL_OIDC_ADMIN_EMAILS (never one
     the provider says is unverified), else the highest role their ODCL_OIDC_ROLE_CLAIM values map to, else the default."""
-    email = (who.get("email") or "").lower()
-    if email and who.get("email_verified") is not False and email in s.admin_emails:
+    from .users import verified_email
+    if (email := verified_email(who)) and email in s.admin_emails:
         return "admin"
     said = who.get("claims", {}).get(s.role_claim) if s.role_claim else None
     said = {str(v) for v in (said if isinstance(said, list) else [said] if said is not None else [])}
