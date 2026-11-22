@@ -20,8 +20,10 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 docker network create "$net" > /dev/null
 docker run -d --name "$db" --network "$net" -e POSTGRES_PASSWORD=smoke -e POSTGRES_DB=odcl postgres:16-alpine > /dev/null
-for _ in $(seq 60); do docker exec "$db" pg_isready -U postgres -d odcl > /dev/null 2>&1 && break; sleep 1; done
-docker exec "$db" pg_isready -U postgres -d odcl > /dev/null || fail "PostgreSQL did not start"
+# Over TCP: while the image initialises the database, a temporary server answers on the Unix socket only, then stops.
+ready=false
+for _ in $(seq 60); do docker exec "$db" pg_isready -h 127.0.0.1 -U postgres -d odcl > /dev/null 2>&1 && { ready=true; break; }; sleep 1; done
+$ready || fail "PostgreSQL did not start"
 url=postgresql://postgres:smoke@$db/odcl
 
 [ "$("${run[@]}" --rm --entrypoint id "$image" -u)" = 1000 ] || fail "the image does not run as uid 1000"
