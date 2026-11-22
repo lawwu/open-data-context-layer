@@ -17,6 +17,7 @@ from datetime import datetime
 from . import lineage
 from .dbt import clean
 from .gcp import refusal
+from .imports import empty
 from .store import Catalog, CatalogError, require
 
 API = "https://dataform.googleapis.com/v1"
@@ -248,8 +249,13 @@ def import_invocation(catalog: Catalog, name: str, *, client) -> dict:
                             (repository, name)).fetchone()["at"]
         current = newest is None or compiled_at is None or compiled_at >= newest
         definitions = definition_entries(catalog, repository, compiled) if current else None
-        counts = catalog.apply(definitions.entries, merge=True, withdraw={"importer": "dataform", "scope": lambda said, _: said.get("repository") == repository}) \
-            if current else {"added": 0, "changed": 0, "unchanged": 0, "retired": [], "withdrawn": []}
+        if current:
+            with catalog.importing("dataform", scope={"repository": repository}) as imp:
+                imp.extend(definitions.entries)
+                imp.unresolved(*definitions.unresolved)
+            counts = imp.result
+        else:
+            counts = empty()
         timing = invocation.get("invocationTiming") or {}
         parent = _execution(db, {
             "native_key": name, "kind": "invocation", "parent_id": None, "definition_revision": None, "state": invocation.get("state") or "UNKNOWN",
@@ -276,6 +282,5 @@ def import_invocation(catalog: Catalog, name: str, *, client) -> dict:
                                    **({"workspace": compilation["workspace"]} if compilation.get("workspace") else {}),
                                    **({"columns": pinned["columns"]} if pinned else {})})})
             recorded.append({"target": target, "state": action.get("state"), "job_id": job})
-    return {"invocation": name, "compilation_result": compilation_name, "commit": commit, "entries": counts,
-            "definitions": "applied" if current else "kept newer", "actions": recorded,
-            "unresolved": definitions.unresolved if current else [], "untraced": definitions.unreadable if current else []}
+    return {**counts, "invocation": name, "compilation_result": compilation_name, "commit": commit,
+            "definitions": "applied" if current else "kept newer", "actions": recorded, "untraced": definitions.unreadable if current else []}

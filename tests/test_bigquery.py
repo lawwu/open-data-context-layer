@@ -10,6 +10,7 @@ import pytest
 pytest.importorskip("sounding", reason="the BigQuery importer needs the bigquery extra")
 from google.cloud import bigquery as gbq
 
+from odcl.imports import empty
 from odcl import Catalog, CatalogError
 from odcl import bigquery as bq
 from odcl import store
@@ -183,7 +184,7 @@ def test_tables_are_registered_with_nested_columns_and_importing_again_changes_n
         "baseTableReference": ref(FEATURES), "snapshotTime": "2026-09-02T02:00:00Z"}}
     client = Mock(get_table=Mock(return_value=snapshot))
 
-    assert bq.import_tables(catalog, ["data-p.frozen.shift_inputs_b042"], client=client) == {"added": 4, "changed": 0, "unchanged": 0, "retired": [], "withdrawn": []}
+    assert bq.import_tables(catalog, ["data-p.frozen.shift_inputs_b042"], client=client) == empty(added=4, unchanged=0)
     table = catalog.get("data-p.frozen.shift_inputs_b042")
     assert (table["system"], table["type"], table["description"]) == ("bigquery", "snapshot", "Frozen inputs for build 042")
     assert table["source"]["bigquery"]["base_table"] == FEATURES and table["source"]["bigquery"]["snapshot_time"] == "2026-09-02T02:00:00Z"
@@ -193,7 +194,7 @@ def test_tables_are_registered_with_nested_columns_and_importing_again_changes_n
     assert nested["description"] == "Hours at the cutoff" and nested["source"]["bigquery"]["path"] == "Shift.hours_at_cutoff"  # BigQuery's own spelling
 
     snapshot._properties["numRows"] = "999"  # row counts move without the definition changing
-    assert bq.import_tables(catalog, ["data-p.frozen.shift_inputs_b042"], client=client) == {"added": 0, "changed": 0, "unchanged": 4, "retired": [], "withdrawn": []}
+    assert bq.import_tables(catalog, ["data-p.frozen.shift_inputs_b042"], client=client) == empty(added=0, unchanged=4)
 
 
 def test_the_command_line_syncs_and_shows_a_tables_history(database, monkeypatch, capsys):
@@ -256,7 +257,7 @@ def test_a_foreign_key_constraint_becomes_a_reference_and_one_to_a_table_not_rea
               "p.s.customers": table("p.s.customers", ["ID"])}
     client = Mock(get_table=Mock(side_effect=lambda r: tables[f"{r.project}.{r.dataset_id}.{r.table_id}"]))
     result = bq.import_tables(catalog, ["p.s.orders", "p.s.customers"], client=client)  # the referenced table is read after the one that references it
-    assert result["unresolved_references"] == ["column:p.s.orders.store_id -> column:p.s.stores.id"]
+    assert result["unresolved"] == ["column:p.s.orders.store_id -> column:p.s.stores.id"]
     assert [r["key"] for r in catalog.get("p.s.orders.customer_id")["references"]] == ["column:p.s.customers.id"]
     again = bq.import_tables(catalog, ["p.s.orders", "p.s.customers"], client=client)
     assert (again["added"], again["changed"]) == (0, 0)

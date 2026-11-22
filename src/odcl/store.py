@@ -490,6 +490,12 @@ class Catalog:
                     self._new_tables = None
         return counts
 
+    def importing(self, importer: str, *, scope: dict | None = None, tables=None, merge: bool = True):
+        """An import session: register entries, say what could not be linked, and withdraw what the importer said
+        before within `scope` (or of `tables`) and no longer does, all in one transaction. See `odcl.imports`."""
+        from .imports import ImportSession
+        return ImportSession(self, importer, scope=scope, tables=tables, merge=merge)
+
     def use(self, project: str, keys: list[str], purpose: str | None = None) -> dict:
         """Record that a project used these tables or columns, at the revision each has now."""
         purpose = text(purpose, "purpose", 500, optional=True)

@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from odcl.imports import empty
 from odcl import Catalog, CatalogError, builds, dataform
 
 FIXTURES = Path(__file__).parent / "fixtures" / "staffing_trace"
@@ -74,7 +75,7 @@ def catalog(database):
 
 def test_an_invocation_registers_its_definitions_and_records_its_runs(catalog):
     result = dataform.import_invocation(catalog, INVOCATION, client=FakeDataform())
-    assert result["entries"] == {"added": 8, "changed": 0, "unchanged": 0, "retired": [], "withdrawn": []}  # two tables and their six columns
+    assert (result["added"], result["changed"], result["unchanged"], result["retired"]) == (8, 0, 0, [])  # two tables and their six columns
     assert [(a["target"], a["state"], a["job_id"]) for a in result["actions"]] == [(TARGET, "SUCCEEDED", "job-042")]
 
     table = catalog.get(TARGET)
@@ -86,7 +87,7 @@ def test_an_invocation_registers_its_definitions_and_records_its_runs(catalog):
     assert catalog.get(RAW)["description"] == "Shift totals as loaded from timekeeping"  # a declaration is a table too
 
     again = dataform.import_invocation(catalog, INVOCATION, client=FakeDataform())
-    assert again["entries"] == {"added": 0, "changed": 0, "unchanged": 5, "retired": [], "withdrawn": []}  # the raw columns it reads are already there
+    assert (again["added"], again["changed"], again["unchanged"]) == (0, 0, 5)  # the raw columns it reads are already there
     assert again["actions"] == result["actions"]
 
 
@@ -105,7 +106,7 @@ def test_bigquery_and_dataform_describe_the_same_columns_once(catalog):
     hours = catalog.get(f"{TARGET}.hours_at_cutoff")
     assert (hours["dtype"], hours["definition"]) == ("FLOAT", "worked_minutes_asof / 60")  # BigQuery's type, Dataform's definition
     assert sorted(hours["source"]) == ["bigquery", "dataform"]
-    assert bq.import_tables(catalog, [RAW, TARGET], client=client) == {"added": 0, "changed": 0, "unchanged": 8, "retired": [], "withdrawn": []}
+    assert bq.import_tables(catalog, [RAW, TARGET], client=client) == empty(added=0, unchanged=8)
 
 
 def test_a_handoff_binds_the_snapshot_to_its_build_and_the_trace_reads_back(catalog):
@@ -225,7 +226,7 @@ def test_an_older_build_imported_late_does_not_turn_back_the_definitions(catalog
     dataform.import_invocation(catalog, INVOCATION.replace("build-042", "build-049"), client=FakeDataform(invocation=later, compilation=newer))
 
     late = dataform.import_invocation(catalog, INVOCATION, client=FakeDataform())
-    assert late["definitions"] == "kept newer" and late["entries"] == {"added": 0, "changed": 0, "unchanged": 0, "retired": [], "withdrawn": []}
+    assert late["definitions"] == "kept newer" and (late["added"], late["changed"], late["unchanged"]) == (0, 0, 0)
     assert catalog.get(f"{TARGET}.hours_at_cutoff")["definition"] == "worked_minutes_asof / 60.0"
     builds.record_handoff(catalog, INVOCATION, TARGET, snapshot_facts())
     assert "definition" in " ".join(builds.explain_dataset(catalog, SNAPSHOT)["missing"])  # said, not guessed
