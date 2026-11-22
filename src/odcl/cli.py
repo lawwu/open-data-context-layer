@@ -88,7 +88,9 @@ def _serve(args) -> int:
     handler = server.RequestHandlerClass
     print(f"odcl: serving the catalog at http://{host}:{port}/" + ("  (accepting OpenLineage events at /api/v1/lineage)" if args.accept_lineage else "")
           + (f"\nodcl: single sign-on: {handler.sso.issuer}" if handler.sso else "\nodcl: reads need an API token" if handler.require_sign_in
-             else "\nodcl: anyone who reaches this server can read the catalog; writes need an API token"), file=sys.stderr, flush=True)
+             else "\nodcl: anyone who reaches this server can read the catalog; writes need an API token")
+          + ("\nodcl: until the first user is made, anyone can send OpenLineage events; set ODCL_LINEAGE_TOKEN to require one"
+             if args.accept_lineage and not os.environ.get("ODCL_LINEAGE_TOKEN") else ""), file=sys.stderr, flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
