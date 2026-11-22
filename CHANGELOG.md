@@ -8,6 +8,12 @@ section says how a release is cut.
 
 ## Unreleased
 
+- Every run and query job now reports an `outcome` (`running`, `succeeded`, `failed`, `cancelled`, `skipped` or
+  `unknown`) beside its system's own `state`: `odcl runs`, query history, dataset versions and Dataform imports. An
+  agent no longer needs each system's state names to tell whether a run worked. A BigQuery job that ended `DONE` with
+  an error is `failed`, and the web page now marks it ✕ where it showed ✓; skipped and disabled runs no longer show
+  as running. What each state means, and which states a later reading cannot undo, is one table in `odcl/runs.py`
+  instead of a copy in each importer. A Vertex AI task that was `NOT_TRIGGERED` now counts as finished, too.
 - A Docker image for each release, `ghcr.io/lawwu/open-data-context-layer`, for amd64 and arm64: odcl with every
   extra on Debian 13 and Python 3.14, as an unprivileged user, migrating the catalog before it serves. Each one is
   started against PostgreSQL before it is published, and carries build provenance and an SBOM. See the README's

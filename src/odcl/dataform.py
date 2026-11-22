@@ -17,12 +17,12 @@ from datetime import datetime
 from . import lineage
 from .dbt import clean
 from .gcp import refusal
+from . import runs
 from .imports import empty
 from .store import Catalog, CatalogError, require
 
 API = "https://dataform.googleapis.com/v1"
 NAME = re.compile(r"^projects/([^/]+)/locations/([^/]+)/repositories/([^/]+)/workflowInvocations/([^/]+)$")
-TERMINAL = ("SUCCEEDED", "FAILED", "CANCELLED", "SKIPPED", "DISABLED")
 DIALECT = "bigquery"
 
 
@@ -204,7 +204,7 @@ def _execution(db, row: dict) -> int:
         VALUES ('dataform', %(native_key)s, %(kind)s, %(parent_id)s, %(definition_revision)s, %(state)s, %(started_at)s, %(ended_at)s,
                 %(job_project)s, %(job_location)s, %(job_id)s, %(evidence)s)
         ON CONFLICT (system, native_key) DO UPDATE SET
-          state = CASE WHEN executions.state IN {TERMINAL} THEN executions.state ELSE excluded.state END,
+          state = {runs.hold_finished('dataform')},
           started_at = COALESCE(executions.started_at, excluded.started_at),
           ended_at = COALESCE(executions.ended_at, excluded.ended_at),
           job_project = COALESCE(executions.job_project, excluded.job_project),
@@ -277,6 +277,6 @@ def import_invocation(catalog: Catalog, name: str, *, client) -> dict:
                                    "commit": commit, "compilation_result": compilation_name, "repository": repository,
                                    **({"workspace": compilation["workspace"]} if compilation.get("workspace") else {}),
                                    **({"columns": pinned["columns"]} if pinned else {})})})
-            recorded.append({"target": target, "state": action.get("state"), "job_id": job})
+            recorded.append({"target": target, "state": action.get("state"), "outcome": runs.outcome("dataform", action.get("state")), "job_id": job})
     return {**counts, "invocation": name, "compilation_result": compilation_name, "commit": commit,
             "definitions": "applied" if current else "kept newer", "actions": recorded, "untraced": definitions.unreadable if current else []}

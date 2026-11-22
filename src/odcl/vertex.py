@@ -17,6 +17,7 @@ from urllib.parse import quote
 
 from psycopg.types.json import Jsonb
 
+from . import runs
 from .builds import reference_key
 from .gcp import refusal
 from .store import Catalog, CatalogError, require
@@ -24,7 +25,6 @@ from .store import Catalog, CatalogError, require
 JOB = re.compile(r"^projects/([^/]+)/locations/([^/]+)/pipelineJobs/([^/]+)$")
 GCS = re.compile(r"^gs://([^/]+)/(.+)$")
 MAX_HASHED = 512 * 1024 * 1024  # an artifact larger than this is checked by generation only
-SUCCEEDED = ("SUCCEEDED",)
 REQUIRED = ("schema_version", "model", "version", "pipeline_run", "task", "dataset_version", "inputs", "artifact")
 
 
@@ -128,12 +128,11 @@ def _time(value: str | None) -> datetime | None:
 
 
 def _execution(db, row: dict) -> int:
-    return db.execute("""
+    return db.execute(f"""
         INSERT INTO executions (system, native_key, kind, parent_id, state, started_at, ended_at, evidence)
         VALUES ('vertex', %(native_key)s, %(kind)s, %(parent_id)s, %(state)s, %(started_at)s, %(ended_at)s, %(evidence)s)
         ON CONFLICT (system, native_key) DO UPDATE SET
-          state = CASE WHEN executions.state IN ('SUCCEEDED', 'FAILED', 'CANCELLED', 'SKIPPED', 'PIPELINE_STATE_SUCCEEDED',
-                                                 'PIPELINE_STATE_FAILED', 'PIPELINE_STATE_CANCELLED') THEN executions.state ELSE excluded.state END,
+          state = {runs.hold_finished('vertex')},
           started_at = COALESCE(executions.started_at, excluded.started_at), ended_at = COALESCE(executions.ended_at, excluded.ended_at),
           evidence = excluded.evidence || executions.evidence, observed_at = now()
         RETURNING id""", row).fetchone()["id"]
@@ -166,7 +165,7 @@ def import_build(catalog: Catalog, manifest: dict, *, client) -> dict:
     # the run and the task that claims to have produced the model
     job = client.get(manifest["pipeline_run"])
     task = task_detail(job, manifest["pipeline_run"], manifest["task"])
-    require(task.get("state") in SUCCEEDED, "task_not_succeeded", f"Task {manifest['task']} is {task.get('state')}, so it produced no model")
+    require(runs.succeeded("vertex", task.get("state")), "task_not_succeeded", f"Task {manifest['task']} is {task.get('state')}, so it produced no model")
     execution = (task.get("execution") or {}).get("name")
     require(not manifest.get("execution") or manifest["execution"] == execution, "execution_mismatch",
             f"The manifest names execution {manifest.get('execution')}, but task {manifest['task']} ran as {execution}")

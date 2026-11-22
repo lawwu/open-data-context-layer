@@ -14,8 +14,9 @@ import json
 from datetime import datetime
 
 from .manifest import SCHEMA_VERSION
+from .runs import outcome as run_outcome, succeeded as run_succeeded
 from .store import Catalog, CatalogError, require, stamp
-from .vertex import JOB, MAX_HASHED, SUCCEEDED, _time, task_detail
+from .vertex import JOB, MAX_HASHED, _time, task_detail
 
 MODEL_SCHEMA = "system.Model"
 DATASET_SCHEMA = "system.Dataset"
@@ -29,7 +30,7 @@ def runs(catalog: Catalog, client, project: str, since: datetime) -> list[dict]:
     for r in catalog.db.execute("""SELECT t.evidence ->> 'pipeline_run' AS run, b.project_key, b.version FROM model_builds b
                                    JOIN executions t ON t.id = b.producing_execution ORDER BY b.version"""):
         recorded.setdefault(r["run"], []).append(f"{r['project_key'].removeprefix('project:')} {r['version']}")
-    return [{"pipeline_run": j["name"], "display_name": j.get("displayName"), "state": j.get("state"),
+    return [{"pipeline_run": j["name"], "display_name": j.get("displayName"), "state": j.get("state"), "outcome": run_outcome("vertex", j.get("state")),
              "created": stamp(_time(j["createTime"])) if j.get("createTime") else None, "ended": stamp(_time(j["endTime"])) if j.get("endTime") else None,
              "model_versions": recorded.get(j["name"], [])} for j in client.pipeline_jobs(project, since)]
 
@@ -71,7 +72,7 @@ def propose(catalog: Catalog, client, pipeline_run: str, *, trainer: str | None 
     if train:
         manifest["task"], manifest["execution"] = train["taskName"], (train.get("execution") or {}).get("name")
         sources["task"] = "given" if trainer else "the task with a Model output"
-        if train.get("state") not in SUCCEEDED:
+        if not run_succeeded("vertex", train.get("state")):
             review.append(f"Task {train['taskName']} is {train.get('state')}: only a task that succeeded produced a model")
         files = [o for _, a in _artifacts(train) if a.get("uri", "").startswith("gs://") for o in _objects(client, a["uri"])]
         meta = [o for o in files if o["uri"].endswith("/metadata.json") or o["uri"].endswith("metadata.json")]

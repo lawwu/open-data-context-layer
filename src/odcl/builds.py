@@ -12,9 +12,8 @@ from datetime import datetime, timezone
 
 from psycopg.types.json import Jsonb
 
+from . import runs
 from .store import Catalog, require, stamp
-
-ACTION_STATES_THAT_WROTE = ("SUCCEEDED",)
 
 
 def reference_key(reference: str) -> str:
@@ -69,7 +68,7 @@ def record_handoff(catalog: Catalog, invocation: str, target: str, snapshot: dic
     catalog.allow("importer")
     target = target.strip().lower().removeprefix("table:")
     action = _action(catalog, invocation, target)
-    require(action["state"] in ACTION_STATES_THAT_WROTE, "not_succeeded",
+    require(runs.succeeded("dataform", action["state"]), "not_succeeded",
             f"The action for {target} in {invocation} is {action['state']}, so it produced nothing to hand on")
     require(snapshot.get("kind") == "SNAPSHOT", "not_a_snapshot", f"{snapshot.get('table')} is not a table snapshot")
     require((snapshot.get("base_table") or "").lower() == target, "snapshot_of_other_table",
@@ -164,10 +163,13 @@ def explain_dataset(catalog: Catalog, reference: str) -> dict:
     return {
         "reference": version["reference"], "snapshot": version["snapshot_table"], "snapshot_of": target, "snapshot_time": _zulu(version["snapshot_time"]),
         "produced_by": {"dataform_invocation": invocation["native_key"] if invocation else None, "target": target, "state": action["state"],
+                        "outcome": runs.outcome("dataform", action["state"]),
                         "started": stamp(action["started_at"]) if action["started_at"] else None, "ended": stamp(action["ended_at"]) if action["ended_at"] else None,
                         "compilation_result": evidence.get("compilation_result")},
         "executed_as": {"project": job["execution_project"], "location": job["location"], "job_id": job["job_id"], "statement_type": job["statement_type"],
-                        "state": job["state"], "error_reason": job["error_reason"], "billed_bytes": job["billed_bytes"]} if job else None,
+                        "state": job["state"],
+                        "outcome": runs.outcome("bigquery", job["state"], job["error_reason"]), "error_reason": job["error_reason"],
+                        "billed_bytes": job["billed_bytes"]} if job else None,
         "defined_in": {"file": evidence.get("file"), "commit": evidence.get("commit")},
         "definition_revision": version["table_revision"],
         "columns": columns,
