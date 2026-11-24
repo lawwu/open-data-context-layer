@@ -157,3 +157,41 @@ button.link:hover { text-decoration: underline; }
 .subscribe { flex-wrap: wrap; align-items: end; gap: 8px; }
 .subscribe .field { display: inline-flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--ink-2); }
 .subscribe input[hidden] { display: none; }
+
+/* the command palette */
+.search { display: flex; gap: 6px; }
+.palette-open { font-size: 12px; color: var(--ink-2); white-space: nowrap; padding: 5px 8px; }
+dialog.palette { width: min(760px, calc(100vw - 32px)); max-height: 76vh; margin: 12vh auto auto; padding: 0; border: 1px solid var(--ring); border-radius: 12px;
+                 background: var(--surface); color: var(--ink); box-shadow: 0 16px 48px rgba(0, 0, 0, 0.28); overflow: hidden; }
+dialog.palette[open] { display: flex; flex-direction: column; }
+dialog.palette::backdrop { background: rgba(0, 0, 0, 0.35); }
+.palette-top { border-bottom: 1px solid var(--grid); }
+.palette-top input { width: 100%; padding: 14px 16px; border: 0; outline: none; background: transparent; color: var(--ink); font: inherit; font-size: 17px; }
+.palette-body { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); min-height: 0; flex: 1; }
+.palette-body[hidden], .palette-form[hidden], .palette-foot[hidden] { display: none; }
+.palette-list { overflow-y: auto; padding: 4px 6px 8px; border-right: 1px solid var(--grid); min-height: 220px; }
+.palette-group { font-size: 12px; color: var(--muted); padding: 10px 10px 4px; }
+.palette-option { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: 8px; cursor: pointer; }
+.palette-option[aria-selected="true"] { background: color-mix(in srgb, var(--ink) 8%, transparent); }
+.palette-option .kind { flex: none; gap: 0; }
+.palette-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-note { font-size: 12px; white-space: nowrap; }
+.palette-empty { padding: 12px 10px; margin: 0; }
+.palette-pane, .palette-form { padding: 14px 16px; overflow-y: auto; overflow-wrap: anywhere; min-height: 0; }
+.palette-form { flex: 1; }
+.palette-mark { flex: none; width: 10px; text-align: center; }
+.palette-pane p, .palette-form p { margin: 6px 0; }
+.palette-title { font-weight: 600; }
+.palette-description { color: var(--ink-2); }
+.palette-facts { font-size: 13px; }
+.palette-actions { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin: 12px 0 6px; }
+.palette-actions button { padding: 3px 10px; font-size: 13px; }
+.palette-answer { margin: 8px 0 0; padding: 0; list-style: none; font-size: 13.5px; }
+.palette-answer li { padding: 4px 0; border-top: 1px solid var(--grid); }
+.palette-form .field { display: flex; flex-direction: column; gap: 3px; margin: 10px 0; font-size: 13px; color: var(--ink-2); }
+.palette-form input, .palette-form textarea, .palette-form select { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--axis); background: var(--page); color: var(--ink); }
+.palette-form button.primary { background: var(--ink); color: var(--page); border-color: var(--ink); }
+.palette-result { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; max-height: 40vh; overflow: auto; background: var(--page); border-radius: 8px; padding: 10px; user-select: all; }
+.palette-foot { display: flex; flex-wrap: wrap; gap: 4px 16px; padding: 8px 14px; border-top: 1px solid var(--grid); font-size: 12px; }
+kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; border: 1px solid var(--axis); border-radius: 4px; padding: 0 5px; margin-right: 3px; color: var(--ink-2); }
+@media (max-width: 640px) { .palette-body { grid-template-columns: 1fr; } .palette-list { border-right: 0; min-height: 0; max-height: 38vh; } dialog.palette { margin-top: 4vh; max-height: 90vh; } }
