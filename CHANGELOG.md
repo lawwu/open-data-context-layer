@@ -9,6 +9,10 @@ and the entry says so when one does. The catalog's schema is migrated in place b
 
 Run `odcl migrate` after upgrading (migration 0015).
 
+- A command palette on the web page: ⌘K (Ctrl K) or `/`. It searches the catalog as you type, answers who uses the
+  entry selected and what changed without leaving it, and after `>` lists the writes your role allows, each with a
+  form. The commands come from the new `GET /v1/operations`, which describes every route of the HTTP API, the role
+  it needs and the fields it takes.
 - Alert deliveries that keep failing back off: after three failed tries in a row a subscription waits an hour, then
   twice as long after each further failure, up to a day (`odcl alerts send` lists it under `deferred`). Each
   subscription now says whether its messages get through (`delivery`: `ok`, or `failing` with since when, the number

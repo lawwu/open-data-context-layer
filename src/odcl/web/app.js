@@ -484,6 +484,7 @@ async function searchPage(params) {
 
 async function entryPage(key) {
   const entry = await api(`/v1/entries/${enc(key)}`);
+  remember(entry);
   if (entry.kind === "document") return documentPage(entry);
   const isModel = entry.kind === "project" && entry.model_versions.length > 0;
   const parts = [
@@ -1034,6 +1035,254 @@ async function accountPage() {
   render(...parts);
 }
 
+// ---- the command palette --------------------------------------------------------------------------------------
+// ⌘K (Ctrl K), or / outside a field. Typing searches the catalog; the entry selected shows what it is and the
+// questions asked of it most (who uses it, what changed), answered in place. "> " lists commands: the writes the
+// HTTP API offers the signed-in user (GET /v1/operations), each with a form built from the fields it takes, so an
+// operation added to the table (odcl/operations.py) appears here without a line written for it.
+const RECENT = "odcl-recent";
+function remember(entry) {
+  try {
+    const seen = JSON.parse(localStorage.getItem(RECENT) || "[]").filter((r) => r.key !== entry.key);
+    localStorage.setItem(RECENT, JSON.stringify([{ key: entry.key, kind: entry.kind, title: entry.title }, ...seen].slice(0, 8)));
+  } catch { /* storage is off: there is no recent list */ }
+}
+
+const palette = (() => {
+  const PREFIX = { t: "table", c: "column", p: "project", d: "document", g: "term" };
+  const GROUPS = { table: "Tables", column: "Columns", project: "Projects", document: "Documents", term: "Terms", domain: "Domains" };
+  const RANK = ["reader", "editor", "importer", "admin"];
+  const PAGES = [["Overview", "#/"], ["Tables", "#/tables"], ["Projects", "#/projects"], ["Glossary", "#/glossary"], ["Model versions", "#/models"],
+                 ["Runs", "#/runs"], ["Account, tokens and alerts", "#/account"]];
+  const input = h("input", { type: "text", role: "combobox", "aria-expanded": "true", "aria-controls": "palette-list", "aria-autocomplete": "list",
+                             "aria-label": "Find data or a command", placeholder: "Find data, or > for commands", autocomplete: "off", spellcheck: "false" });
+  const list = h("div", { id: "palette-list", role: "listbox", class: "palette-list", "aria-label": "Results" });
+  const pane = h("div", { class: "palette-pane", "aria-live": "polite" });
+  const body = h("div", { class: "palette-body" }, list, pane);
+  const formBox = h("div", { class: "palette-form", hidden: true });
+  const key = (text) => h("kbd", {}, text);
+  const foot = h("div", { class: "palette-foot muted" }, h("span", {}, key("↑"), key("↓"), " move"), h("span", {}, key("↵"), " open"), h("span", {}, key("tab"), " actions"),
+    h("span", {}, key(">"), " commands"), h("span", {}, key("t:"), key("c:"), key("p:"), " one kind"), h("span", {}, key("esc"), " close"));
+  const dialog = h("dialog", { class: "palette", "aria-label": "Command palette" }, h("div", { class: "palette-top" }, input), body, formBox, foot);
+  document.body.append(dialog);
+
+  let items = [], selected = 0, seq = 0, me = null, ops = null, timer = null;
+
+  const sentence = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+  const label = (name) => sentence(name.replace(/_/g, " "));
+  const close = () => { if (dialog.open) dialog.close(); };
+  const go = (hash) => { close(); if (location.hash === hash) route(); else location.hash = hash; };
+
+  // the writes this user may run: a field that takes arbitrary JSON has no form, so its operation is left to the API
+  function commands() {
+    if (!me || !ops) return [];
+    return ops.filter((op) => op.method === "POST" && RANK.indexOf(me.role) >= RANK.indexOf(op.role) && op.params.every((p) => p.kind !== "any"));
+  }
+
+  function parse(text) {
+    if (text.startsWith(">")) return { commands: true, q: text.slice(1).trim() };
+    const m = /^([tcpdg]):\s*(.*)$/i.exec(text);
+    return m ? { kind: PREFIX[m[1].toLowerCase()], q: m[2].trim() } : { q: text.trim() };
+  }
+
+  const entryItem = (r, group) => ({ group, kind: r.kind, text: r.kind === "document" || r.kind === "term" || r.kind === "domain" ? r.title : short(r.key),
+    mono: r.kind === "table" || r.kind === "column", note: r.retired ? "retired" : r.layer || "", run: () => go(entryHref(r.key)), detail: () => entryPane(r) });
+  const commandItem = (op) => ({ group: "Commands", text: sentence(op.help.replace(/ \((admin|importer|editor)\)$/, "")), note: op.role, run: () => openForm(op),
+    detail: () => pane.replaceChildren(h("p", { class: "palette-title" }, sentence(op.help)),
+      h("p", { class: "muted" }, `Needs ${op.role} or above. You are ${me.name}, ${me.role}.`),
+      h("p", { class: "muted" }, "Takes ", op.params.map((p, n) => [n ? ", " : "", p.name.replace(/_/g, " ")]), "."), h("p", { class: "muted mono" }, `${op.method} ${op.path}`)) });
+
+  async function update() {
+    const mine = ++seq;
+    const { q, kind, commands: only } = parse(input.value);
+    const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+    const hit = (text) => words.every((w) => text.toLowerCase().includes(w));
+    const next = [];
+    let problem = null;
+    if (!only && (q || kind)) {
+      let found = [];
+      try { found = await api(`/v1/search?q=${enc(q)}&limit=12${kind ? `&kind=${kind}` : ""}`); } catch (error) { problem = error.message; }
+      if (mine !== seq) return;  // a later keystroke already asked
+      for (const k of [...new Set(found.map((r) => r.kind))]) next.push(...found.filter((r) => r.kind === k).map((r) => entryItem(r, GROUPS[k] || k)));
+    } else if (!only) {
+      let recent = [];
+      try { recent = JSON.parse(localStorage.getItem(RECENT) || "[]"); } catch { /* none */ }
+      next.push(...recent.map((r) => entryItem(r, "Recent")));
+    }
+    if (!only && !kind) next.push(...PAGES.filter(([name]) => hit(name)).map(([name, hash]) => ({ group: "Go to", text: name, run: () => go(hash),
+      detail: () => pane.replaceChildren(h("p", { class: "muted" }, "Opens the page.")) })));
+    if (only || (q && !kind)) next.push(...commands().filter((op) => hit(`${op.help} ${op.name}`)).slice(0, only ? 50 : 4).map(commandItem));
+    items = next;
+    selected = 0;
+    draw(problem || (only && !me ? "Sign in to run commands: open Account, or paste an API token when a page asks." : only ? "No command matches." : "Nothing matches every word."));
+  }
+
+  function draw(empty) {
+    list.replaceChildren();
+    let group = null;
+    items.forEach((item, n) => {
+      if (item.group !== group) list.append(h("div", { class: "palette-group", role: "presentation" }, group = item.group));
+      list.append(h("div", { id: `palette-o-${n}`, role: "option", class: "palette-option", "aria-selected": n === selected ? "true" : "false",
+        onmousemove: () => { if (selected !== n) select(n); }, onclick: () => item.run() },
+        item.kind ? h("span", { class: `kind ${item.kind}`, title: item.kind }) : h("span", { class: "palette-mark muted", "aria-hidden": "true" }, item.group === "Commands" ? "›" : "→"),
+        h("span", { class: `palette-text${item.mono ? " mono" : ""}` }, item.text), item.note ? h("span", { class: "muted palette-note" }, item.note) : null));
+    });
+    if (!items.length) { list.append(h("p", { class: "muted palette-empty" }, empty)); pane.replaceChildren(); input.removeAttribute("aria-activedescendant"); return; }
+    select(selected, false);
+  }
+
+  function select(n, scroll = true) {
+    selected = (n + items.length) % items.length;
+    list.querySelectorAll("[role=option]").forEach((node, i) => node.setAttribute("aria-selected", i === selected ? "true" : "false"));
+    input.setAttribute("aria-activedescendant", `palette-o-${selected}`);
+    if (scroll) document.getElementById(`palette-o-${selected}`)?.scrollIntoView({ block: "nearest" });
+    items[selected].detail();
+  }
+
+  // What the selected entry is, and its questions. The entry itself is read a moment after it is selected, so
+  // holding ↓ through a list does not ask for every row.
+  function entryPane(r) {
+    const mine = selected, at = seq;
+    const still = () => at === seq && mine === selected && dialog.open;
+    const more = h("div", { class: "palette-more" });
+    const lineage = r.kind === "table" || r.kind === "column";
+    const use = lineage && commands().find((op) => op.name === "use");
+    let entry = null;
+    const loaded = new Promise((resolve) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => api(`/v1/entries/${enc(r.key)}`).then((e) => { entry = e; resolve(e); }, () => resolve(null)), 150);
+    });
+    const answer = async (work) => {
+      more.replaceChildren(h("p", { class: "muted" }, "…"));
+      try { const nodes = await work(); if (still()) more.replaceChildren(...[nodes].flat(Infinity).filter(Boolean)); } catch (error) { if (still()) more.replaceChildren(failure(error)); }
+    };
+    const usedBy = () => answer(async () => {
+      const e = await loaded;
+      if (!e) return h("p", { class: "muted" }, "Could not read it.");
+      return e.used_by.length ? h("ul", { class: "palette-answer" }, e.used_by.slice(0, 12).map((u) => h("li", {}, entryLink(u.project), h("span", { class: "muted" }, ` ${u.how}${u.purpose ? ` · ${u.purpose}` : ""}`),
+        u.changed_since ? [" ", changedBadge()] : null)), e.used_by.length > 12 ? h("li", { class: "muted" }, `and ${e.used_by.length - 12} more`) : null)
+        : h("p", { class: "muted" }, "No project depends on this.");
+    });
+    const changed = () => answer(async () => {
+      const d = await api(`/v1/entries/${enc(r.key)}/diff`);
+      return [h("p", { class: "muted" }, d.from ? ["Since ", when(d.from.at), d.severity ? [": the worst change is ", severityBadge(d.severity)] : ": nothing changed"] : "Since it was first registered."),
+        d.changes.length ? h("ul", { class: "palette-answer" }, d.changes.slice(0, 10).map((c) => h("li", {}, severityBadge(c.severity), " ", c.key === r.key ? "" : `${c.key.split(".").pop()}: `, c.change)),
+          d.changes.length > 10 ? h("li", { class: "muted" }, `and ${d.changes.length - 10} more on its page`) : null) : null];
+    });
+    const copy = h("button", { type: "button", onclick: async () => {
+      try { await navigator.clipboard.writeText(short(r.key)); copy.textContent = "Copied"; } catch { copy.textContent = "Could not copy"; }
+    } }, "Copy name");
+    const facts = h("p", { class: "muted palette-facts" });
+    const console_ = h("span", {});
+    pane.replaceChildren(
+      h("div", {}, kindBadge(r.kind), r.retired ? [" ", retiredBadge()] : null),
+      h("p", { class: `palette-title${lineage ? " mono" : ""}` }, lineage ? short(r.key) : r.title),
+      r.description ? h("p", { class: "palette-description" }, r.description) : null, facts,
+      h("div", { class: "palette-actions" },
+        h("a", { href: entryHref(r.key) }, "Open"), lineage ? h("a", { href: `#/lineage/${enc(r.key)}` }, "Explore lineage") : null,
+        lineage ? h("button", { type: "button", onclick: usedBy }, "Used by") : null,
+        r.kind !== "document" ? h("button", { type: "button", onclick: changed }, "What changed") : null, copy,
+        use ? h("button", { type: "button", onclick: () => openForm(use, { keys: [short(r.key)] }) }, "Record a use…") : null, console_),
+      more);
+    loaded.then((e) => {
+      if (!e || !still()) return;
+      if (!r.description && e.description) facts.before(h("p", { class: "palette-description" }, e.description));
+      const said = [e.layer, e.dtype, e.owner ? `owner ${e.owner}` : null, lineage ? `used by ${plural(e.used_by.length, "project")}` : null,
+                    e.kind === "project" ? `uses ${plural(e.uses.length, "entry", "entries")}` : null].filter(Boolean);
+      facts.replaceChildren(said.join(" · "), said.length ? " · " : "", "revised ", when(e.at));
+      const url = e.system === "bigquery" && e.kind === "table" ? gcp.table(e.key) : null;
+      if (url) console_.replaceChildren(consoleLink(url, "BigQuery"));
+    });
+  }
+
+  // A command's form: one control for each field the operation takes, sent as the API takes it.
+  function openForm(op, given = {}) {
+    const here = /^#\/entry\/(.+)$/.exec(location.hash.split("?")[0]);
+    const current = here ? decodeURIComponent(here[1]) : "";
+    const guess = (p) => {
+      if (given[p.name] !== undefined) return given[p.name];
+      if (!current) return p.default;
+      if (p.name === "key" && kindOf(current) !== "project") return short(current);
+      if ((p.name === "name" || p.name === "project") && kindOf(current) === "project" && /project|alerts/.test(op.path)) return short(current);
+      return p.default;
+    };
+    const controls = op.params.map((p) => {
+      const value = guess(p);
+      let control;
+      if (p.choices) control = h("select", {}, p.required ? null : h("option", { value: "" }, "—"), p.choices.map((c) => h("option", { value: c, selected: c === value }, c)));
+      else if (p.kind === "bool") control = h("select", {}, h("option", { value: "" }, "—"), h("option", { value: "true", selected: value === true }, "yes"), h("option", { value: "false" }, "no"));
+      else if (p.kind === "list") { control = h("textarea", { rows: 2, placeholder: "One on each line" }); control.value = [value || []].flat().join("\n"); }
+      else { control = h("input", { type: p.kind === "int" ? "number" : "text", autocomplete: "off" }); control.value = value ?? ""; }
+      if (p.required) control.required = true;
+      return { p, control, row: h("label", { class: "field" }, h("span", {}, label(p.name), p.required ? "" : h("span", { class: "muted" }, " (optional)")), control,
+        p.help ? h("small", { class: "muted" }, sentence(p.help)) : null) };
+    });
+    const said = h("div", { role: "alert" });
+    const send = h("button", { type: "submit", class: "primary" }, `Run as ${me.name}`);
+    const back = () => { formBox.hidden = true; formBox.replaceChildren(); body.hidden = false; foot.hidden = false; input.disabled = false; input.focus(); };
+    const form = h("form", { onsubmit: async (event) => {
+      event.preventDefault();
+      let path = op.path;
+      const sent = {};
+      for (const { p, control } of controls) {
+        const raw = control.value.trim();
+        const value = p.kind === "list" ? raw.split(/[\n,]/).map((x) => x.trim()).filter(Boolean) : p.kind === "int" && raw ? Number(raw) : p.kind === "bool" && raw ? raw === "true" : raw;
+        if (p.in === "path") path = path.replace(`{${p.name}}`, enc(value));
+        else if (raw) sent[p.name] = value;
+      }
+      send.disabled = true;
+      try {
+        const result = await api(path, { method: "POST", body: sent });
+        formBox.replaceChildren(h("p", { class: "palette-title" }, "Done: ", op.help), h("pre", { class: "palette-result" }, JSON.stringify(result, null, 2)),
+          h("div", { class: "palette-actions" }, result?.key ? h("a", { href: entryHref(result.key) }, "Open it") : null, h("button", { type: "button", onclick: back }, "Another command"),
+            h("button", { type: "button", onclick: close }, "Close")));
+        formBox.querySelector("a, button").focus();
+        route();  // the page behind may show what just changed
+      } catch (error) {
+        said.replaceChildren(h("div", { class: "error" }, h("strong", {}, "Not done. "), error.message));
+        said.scrollIntoView({ block: "nearest" });
+        send.disabled = false;
+      }
+    } }, h("p", { class: "palette-title" }, sentence(op.help)), controls.map((c) => c.row), said,
+      h("div", { class: "palette-actions" }, send, h("button", { type: "button", onclick: back }, "Back")));
+    body.hidden = true; foot.hidden = true; input.disabled = true;
+    formBox.replaceChildren(form);
+    formBox.hidden = false;
+    (controls.find((c) => !c.control.value) || controls[0])?.control.focus();
+    formBox.back = back;
+  }
+
+  input.addEventListener("input", update);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); if (items.length) select(selected + (event.key === "ArrowDown" ? 1 : -1)); }
+    else if (event.key === "Enter" && items[selected]) { event.preventDefault(); items[selected].run(); }
+  });
+  dialog.addEventListener("cancel", (event) => { if (!formBox.hidden) { event.preventDefault(); formBox.back(); } });  // esc leaves a form before it leaves the palette
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) close();  // the backdrop
+    else if (event.target.closest("a[href^='#']")) close();
+  });
+
+  async function open(text = "") {
+    if (dialog.open) return;
+    if (!formBox.hidden) formBox.back();
+    input.value = text;
+    dialog.showModal();
+    input.focus();
+    update();
+    try { me = (await api("/v1/me")).user; } catch { me = null; }
+    if (me && !ops) ops = await api("/v1/operations").catch(() => null);
+    if (dialog.open && formBox.hidden) update();
+  }
+
+  document.addEventListener("keydown", (event) => {
+    const typing = event.target instanceof HTMLElement && (event.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName));
+    if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "k") { event.preventDefault(); if (dialog.open) close(); else open(); }
+    else if (event.key === "/" && !typing && !event.metaKey && !event.ctrlKey && !dialog.open) { event.preventDefault(); open(); }
+  });
+  return { open };
+})();
+
 // ---- routing --------------------------------------------------------------------------------------------------
 async function route() {
   const [path, query] = (location.hash.slice(1) || "/").split("?");
@@ -1074,6 +1323,11 @@ document.getElementById("search").addEventListener("submit", (event) => {
   event.preventDefault();
   location.hash = `#/search?q=${enc(document.getElementById("q").value.trim())}`;
 });
+{
+  const opener = document.getElementById("palette-open");
+  opener.textContent = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘K" : "Ctrl K";
+  opener.addEventListener("click", () => palette.open());
+}
 window.addEventListener("hashchange", route);
 showAccount();
 route();

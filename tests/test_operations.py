@@ -111,3 +111,25 @@ def test_a_write_says_what_it_takes_over_http(served):
     assert status == 400 and body["error"]["message"] == "Unknown field colour; send columns"
     status, body = post("/v1/projects/" + urllib.parse.quote("forecast") + "/uses", {"purpose": "x"})
     assert status == 400 and body["error"]["message"] == "Send keys"
+
+
+def test_the_api_describes_itself_as_the_table_does(served):
+    """GET /v1/operations is what the web page's command palette builds its commands and forms from."""
+    _, base = served
+    with urllib.request.urlopen(base + "/v1/operations") as response:
+        described = {d["name"]: d for d in json.loads(response.read())}
+    assert set(described) == {op.name for op in OPERATIONS if op.http}
+    for op in OPERATIONS:
+        if not op.http:
+            continue
+        d = described[op.name]
+        assert f"{d['method']} {d['path']}" == op.http and d["role"] == op.role
+        in_path = set(re.findall(r"\{(\w+)\}", d["path"]))
+        assert {p["name"] for p in d["params"] if p["in"] == "path"} == in_path
+        assert all(p["required"] for p in d["params"] if p["in"] == "path")
+        # every other field is one the route takes under that name
+        assert {p["name"] for p in d["params"] if p["in"] != "path"} == {p.field for p in op.params if p.http is not None and p.name not in in_path}
+    use = described["use"]
+    assert [(p["name"], p["in"], p["kind"], p["required"]) for p in use["params"]] == [
+        ("name", "path", "str", True), ("keys", "body", "list", True), ("purpose", "body", "str", False)]
+    assert described["users_add"]["params"][1]["choices"] == ["reader", "editor", "importer", "admin"]

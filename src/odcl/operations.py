@@ -777,6 +777,7 @@ def _ops() -> list[Operation]:
 
         # users and tokens
         Operation("me", "the signed-in user, or null", lambda c: {"user": c.user}, role="anyone", http="GET /v1/me"),
+        Operation("operations", "every operation the HTTP API offers, and what each takes", lambda c: describe(), http="GET /v1/operations"),
         Operation("whoami", "who this connection writes as", users.whoami, cli="users whoami", remote=lambda p: ("me", {}),
                   text=_whoami_text),
         Operation("users_list", "every user (admin)", users.listing, role="admin", cli="users list", http="GET /v1/users",
@@ -914,6 +915,24 @@ def _check() -> None:
 
 
 _check()
+
+
+def describe() -> list[dict]:
+    """The HTTP API as data: each route, the role it needs and the fields it takes, so a client can offer an
+    operation it was not written for. The web page's command palette builds its commands and their forms from this."""
+    import re
+    out = []
+    for op in OPERATIONS:
+        if not op.http:
+            continue
+        method, path = op.http.split(" ", 1)
+        in_path = set(re.findall(r"\{(\w+)\}", path))
+        out.append({"name": op.name, "help": op.help, "method": method, "path": path, "role": op.role, "params": [
+            {"name": p.name if p.name in in_path else p.field, "in": "path" if p.name in in_path else "query" if method == "GET" else "body",
+             "kind": p.kind, "required": p.required or p.name in in_path, "help": p.help,
+             "choices": list(p.choices) if p.choices else None, "default": p.default}
+            for p in op.params if p.http is not None or p.name in in_path]})
+    return out
 
 
 def operation(name: str) -> Operation:
