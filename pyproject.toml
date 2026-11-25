@@ -1,6 +1,6 @@
 [project]
 name = "open-data-context-layer"
-version = "0.2.0"
+version = "0.3.0"
 description = "A data context layer: what data exists, how it connects, and which projects use it."
 readme = "README.md"
 requires-python = ">=3.14"

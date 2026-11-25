@@ -15,6 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from . import __version__
 from .operations import OPERATIONS, Operation, prepare
 from .store import Catalog, CatalogError
 
@@ -144,7 +145,7 @@ def build(tools: Tools):
         result, failed = tools.result(params.name, params.arguments or {})  # one connection, used from the server's own thread
         return types.CallToolResult(content=[types.TextContent(type="text", text=json.dumps(result, indent=2))], is_error=failed)
 
-    return Server("odcl", version="0.2.0", instructions=INSTRUCTIONS, on_list_tools=list_tools, on_call_tool=call_tool)
+    return Server("odcl", version=__version__, instructions=INSTRUCTIONS, on_list_tools=list_tools, on_call_tool=call_tool)
 
 
 def main(catalog: Catalog | Remote, allow_writes=False) -> int:
