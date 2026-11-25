@@ -46,17 +46,17 @@ Each release is also an image, `ghcr.io/lawwu/open-data-context-layer`, for `lin
 ```sh
 docker run -d --name odcl -p 127.0.0.1:8080:8080 \
   -e ODCL_DATABASE_URL=postgresql://odcl:secret@db.example.com/odcl \
-  ghcr.io/lawwu/open-data-context-layer:0.2
+  ghcr.io/lawwu/open-data-context-layer:0.3
 ```
 
-It runs `odcl migrate` before serving (`-e ODCL_MIGRATE=false` to do that yourself) and listens on every interface inside the container, so `-p` decides who reaches it. Every setting is an environment variable: `ODCL_PUBLIC_URL`, the `ODCL_OIDC_*` ones for single sign-on, `ODCL_SMTP_*` for alerts, `ODCL_LINEAGE_TOKEN`. Options go after the image, replacing the default command: `… open-data-context-layer:0.2 serve --host 0.0.0.0 --require-sign-in`. Any other command runs the same way, or inside the running container:
+It runs `odcl migrate` before serving (`-e ODCL_MIGRATE=false` to do that yourself) and listens on every interface inside the container, so `-p` decides who reaches it. Every setting is an environment variable: `ODCL_PUBLIC_URL`, the `ODCL_OIDC_*` ones for single sign-on, `ODCL_SMTP_*` for alerts, `ODCL_LINEAGE_TOKEN`. Options go after the image, replacing the default command: `… open-data-context-layer:0.3 serve --host 0.0.0.0 --require-sign-in`. Any other command runs the same way, or inside the running container:
 
 ```sh
 docker exec odcl odcl users add alice --role admin
-docker run --rm -e ODCL_DATABASE_URL=… ghcr.io/lawwu/open-data-context-layer:0.2 find orders
+docker run --rm -e ODCL_DATABASE_URL=… ghcr.io/lawwu/open-data-context-layer:0.3 find orders
 ```
 
-Importing from BigQuery or Vertex AI in a container needs Google credentials in it, such as a service account key mounted read-only with `GOOGLE_APPLICATION_CREDENTIALS` pointing at it. The image reports itself healthy once `GET /v1/me` answers, which needs the database. Tags: `0.2.0` for that release exactly, `0.2` for the newest 0.2.x, `latest` for the newest release, and `sha-…` for a commit. Each image carries its build provenance and an SBOM (`docker buildx imagetools inspect ghcr.io/lawwu/open-data-context-layer:0.2.0 --format '{{json .Provenance}}'`).
+Importing from BigQuery or Vertex AI in a container needs Google credentials in it, such as a service account key mounted read-only with `GOOGLE_APPLICATION_CREDENTIALS` pointing at it. The image reports itself healthy once `GET /v1/me` answers, which needs the database. Tags: `0.3.0` for that release exactly, `0.3` for the newest 0.3.x, `latest` for the newest release, and `sha-…` for a commit. Each image carries its build provenance and an SBOM (`docker buildx imagetools inspect ghcr.io/lawwu/open-data-context-layer:0.3.0 --format '{{json .Provenance}}'`).
 
 ## Users and sign-in
 

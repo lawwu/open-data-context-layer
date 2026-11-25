@@ -7,6 +7,8 @@ and the entry says so when one does. The catalog's schema is migrated in place b
 
 ## Unreleased
 
+## 0.3.0 (2026-11-24)
+
 Run `odcl migrate` after upgrading (migration 0015).
 
 - A command palette on the web page: ⌘K (Ctrl K) or `/`. It searches the catalog as you type, answers who uses the

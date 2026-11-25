@@ -71,7 +71,7 @@ uv tool install "open-data-context-layer[mcp] @ git+https://github.com/lawwu/ope
 ```sh
 docker run -d -p 127.0.0.1:8080:8080 \
   -e ODCL_DATABASE_URL=postgresql://odcl:secret@db.example.com/odcl \
-  ghcr.io/lawwu/open-data-context-layer:0.2
+  ghcr.io/lawwu/open-data-context-layer:0.3
 ```
 
 The catalog is one PostgreSQL database, named by `--database-url` or `$ODCL_DATABASE_URL`. Run `odcl migrate` on a new database and after upgrading (the image does it on start). [`CHANGELOG.md`](CHANGELOG.md) says what each release changed.
